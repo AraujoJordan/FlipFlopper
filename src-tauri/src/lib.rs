@@ -216,6 +216,8 @@ pub fn run() {
             get_git_status,
             auto_commit,
             ensure_work_branch,
+            get_git_log,
+            git_rollback,
             // Tools
             get_tool_catalog,
             install_tool,

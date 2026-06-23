@@ -48,6 +48,13 @@ export interface CommitResult {
   message: string;
 }
 
+export interface CommitEntry {
+  sha: string;
+  short_sha: string;
+  message: string;
+  time: string;
+}
+
 export interface ToolInfo {
   id: string;
   name: string;
@@ -146,6 +153,16 @@ export const ensureWorkBranch = (
   projectPath: string,
   branch: string
 ): Promise<string> => invoke("ensure_work_branch", { projectPath, branch });
+
+export const getGitLog = (
+  projectPath: string,
+  limit: number
+): Promise<CommitEntry[]> => invoke("get_git_log", { projectPath, limit });
+
+export const gitRollback = (
+  projectPath: string,
+  sha: string
+): Promise<void> => invoke("git_rollback", { projectPath, sha });
 
 // ────────────────────────────────────────────────
 // Tools

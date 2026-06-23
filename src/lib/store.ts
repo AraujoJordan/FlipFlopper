@@ -91,3 +91,8 @@ export function toggleFileSelection(path: string) {
 export function clearFileSelection() {
   setStore("selectedFiles", []);
 }
+
+export function clearAllTabs() {
+  setStore("tabs", []);
+  setStore("activeTabId", null);
+}
