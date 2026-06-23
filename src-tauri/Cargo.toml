@@ -1,0 +1,42 @@
+[package]
+name = "flipflopper"
+version = "0.1.0"
+description = "Multi-agent CLI cockpit — better UX for AI coding tools"
+authors = ["araujojordan"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "flipflopper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri         = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+
+# PTY — cross-platform terminal multiplexing (Unix + Windows ConPTY)
+portable-pty  = "0.8"
+
+# Session IDs
+uuid          = { version = "1", features = ["v4"] }
+
+# Binary detection for agent/tool discovery
+which         = "6"
+
+# .gitignore-aware directory walker (ripgrep's ignore crate)
+ignore        = "0.4"
+
+# Async for background tasks
+tokio         = { version = "1", features = ["full"] }
+
+# Home directory detection (cross-platform)
+dirs          = "5"
+

@@ -1,0 +1,174 @@
+/**
+ * Typed wrappers around Tauri `invoke` and event channels.
+ * All backend types are mirrored here so the frontend stays fully typed.
+ */
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+// ────────────────────────────────────────────────
+// Shared types (mirror Rust structs)
+// ────────────────────────────────────────────────
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  installed: boolean;
+  version: string | null;
+  binary_path: string | null;
+}
+
+export interface SessionInfo {
+  id: string;
+  agent_id: string;
+  project_path: string;
+}
+
+export interface ProjectInfo {
+  path: string;
+  name: string;
+  has_agents_md: boolean;
+  is_git: boolean;
+}
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+export interface FileStatus {
+  path: string;
+  status: string;
+}
+
+export interface CommitResult {
+  sha: string;
+  message: string;
+}
+
+export interface ToolInfo {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  category: string;
+  installed: boolean;
+  version: string | null;
+  install_cmd: string | null;
+}
+
+export interface HandoffResult {
+  success: boolean;
+  context_entry: string | null;
+  error: string | null;
+}
+
+// ────────────────────────────────────────────────
+// PTY
+// ────────────────────────────────────────────────
+
+export const spawnAgent = (
+  agentId: string,
+  projectPath: string
+): Promise<string> => invoke("spawn_agent", { agentId, projectPath });
+
+export const ptyInput = (
+  sessionId: string,
+  data: string
+): Promise<void> => invoke("pty_input", { sessionId, data });
+
+export const ptyResize = (
+  sessionId: string,
+  cols: number,
+  rows: number
+): Promise<void> => invoke("pty_resize", { sessionId, cols, rows });
+
+export const ptyKill = (sessionId: string): Promise<void> =>
+  invoke("pty_kill", { sessionId });
+
+export const listSessions = (): Promise<SessionInfo[]> =>
+  invoke("list_sessions");
+
+/** Subscribe to PTY output for a given session. Returns unsubscribe fn. */
+export const onPtyOutput = (
+  sessionId: string,
+  cb: (data: string) => void
+): Promise<UnlistenFn> => listen<string>(`pty://${sessionId}`, (e) => cb(e.payload));
+
+/** Subscribe to PTY exit for a given session. */
+export const onPtyExit = (
+  sessionId: string,
+  cb: () => void
+): Promise<UnlistenFn> => listen(`pty-exit://${sessionId}`, () => cb());
+
+// ────────────────────────────────────────────────
+// Agents
+// ────────────────────────────────────────────────
+
+export const getAgents = (): Promise<AgentInfo[]> => invoke("get_agents");
+
+// ────────────────────────────────────────────────
+// Project
+// ────────────────────────────────────────────────
+
+export const openProject = (path: string): Promise<ProjectInfo> =>
+  invoke("open_project", { path });
+
+export const getRecentProjects = (): Promise<ProjectInfo[]> =>
+  invoke("get_recent_projects");
+
+export const getFileTree = (path: string): Promise<FileEntry[]> =>
+  invoke("get_file_tree", { path });
+
+export const injectFileRefs = (
+  sessionId: string,
+  paths: string[]
+): Promise<void> => invoke("inject_file_refs", { sessionId, paths });
+
+export const pickProjectFolder = (): Promise<string | null> =>
+  invoke("pick_project_folder");
+
+// ────────────────────────────────────────────────
+// Git
+// ────────────────────────────────────────────────
+
+export const getGitStatus = (projectPath: string): Promise<FileStatus[]> =>
+  invoke("get_git_status", { projectPath });
+
+export const autoCommit = (
+  projectPath: string,
+  message: string
+): Promise<CommitResult> => invoke("auto_commit", { projectPath, message });
+
+export const ensureWorkBranch = (
+  projectPath: string,
+  branch: string
+): Promise<string> => invoke("ensure_work_branch", { projectPath, branch });
+
+// ────────────────────────────────────────────────
+// Tools
+// ────────────────────────────────────────────────
+
+export const getToolCatalog = (): Promise<ToolInfo[]> =>
+  invoke("get_tool_catalog");
+
+export const installTool = (
+  toolId: string,
+  projectPath: string
+): Promise<string> => invoke("install_tool", { toolId, projectPath });
+
+// ────────────────────────────────────────────────
+// Handoff
+// ────────────────────────────────────────────────
+
+export const handoffAgent = (
+  projectPath: string,
+  fromAgent: string,
+  toAgent: string
+): Promise<HandoffResult> =>
+  invoke("handoff_agent", { projectPath, fromAgent, toAgent });
+
+export const cliContinuesAvailable = (): Promise<boolean> =>
+  invoke("cli_continues_available");

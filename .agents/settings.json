@@ -1,0 +1,7 @@
+{
+  "defaultAgent": "claude",
+  "autoCommit": false,
+  "autoCommitBranch": "ai-work",
+  "previewPort": null,
+  "tools": ["cli-continues"]
+}
