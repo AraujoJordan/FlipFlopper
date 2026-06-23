@@ -119,6 +119,16 @@ fn ensure_work_branch(project_path: String, branch: String) -> Result<String, St
     git::ensure_work_branch(&project_path, &branch)
 }
 
+#[tauri::command]
+fn get_git_log(project_path: String, limit: u32) -> Result<Vec<CommitEntry>, String> {
+    git::get_log(&project_path, limit)
+}
+
+#[tauri::command]
+fn git_rollback(project_path: String, sha: String) -> Result<(), String> {
+    git::rollback(&project_path, &sha)
+}
+
 // ════════════════════════════════════════════════
 // Tools commands
 // ════════════════════════════════════════════════
