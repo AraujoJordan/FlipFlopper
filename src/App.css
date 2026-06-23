@@ -82,7 +82,20 @@ html, body, #root {
   flex-shrink: 0;
 }
 
-.sidebar__logo { font-weight: 600; font-size: 14px; color: var(--fg-0); }
+.sidebar__logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--fg-0);
+}
+.sidebar__logo-img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
 
 .btn-open {
   background: var(--accent);
@@ -294,7 +307,11 @@ html, body, #root {
   padding: 40px;
   text-align: center;
 }
-.welcome__logo { font-size: 56px; }
+.welcome__logo {
+  width: 88px;
+  height: 88px;
+  object-fit: contain;
+}
 .welcome__title { font-size: 28px; font-weight: 700; color: var(--fg-0); }
 .welcome__sub { color: var(--fg-2); font-size: 14px; max-width: 400px; }
 .welcome__steps {
@@ -712,10 +729,14 @@ html, body, #root {
   padding: 5px var(--pc-px) 7px;
   flex-shrink: 0;
 }
-.prompt-footer-meta {
+.prompt-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 10px;
   color: var(--fg-2);
   font-family: var(--font-mono);
+  min-width: 0;
 }
 .prompt-char-count { opacity: 0.7; }
 
@@ -725,15 +746,39 @@ html, body, #root {
   gap: 6px;
 }
 
+.prompt-btn-attach,
 .prompt-btn-clear {
-  background: none;
   border: 1px solid var(--bg-3);
   border-radius: var(--radius);
-  color: var(--fg-2);
   font-size: 11px;
   padding: 3px 9px;
   cursor: pointer;
   transition: border-color 0.1s, color 0.1s;
+}
+
+.prompt-btn-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(88, 166, 255, 0.1);
+  border-color: rgba(88, 166, 255, 0.45);
+  color: var(--accent);
+  font-weight: 600;
+}
+.prompt-btn-attach:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.16);
+}
+.prompt-btn-attach:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.prompt-btn-icon {
+  line-height: 1;
+  font-size: 12px;
+}
+
+.prompt-btn-clear {
+  background: none;
+  color: var(--fg-2);
 }
 .prompt-btn-clear:hover { border-color: var(--red); color: var(--red); }
 

@@ -172,27 +172,6 @@ const PreviewPane: Component = () => {
             </Show>
           </div>
 
-          {/* Manual commit */}
-          <div class="commit-panel">
-            <textarea
-              class="commit-msg"
-              value={commitMsg()}
-              onInput={(e) => setCommitMsg(e.currentTarget.value)}
-              placeholder="Commit message…"
-              rows={3}
-            />
-            <button
-              class="btn-commit"
-              onClick={doCommit}
-              disabled={committing() || status().length === 0}
-            >
-              {committing() ? "Committing…" : "Commit to ai-work"}
-            </button>
-            <Show when={lastCommit()}>
-              <div class="commit-result">✅ {lastCommit()}</div>
-            </Show>
-          </div>
-
           {/* Checkpoint history */}
           <div class="checkpoint-section">
             <div class="checkpoint-section__header">Checkpoints</div>
@@ -219,6 +198,27 @@ const PreviewPane: Component = () => {
                   )}
                 </For>
               </ul>
+            </Show>
+          </div>
+
+          {/* Manual commit */}
+          <div class="commit-panel">
+            <textarea
+              class="commit-msg"
+              value={commitMsg()}
+              onInput={(e) => setCommitMsg(e.currentTarget.value)}
+              placeholder="Commit message…"
+              rows={3}
+            />
+            <button
+              class="btn-commit"
+              onClick={doCommit}
+              disabled={committing() || status().length === 0}
+            >
+              {committing() ? "Committing…" : "Commit to ai-work"}
+            </button>
+            <Show when={lastCommit()}>
+              <div class="commit-result">✅ {lastCommit()}</div>
             </Show>
           </div>
         </Show>

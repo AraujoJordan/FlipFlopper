@@ -8,7 +8,13 @@ import {
   Show,
 } from "solid-js";
 import { store } from "../lib/store";
-import { autoCommit, ensureWorkBranch, getFileTree, ptyInput } from "../lib/ipc";
+import {
+  autoCommit,
+  ensureWorkBranch,
+  getFileTree,
+  pickPromptFile,
+  ptyInput,
+} from "../lib/ipc";
 
 // ── Per-agent slash-command registry ─────────────────────────────────────────
 
@@ -240,6 +246,51 @@ const PromptComposer: Component = () => {
     });
   }
 
+  function pathToPromptRef(path: string): string {
+    const projectPath = store.currentProject?.path;
+    if (!projectPath) return path;
+
+    const prefix = projectPath.endsWith("/") ? projectPath : `${projectPath}/`;
+    if (path.startsWith(prefix)) {
+      return `@${path.slice(prefix.length)}`;
+    }
+
+    return path;
+  }
+
+  function insertAtCursor(insert: string) {
+    const cursorStart = textareaRef.selectionStart ?? text().length;
+    const cursorEnd = textareaRef.selectionEnd ?? cursorStart;
+    const val = text();
+    const needsLeadingSpace = cursorStart > 0 && !/\s/.test(val[cursorStart - 1]);
+    const needsTrailingSpace =
+      cursorEnd < val.length && !/\s/.test(val[cursorEnd]) ? " " : "";
+    const normalizedInsert = `${needsLeadingSpace ? " " : ""}${insert}${needsTrailingSpace}`;
+    const newVal = val.slice(0, cursorStart) + normalizedInsert + val.slice(cursorEnd);
+    const newCursor = cursorStart + normalizedInsert.length;
+
+    setText(newVal);
+    setAc(null);
+    requestAnimationFrame(() => {
+      textareaRef.setSelectionRange(newCursor, newCursor);
+      textareaRef.focus();
+      autoResize();
+      checkTrigger(newVal, newCursor);
+    });
+  }
+
+  async function attachPickedPath(imageOnly = false) {
+    if (!hasSession()) return;
+
+    try {
+      const path = await pickPromptFile(store.currentProject?.path ?? null, imageOnly);
+      if (!path) return;
+      insertAtCursor(pathToPromptRef(path));
+    } catch (e) {
+      console.error("PromptComposer attach failed:", e);
+    }
+  }
+
   // ── Send ──────────────────────────────────────────────────────────────────
 
   function checkpointMessage(prompt: string): string {
@@ -428,11 +479,29 @@ const PromptComposer: Component = () => {
 
       {/* Toolbar */}
       <div class="prompt-composer__footer">
-        <span class="prompt-footer-meta">
+        <div class="prompt-footer-left">
+          <button
+            class="prompt-btn-attach"
+            disabled={!hasSession() || sending()}
+            onClick={() => attachPickedPath()}
+            title="Attach file"
+          >
+            <span class="prompt-btn-icon" aria-hidden="true">📎</span>
+            <span>Attach</span>
+          </button>
+          <button
+            class="prompt-btn-attach"
+            disabled={!hasSession() || sending()}
+            onClick={() => attachPickedPath(true)}
+            title="Attach image"
+          >
+            <span class="prompt-btn-icon" aria-hidden="true">🖼️</span>
+            <span>Image</span>
+          </button>
           <Show when={text().length > 0}>
             <span class="prompt-char-count">{text().length} chars</span>
           </Show>
-        </span>
+        </div>
 
         <div class="prompt-footer-actions">
           <Show when={text().length > 0 && !sending()}>

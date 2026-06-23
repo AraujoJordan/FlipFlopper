@@ -188,6 +188,38 @@ async fn pick_project_folder(app: tauri::AppHandle) -> Option<String> {
         })
 }
 
+#[tauri::command]
+async fn pick_prompt_file(
+    app: tauri::AppHandle,
+    project_path: Option<String>,
+    image_only: Option<bool>,
+) -> Option<String> {
+    use tauri_plugin_dialog::FilePath;
+
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title(if image_only.unwrap_or(false) {
+            "Attach image"
+        } else {
+            "Attach file"
+        });
+    if let Some(path) = project_path {
+        dialog = dialog.set_directory(path);
+    }
+    if image_only.unwrap_or(false) {
+        dialog = dialog.add_filter(
+            "Images",
+            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg"],
+        );
+    }
+
+    dialog.blocking_pick_file().map(|fp| match fp {
+        FilePath::Path(p) => p.to_string_lossy().into_owned(),
+        FilePath::Url(u) => u.path().to_string(),
+    })
+}
+
 // ════════════════════════════════════════════════
 // Tauri entry point
 // ════════════════════════════════════════════════
@@ -226,6 +258,7 @@ pub fn run() {
             cli_continues_available,
             // Dialog
             pick_project_folder,
+            pick_prompt_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlipFlopper");

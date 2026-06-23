@@ -4,6 +4,7 @@
 import { Component, createResource, For, Show } from "solid-js";
 import { store, setStore } from "../lib/store";
 import { openProject, getRecentProjects, pickProjectFolder, getAgents, getToolCatalog } from "../lib/ipc";
+import flipflopperLogo from "../assets/flipflopperLogo.png";
 
 const Sidebar: Component = () => {
   async function browseProject() {
@@ -40,7 +41,10 @@ const Sidebar: Component = () => {
     <aside class="sidebar">
       {/* Header / action buttons */}
       <div class="sidebar__header">
-        <span class="sidebar__logo">🩴 FlipFlopper</span>
+        <span class="sidebar__logo">
+          <img class="sidebar__logo-img" src={flipflopperLogo} alt="" />
+          <span>FlipFlopper</span>
+        </span>
         <button class="btn-open" onClick={browseProject} title="Open project folder">
           Open
         </button>

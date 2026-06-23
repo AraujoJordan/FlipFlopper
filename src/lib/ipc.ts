@@ -137,6 +137,11 @@ export const injectFileRefs = (
 export const pickProjectFolder = (): Promise<string | null> =>
   invoke("pick_project_folder");
 
+export const pickPromptFile = (
+  projectPath: string | null,
+  imageOnly = false
+): Promise<string | null> => invoke("pick_prompt_file", { projectPath, imageOnly });
+
 // ────────────────────────────────────────────────
 // Git
 // ────────────────────────────────────────────────

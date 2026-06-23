@@ -67,6 +67,7 @@ const TerminalPane: Component<Props> = (props) => {
 
     // Fit immediately and emit initial size to the backend
     fitAndResize();
+    if (props.active) activateTerminal();
 
     // Stream PTY output into xterm
     unlisten = await onPtyOutput(props.sessionId, (data) => {
@@ -94,9 +95,16 @@ const TerminalPane: Component<Props> = (props) => {
   createEffect(() => {
     if (props.active && fitAddon) {
       // Small delay so the CSS display:none has been lifted
-      setTimeout(() => fitAndResize(), 0);
+      setTimeout(() => {
+        fitAndResize();
+        activateTerminal();
+      }, 0);
     }
   });
+
+  function activateTerminal() {
+    setTimeout(() => terminal?.focus(), 0);
+  }
 
   function fitAndResize() {
     try {

@@ -1,7 +1,15 @@
-import { Component, For, onMount, Show } from "solid-js";
+import { Component, createEffect, createSignal, For, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { store, setStore } from "./lib/store";
-import { getAgents, getRecentProjects, getToolCatalog } from "./lib/ipc";
+import { addTab, store, setStore } from "./lib/store";
+import {
+  getAgents,
+  getRecentProjects,
+  getToolCatalog,
+  openProject,
+  ptyInput,
+  spawnAgent,
+} from "./lib/ipc";
+import type { Tab } from "./lib/store";
 
 import Sidebar from "./components/Sidebar";
 import AgentBar from "./components/AgentBar";
@@ -10,10 +18,52 @@ import FileTree from "./components/FileTree";
 import PreviewPane from "./components/PreviewPane";
 import ToolInstaller from "./components/ToolInstaller";
 import PromptComposer from "./components/PromptComposer";
+import flipflopperLogo from "./assets/flipflopperLogo.png";
 
 import "./App.css";
 
+const WORKSPACE_STORAGE_KEY = "flipflopper:last-workspace";
+
+interface PersistedTab {
+  agentId: string;
+}
+
+interface PersistedWorkspace {
+  projectPath: string | null;
+  tabs: PersistedTab[];
+  activeIndex: number;
+}
+
+function readPersistedWorkspace(): PersistedWorkspace | null {
+  try {
+    const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedWorkspace(workspace: PersistedWorkspace) {
+  try {
+    localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(workspace));
+  } catch {
+    // Ignore private-mode or storage quota failures.
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function resumeLatestSession(sessionId: string): Promise<void> {
+  await ptyInput(sessionId, "/resume\r");
+  await delay(500);
+  await ptyInput(sessionId, "\r");
+}
+
 const App: Component = () => {
+  const [restoreComplete, setRestoreComplete] = createSignal(false);
+
   onMount(async () => {
     // Boot: load agents, recents, tool catalog
     const [agents, recents, tools] = await Promise.all([
@@ -24,6 +74,75 @@ const App: Component = () => {
     setStore("agents", agents);
     setStore("recentProjects", recents);
     setStore("tools", tools);
+
+    const persisted = readPersistedWorkspace();
+    const lastProjectPath = persisted?.projectPath ?? recents[0]?.path;
+
+    if (lastProjectPath) {
+      try {
+        const project = await openProject(lastProjectPath);
+        setStore("currentProject", project);
+        setStore("fileTreePath", project.path);
+        setStore("sidebarView", "files");
+
+        const tabsToRestore = persisted?.tabs ?? [];
+        const restoredTabs: Tab[] = [];
+
+        for (const savedTab of tabsToRestore) {
+          const agent = agents.find((a) => a.id === savedTab.agentId);
+          if (!agent?.installed) continue;
+
+          try {
+            const sessionId = await spawnAgent(savedTab.agentId, project.path);
+            restoredTabs.push({
+              sessionId,
+              label: agent.name,
+              agentId: agent.id,
+              agentIcon: agent.icon,
+            });
+          } catch (e) {
+            console.error(`Failed to restore ${savedTab.agentId} tab:`, e);
+          }
+        }
+
+        for (const tab of restoredTabs) {
+          addTab(tab);
+        }
+
+        if (restoredTabs.length > 0) {
+          const activeIndex = Math.min(
+            Math.max(persisted?.activeIndex ?? restoredTabs.length - 1, 0),
+            restoredTabs.length - 1
+          );
+          setStore("activeTabId", restoredTabs[activeIndex].sessionId);
+
+          await delay(900);
+          await Promise.allSettled(
+            restoredTabs.map((tab) => resumeLatestSession(tab.sessionId))
+          );
+        }
+      } catch (e) {
+        console.error("Failed to restore last workspace:", e);
+      }
+    }
+
+    setRestoreComplete(true);
+  });
+
+  createEffect(() => {
+    if (!restoreComplete()) return;
+
+    const tabs = store.tabs.filter((tab) => !tab.isInstaller);
+    const activeIndex = Math.max(
+      0,
+      tabs.findIndex((tab) => tab.sessionId === store.activeTabId)
+    );
+
+    writePersistedWorkspace({
+      projectPath: store.currentProject?.path ?? null,
+      tabs: tabs.map((tab) => ({ agentId: tab.agentId })),
+      activeIndex,
+    });
   });
 
   const hasTerminals = () => store.tabs.length > 0;
@@ -125,7 +244,7 @@ const App: Component = () => {
 
 const Welcome: Component = () => (
   <div class="welcome">
-    <div class="welcome__logo">🩴</div>
+    <img class="welcome__logo" src={flipflopperLogo} alt="" />
     <h1 class="welcome__title">FlipFlopper</h1>
     <p class="welcome__sub">Multi-agent CLI cockpit — better UX for AI coding tools</p>
     <div class="welcome__steps">
