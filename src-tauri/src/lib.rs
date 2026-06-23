@@ -9,7 +9,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use agents::AgentInfo;
-use git::{CommitResult, FileStatus};
+use git::{CommitEntry, CommitResult, FileStatus};
 use handoff::HandoffResult;
 use project::{FileEntry, ProjectInfo};
 use pty::{PtyManager, SessionInfo};

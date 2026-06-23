@@ -36,6 +36,7 @@ fn git(project_path: &str, args: &[&str]) -> Result<String, String> {
 }
 
 /// True if `project_path` is inside a git repo.
+#[allow(dead_code)]
 pub fn is_git_repo(project_path: &str) -> bool {
     Path::new(project_path).join(".git").exists()
         || Command::new("git")
@@ -104,6 +105,63 @@ pub fn ensure_work_branch(project_path: &str, branch_name: &str) -> Result<Strin
 }
 
 /// Return a simple diff summary for the working tree.
+#[allow(dead_code)]
 pub fn diff_stat(project_path: &str) -> Result<String, String> {
     git(project_path, &["diff", "--stat", "HEAD"])
+}
+
+// ────────────────────────────────────────────────
+// Checkpoint log + rollback
+// ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitEntry {
+    pub sha: String,
+    pub short_sha: String,
+    pub message: String,
+    pub time: String,
+}
+
+/// Return the last `limit` commits, newest first. Returns empty vec when the
+/// repo has no commits yet (swallows the "does not have any commits" error).
+pub fn get_log(project_path: &str, limit: u32) -> Result<Vec<CommitEntry>, String> {
+    let fmt = "%H\x1f%h\x1f%s\x1f%cr";
+    let n = limit.to_string();
+    let out = match git(
+        project_path,
+        &["log", "-n", &n, &format!("--pretty=format:{fmt}")],
+    ) {
+        Ok(o) => o,
+        Err(e) if e.contains("does not have any commits") => return Ok(vec![]),
+        Err(e) => return Err(e),
+    };
+    Ok(out
+        .lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(4, '\x1f').collect();
+            if parts.len() == 4 {
+                Some(CommitEntry {
+                    sha: parts[0].to_string(),
+                    short_sha: parts[1].to_string(),
+                    message: parts[2].to_string(),
+                    time: parts[3].to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+/// Hard-reset the current branch to `sha`. Refuses on main/master.
+pub fn rollback(project_path: &str, sha: &str) -> Result<(), String> {
+    let branch = git(project_path, &["branch", "--show-current"])?;
+    if branch == "main" || branch == "master" {
+        return Err(
+            "Rollback refused: on main/master. Checkout a work branch first.".to_string(),
+        );
+    }
+    git(project_path, &["reset", "--hard", sha])?;
+    Ok(())
 }

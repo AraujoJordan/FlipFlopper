@@ -13,7 +13,6 @@ pub struct AgentDef {
     pub description: &'static str,
     /// Args passed when launching (e.g. interactive mode flags)
     pub launch_args: &'static [&'static str],
-    pub supports_agents_md: bool,
     pub icon: &'static str,
 }
 
@@ -38,7 +37,6 @@ pub static AGENTS: &[AgentDef] = &[
         aliases: &[],
         description: "Anthropic's official Claude CLI coding agent",
         launch_args: &[],
-        supports_agents_md: true,
         icon: "🤖",
     },
     AgentDef {
@@ -48,7 +46,6 @@ pub static AGENTS: &[AgentDef] = &[
         aliases: &[],
         description: "OpenAI Codex CLI agent",
         launch_args: &[],
-        supports_agents_md: true,
         icon: "✨",
     },
     AgentDef {
@@ -58,7 +55,6 @@ pub static AGENTS: &[AgentDef] = &[
         aliases: &["agy"],
         description: "Google Gemini CLI agent",
         launch_args: &[],
-        supports_agents_md: true,
         icon: "💫",
     },
     AgentDef {
@@ -68,7 +64,6 @@ pub static AGENTS: &[AgentDef] = &[
         aliases: &[],
         description: "AI pair-programming in your terminal",
         launch_args: &[],
-        supports_agents_md: true,
         icon: "🛠️",
     },
     AgentDef {
@@ -78,7 +73,6 @@ pub static AGENTS: &[AgentDef] = &[
         aliases: &[],
         description: "Amp CLI coding agent",
         launch_args: &[],
-        supports_agents_md: true,
         icon: "⚡",
     },
 ];

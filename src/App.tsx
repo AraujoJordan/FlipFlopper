@@ -9,6 +9,7 @@ import TerminalPane from "./components/TerminalPane";
 import FileTree from "./components/FileTree";
 import PreviewPane from "./components/PreviewPane";
 import ToolInstaller from "./components/ToolInstaller";
+import PromptComposer from "./components/PromptComposer";
 
 import "./App.css";
 
@@ -63,6 +64,8 @@ const App: Component = () => {
             </For>
           </Show>
         </div>
+
+        <PromptComposer />
       </main>
 
       {/* ── Right panel ── */}
@@ -122,7 +125,7 @@ const App: Component = () => {
 
 const Welcome: Component = () => (
   <div class="welcome">
-    <div class="welcome__logo">🐟</div>
+    <div class="welcome__logo">🩴</div>
     <h1 class="welcome__title">FlipFlopper</h1>
     <p class="welcome__sub">Multi-agent CLI cockpit — better UX for AI coding tools</p>
     <div class="welcome__steps">

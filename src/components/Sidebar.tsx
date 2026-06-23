@@ -40,7 +40,7 @@ const Sidebar: Component = () => {
     <aside class="sidebar">
       {/* Header / action buttons */}
       <div class="sidebar__header">
-        <span class="sidebar__logo">🐟 FlipFlopper</span>
+        <span class="sidebar__logo">🩴 FlipFlopper</span>
         <button class="btn-open" onClick={browseProject} title="Open project folder">
           Open
         </button>

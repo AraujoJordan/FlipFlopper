@@ -59,13 +59,15 @@ const AgentBar: Component = () => {
             >
               <span class="tab-icon">{tab.agentIcon}</span>
               <span class="tab-label">{tab.label}</span>
-              <button
+              <span
                 class="tab-close"
-                onClick={(e) => closeTab(tab.sessionId, e)}
+                onClick={(e) => closeTab(tab.sessionId, e as MouseEvent)}
                 title="Close tab"
+                role="button"
+                aria-label="Close tab"
               >
                 ×
-              </button>
+              </span>
             </button>
           )}
         </For>

@@ -564,6 +564,277 @@ html, body, #root {
 .toolbar-btn:hover { background: var(--bg-2); color: var(--fg-0); }
 .toolbar-btn--active { background: var(--bg-2); color: var(--accent); }
 
+/* ══════════════════════════════════════════════════
+   Prompt Composer — Obsidian-style markdown editor
+   ══════════════════════════════════════════════════ */
+
+/*
+  Shared constants used by both the mirror <pre> and the <textarea>.
+  Both must have byte-identical font/padding/line-height so the overlay aligns.
+*/
+:root {
+  --pc-px: 14px;      /* horizontal padding */
+  --pc-py: 10px;      /* vertical padding */
+  --pc-fs: 13px;
+  --pc-lh: 1.65;
+}
+
+.prompt-composer {
+  flex-shrink: 0;
+  background: var(--bg-1);
+  border-top: 1px solid var(--bg-3);
+  display: flex;
+  flex-direction: column;
+  /* Focus glow on the top border */
+  transition: border-top-color 0.15s;
+}
+.prompt-composer:focus-within {
+  border-top-color: var(--accent);
+}
+.prompt-composer--idle {
+  pointer-events: none;
+  opacity: 0.45;
+}
+
+/* ── Header: shows which agent receives the message ─────────────────── */
+.prompt-composer__header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px var(--pc-px) 0;
+  min-height: 22px;
+}
+.prompt-header-icon { font-size: 12px; line-height: 1; }
+.prompt-header-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-1);
+  letter-spacing: 0.02em;
+}
+.prompt-header-sep { color: var(--fg-2); font-size: 10px; }
+.prompt-header-hint { font-size: 10px; color: var(--fg-2); }
+
+/* ── Body: stacked mirror + textarea ────────────────────────────────── */
+.prompt-composer__body {
+  position: relative;
+  /* min-height = 2 text lines */
+  min-height: calc(var(--pc-lh) * var(--pc-fs) * 2 + var(--pc-py) * 2);
+}
+
+/*
+  The mirror <pre> sits below the textarea and renders syntax-highlighted HTML.
+  It must share the exact same font/padding metrics as the textarea so that
+  characters overlap perfectly — making the textarea text invisible while the
+  mirror's styled text shows through.
+*/
+.prompt-mirror {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: var(--pc-py) var(--pc-px);
+  font-family: var(--font-mono);
+  font-size: var(--pc-fs);
+  line-height: var(--pc-lh);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;           /* scroll is driven by the textarea */
+  pointer-events: none;
+  /* Base (un-highlighted) text colour */
+  color: var(--fg-1);
+  tab-size: 2;
+  border: 1px solid transparent; /* mirror the textarea's invisible border for alignment */
+}
+
+/* Markdown highlight token styles */
+.md-bold   { color: var(--fg-0); font-weight: 700; }
+.md-em     { color: var(--fg-1); font-style: italic; }
+.md-code   {
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.09);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.md-fence  {
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.06);
+  display: block;
+  border-left: 2px solid var(--accent);
+  padding-left: 8px;
+}
+.md-heading { color: var(--fg-0); font-weight: 700; }
+.md-quote   { color: var(--fg-2); border-left: 2px solid var(--fg-2); padding-left: 6px; }
+.md-bullet  { color: var(--accent); }
+.md-ref     {
+  color: var(--green);
+  background: rgba(63, 185, 80, 0.08);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+/*
+  The textarea is on top of the mirror.
+  - color: transparent hides its text (mirror shows through)
+  - caret-color keeps the cursor visible
+*/
+.prompt-textarea {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  padding: var(--pc-py) var(--pc-px);
+  background: transparent;
+  border: 1px solid transparent;
+  outline: none;
+  resize: none;
+  font-family: var(--font-mono);
+  font-size: var(--pc-fs);
+  line-height: var(--pc-lh);
+  color: transparent;
+  caret-color: var(--fg-0);
+  tab-size: 2;
+  overflow-y: hidden;         /* auto-grow; switches to auto at max-height */
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-3) transparent;
+}
+.prompt-textarea::placeholder {
+  color: var(--fg-2);
+}
+.prompt-textarea::selection {
+  background: rgba(88, 166, 255, 0.28);
+  color: transparent;         /* keep selection visible even with transparent text */
+}
+
+/* ── Footer toolbar ──────────────────────────────────────────────────── */
+.prompt-composer__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px var(--pc-px) 7px;
+  flex-shrink: 0;
+}
+.prompt-footer-meta {
+  font-size: 10px;
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+}
+.prompt-char-count { opacity: 0.7; }
+
+.prompt-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.prompt-btn-clear {
+  background: none;
+  border: 1px solid var(--bg-3);
+  border-radius: var(--radius);
+  color: var(--fg-2);
+  font-size: 11px;
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s;
+}
+.prompt-btn-clear:hover { border-color: var(--red); color: var(--red); }
+
+.prompt-btn-send {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.prompt-btn-send:hover:not(:disabled) { opacity: 0.85; }
+.prompt-btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
+.prompt-btn-send--busy { opacity: 0.7; cursor: wait; }
+
+.prompt-kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  opacity: 0.65;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* ── Autocomplete dropdown ───────────────────────────────────────────── */
+
+.ac-dropdown {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: var(--pc-px);
+  right: var(--pc-px);
+  z-index: 100;
+  list-style: none;
+  background: var(--bg-2);
+  border: 1px solid var(--bg-3);
+  border-radius: var(--radius);
+  box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.45);
+  overflow-y: auto;
+  max-height: 220px;
+  padding: 4px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-3) transparent;
+}
+
+.ac-dropdown__header {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-2);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 10px 4px;
+  border-bottom: 1px solid var(--bg-3);
+  margin-bottom: 3px;
+}
+
+.ac-item {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: background 0.08s;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.ac-item:hover,
+.ac-item--active {
+  background: var(--bg-3);
+}
+.ac-item--active .ac-item__label {
+  color: var(--accent);
+}
+
+.ac-item__icon {
+  font-size: 11px;
+  text-align: center;
+  color: var(--fg-2);
+  flex-shrink: 0;
+}
+.ac-item__label {
+  color: var(--fg-0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.ac-item__desc {
+  font-size: 10px;
+  color: var(--fg-2);
+  white-space: nowrap;
+  padding-left: 8px;
+  font-family: var(--font-ui);
+}
+
 /* Scrollbars */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
