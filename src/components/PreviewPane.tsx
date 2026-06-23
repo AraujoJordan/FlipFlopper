@@ -1,11 +1,17 @@
 /**
- * PreviewPane — right panel view with embedded webview preview.
- * Also hosts the git status / auto-commit panel when toggled.
+ * PreviewPane — right panel with webview preview + git status/commit/checkpoint panel.
  */
-import { Component, createSignal, Show, For } from "solid-js";
-import { store, setStore } from "../lib/store";
-import { getGitStatus, autoCommit, ensureWorkBranch } from "../lib/ipc";
-import type { FileStatus } from "../lib/ipc";
+import { Component, createEffect, createSignal, For, Show } from "solid-js";
+import { store, setStore, clearAllTabs } from "../lib/store";
+import {
+  autoCommit,
+  ensureWorkBranch,
+  getGitLog,
+  getGitStatus,
+  gitRollback,
+  ptyKill,
+} from "../lib/ipc";
+import type { CommitEntry, FileStatus } from "../lib/ipc";
 
 const PreviewPane: Component = () => {
   const [url, setUrl] = createSignal(store.previewUrl ?? "");
@@ -13,6 +19,8 @@ const PreviewPane: Component = () => {
   const [commitMsg, setCommitMsg] = createSignal("");
   const [committing, setCommitting] = createSignal(false);
   const [lastCommit, setLastCommit] = createSignal<string | null>(null);
+  const [log, setLog] = createSignal<CommitEntry[]>([]);
+  const [rollingBack, setRollingBack] = createSignal(false);
 
   async function loadStatus() {
     const p = store.currentProject;
@@ -20,6 +28,26 @@ const PreviewPane: Component = () => {
     const s = await getGitStatus(p.path);
     setStatus(s);
   }
+
+  async function loadLog() {
+    const p = store.currentProject;
+    if (!p?.is_git) return;
+    try {
+      const entries = await getGitLog(p.path, 50);
+      setLog(entries);
+    } catch {
+      setLog([]);
+    }
+  }
+
+  async function refresh() {
+    await Promise.all([loadStatus(), loadLog()]);
+  }
+
+  // Auto-load when the git panel becomes visible
+  createEffect(() => {
+    if (store.rightPanel === "git") refresh();
+  });
 
   async function doCommit() {
     const p = store.currentProject;
@@ -30,16 +58,38 @@ const PreviewPane: Component = () => {
     }
     setCommitting(true);
     try {
-      // Ensure we're on a work branch
       await ensureWorkBranch(p.path, "ai-work");
       const result = await autoCommit(p.path, commitMsg().trim());
       setLastCommit(`${result.sha} — ${result.message}`);
       setCommitMsg("");
-      await loadStatus();
+      await refresh();
     } catch (e) {
       alert(`Commit failed: ${e}`);
     } finally {
       setCommitting(false);
+    }
+  }
+
+  async function doRollback(sha: string, shortSha: string) {
+    const p = store.currentProject;
+    if (!p) return;
+    const ok = confirm(
+      `Roll back to checkpoint ${shortSha}?\n\nAll changes after this point will be discarded and all open agent tabs will be closed.`
+    );
+    if (!ok) return;
+    setRollingBack(true);
+    try {
+      await gitRollback(p.path, sha);
+      // Close all agent tabs — their context is now stale
+      for (const t of store.tabs) {
+        await ptyKill(t.sessionId).catch(() => {});
+      }
+      clearAllTabs();
+      await refresh();
+    } catch (e) {
+      alert(`Rollback failed: ${e}`);
+    } finally {
+      setRollingBack(false);
     }
   }
 
@@ -91,11 +141,11 @@ const PreviewPane: Component = () => {
         </Show>
       </Show>
 
-      {/* ── Git status / commit ── */}
+      {/* ── Git status / commit / checkpoints ── */}
       <Show when={store.rightPanel === "git"}>
         <div class="panel-header">
           🔀 Git
-          <button class="btn-refresh" onClick={loadStatus} title="Refresh status">↻</button>
+          <button class="btn-refresh" onClick={refresh} title="Refresh">↻</button>
         </div>
 
         <Show when={!store.currentProject?.is_git}>
@@ -103,6 +153,7 @@ const PreviewPane: Component = () => {
         </Show>
 
         <Show when={store.currentProject?.is_git}>
+          {/* Working-tree status */}
           <div class="git-status">
             <Show
               when={status().length > 0}
@@ -121,6 +172,7 @@ const PreviewPane: Component = () => {
             </Show>
           </div>
 
+          {/* Manual commit */}
           <div class="commit-panel">
             <textarea
               class="commit-msg"
@@ -138,6 +190,35 @@ const PreviewPane: Component = () => {
             </button>
             <Show when={lastCommit()}>
               <div class="commit-result">✅ {lastCommit()}</div>
+            </Show>
+          </div>
+
+          {/* Checkpoint history */}
+          <div class="checkpoint-section">
+            <div class="checkpoint-section__header">Checkpoints</div>
+            <Show
+              when={log().length > 0}
+              fallback={<p class="panel-hint">No commits yet on this branch.</p>}
+            >
+              <ul class="checkpoint-list">
+                <For each={log()}>
+                  {(entry) => (
+                    <li class="checkpoint-row">
+                      <span class="checkpoint-sha">{entry.short_sha}</span>
+                      <span class="checkpoint-msg">{entry.message}</span>
+                      <span class="checkpoint-time">{entry.time}</span>
+                      <button
+                        class="btn-rollback"
+                        disabled={rollingBack()}
+                        onClick={() => doRollback(entry.sha, entry.short_sha)}
+                        title={`Reset to ${entry.short_sha}`}
+                      >
+                        ↩ Roll back
+                      </button>
+                    </li>
+                  )}
+                </For>
+              </ul>
             </Show>
           </div>
         </Show>

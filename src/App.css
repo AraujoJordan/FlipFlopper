@@ -764,6 +764,89 @@ html, body, #root {
   padding: 0;
 }
 
+/* ── Git checkpoint list ─────────────────────────────────────────────── */
+
+.checkpoint-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  border-top: 1px solid var(--bg-3);
+  margin-top: 8px;
+}
+
+.checkpoint-section__header {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-2);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 7px 12px 5px;
+  flex-shrink: 0;
+}
+
+.checkpoint-list {
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-3) transparent;
+}
+
+.checkpoint-row {
+  display: grid;
+  grid-template-columns: 48px 1fr auto;
+  grid-template-rows: auto auto;
+  column-gap: 6px;
+  row-gap: 2px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--bg-2);
+  transition: background 0.1s;
+}
+.checkpoint-row:hover { background: var(--bg-2); }
+
+.checkpoint-sha {
+  grid-row: 1 / 3;
+  align-self: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.checkpoint-msg {
+  font-size: 12px;
+  color: var(--fg-0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.checkpoint-time {
+  grid-column: 2;
+  font-size: 10px;
+  color: var(--fg-2);
+}
+
+.btn-rollback {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  align-self: center;
+  background: none;
+  border: 1px solid var(--bg-3);
+  border-radius: var(--radius);
+  color: var(--fg-2);
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.1s, color 0.1s;
+  flex-shrink: 0;
+}
+.btn-rollback:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+.btn-rollback:disabled { opacity: 0.4; cursor: wait; }
+
 /* ── Autocomplete dropdown ───────────────────────────────────────────── */
 
 .ac-dropdown {
