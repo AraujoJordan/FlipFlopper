@@ -1,21 +1,11 @@
 import { Component, createEffect, createSignal, For, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import {
-  CONTINUE_AGENT_IDS,
   addTab,
-  ensureTabSessionGroup,
-  hiddenInstallTool,
-  markTabAutoContinued,
-  rankContinueCandidates,
-  recordContinueAgentUse,
-  recordRecentAgentLimit,
   store,
   setStore,
-  type SessionLimitInfo,
 } from "./lib/store";
 import {
-  cliContinuesAvailable,
-  continueAgent,
   getAgents,
   getRecentProjects,
   getToolCatalog,
@@ -76,7 +66,6 @@ async function resumeLatestSession(sessionId: string): Promise<void> {
 
 const App: Component = () => {
   const [restoreComplete, setRestoreComplete] = createSignal(false);
-  const [autoContinuingFrom, setAutoContinuingFrom] = createSignal<string | null>(null);
 
   onMount(async () => {
     // Boot: load agents, recents, tool catalog
@@ -144,51 +133,6 @@ const App: Component = () => {
     setRestoreComplete(true);
   });
 
-  function continueTargetFor(fromAgentId: string) {
-    const project = store.currentProject;
-    if (!project || !CONTINUE_AGENT_IDS.has(fromAgentId)) return null;
-
-    const candidates = rankContinueCandidates(project.path, fromAgentId, store.agents);
-    if (candidates.length === 0) return null;
-
-    return candidates[0];
-  }
-
-  async function autoContinueLimitedTab(sessionId: string, _limit: SessionLimitInfo) {
-    const project = store.currentProject;
-    const from = store.tabs.find((tab) => tab.sessionId === sessionId);
-    if (!project || !from || from.isInstaller || from.limit?.autoContinuedSessionId) return;
-    if (store.activeTabId !== sessionId || autoContinuingFrom()) return;
-
-    recordRecentAgentLimit(project.path, from.agentId);
-    const target = continueTargetFor(from.agentId);
-    if (!target) return;
-
-    setAutoContinuingFrom(sessionId);
-    try {
-      if (!(await cliContinuesAvailable())) {
-        await hiddenInstallTool("cli-continues", project.path);
-      }
-      if (!(await cliContinuesAvailable())) return;
-
-      const continuedSessionId = await continueAgent(project.path, from.agentId, target.id);
-      const sessionGroupId = ensureTabSessionGroup(sessionId);
-      addTab({
-        sessionId: continuedSessionId,
-        label: target.name,
-        agentId: target.id,
-        agentIcon: target.icon,
-        sessionGroupId,
-      });
-      recordContinueAgentUse(project.path, target.id);
-      markTabAutoContinued(sessionId, continuedSessionId);
-    } catch (e) {
-      console.error("Automatic agent continuation failed:", e);
-    } finally {
-      setAutoContinuingFrom(null);
-    }
-  }
-
   createEffect(() => {
     if (!restoreComplete()) return;
 
@@ -235,7 +179,6 @@ const App: Component = () => {
                 <TerminalPane
                   sessionId={tab.sessionId}
                   active={store.activeTabId === tab.sessionId}
-                  onLimitDetected={autoContinueLimitedTab}
                 />
               )}
             </For>

@@ -19,7 +19,6 @@ export interface SessionLimitInfo {
   detectedAt: number;
   message: string;
   resetText: string | null;
-  autoContinuedSessionId?: string;
 }
 
 export type RightPanelView = "git" | "none";
@@ -82,8 +81,6 @@ export const CONTINUE_AGENT_IDS = new Set([
 
 const CONTINUE_TARGET_KEY = "flipflopper:continue-targets";
 const CONTINUE_USAGE_KEY = "flipflopper:continue-agent-usage";
-const RECENT_LIMITS_KEY = "flipflopper:recent-agent-limits";
-const RECENT_LIMIT_TTL_MS = 2 * 60 * 60 * 1000;
 
 export function readContinueTargets(): Record<string, string> {
   try {
@@ -134,26 +131,10 @@ export function recordContinueAgentUse(projectPath: string, agentId: string) {
   writeJsonRecord(CONTINUE_USAGE_KEY, usage);
 }
 
-export function readRecentAgentLimits(): Record<string, Record<string, number>> {
-  return readJsonRecord<Record<string, Record<string, number>>>(RECENT_LIMITS_KEY, {});
-}
-
-export function recordRecentAgentLimit(projectPath: string, agentId: string) {
-  const limits = readRecentAgentLimits();
-  limits[projectPath] = { ...(limits[projectPath] ?? {}), [agentId]: Date.now() };
-  writeJsonRecord(RECENT_LIMITS_KEY, limits);
-}
-
-export function isAgentRecentlyLimited(projectPath: string, agentId: string) {
-  const limitedAt = readRecentAgentLimits()[projectPath]?.[agentId];
-  return typeof limitedAt === "number" && Date.now() - limitedAt < RECENT_LIMIT_TTL_MS;
-}
-
 export function rankContinueCandidates(
   projectPath: string,
   fromAgentId: string,
   agents: AgentInfo[],
-  includeRecentlyLimited = false,
   requireContinueSupport = true
 ) {
   const usage = readContinueUsage()[projectPath] ?? [];
@@ -165,8 +146,7 @@ export function rankContinueCandidates(
     (agent) =>
       agent.installed &&
       agent.id !== fromAgentId &&
-      (!requireContinueSupport || CONTINUE_AGENT_IDS.has(agent.id)) &&
-      (includeRecentlyLimited || !isAgentRecentlyLimited(projectPath, agent.id))
+      (!requireContinueSupport || CONTINUE_AGENT_IDS.has(agent.id))
   );
 
   return [...candidates].sort((a, b) => {
@@ -233,15 +213,6 @@ export function ensureTabSessionGroup(sessionId: string) {
 
 export function markTabLimit(sessionId: string, limit: SessionLimitInfo) {
   setStore("tabs", (tab) => tab.sessionId === sessionId, "limit", limit);
-}
-
-export function markTabAutoContinued(sessionId: string, continuedSessionId: string) {
-  setStore(
-    "tabs",
-    (tab) => tab.sessionId === sessionId,
-    "limit",
-    (limit) => limit ? { ...limit, autoContinuedSessionId: continuedSessionId } : limit
-  );
 }
 
 export function toggleFileSelection(path: string) {

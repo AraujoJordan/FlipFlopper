@@ -8,7 +8,6 @@ import {
   addTab,
   ensureTabSessionGroup,
   hiddenInstallTool,
-  isAgentRecentlyLimited,
   rankContinueCandidates,
   recordContinueAgentUse,
   removeTab,
@@ -50,7 +49,6 @@ const AgentBar: Component = () => {
       store.currentProject?.path ?? "",
       tab.agentId,
       store.agents,
-      true,
       false
     );
   };
@@ -325,11 +323,9 @@ const AgentBar: Component = () => {
                 <div class="picker-info">
                   <div class="picker-name">{agent.name}</div>
                   <div class="picker-version">
-                    {isAgentRecentlyLimited(store.currentProject?.path ?? "", agent.id)
-                      ? "recently limited"
-                      : continueTarget()?.id === agent.id
-                        ? "default target"
-                        : agent.version ?? "installed"}
+                    {continueTarget()?.id === agent.id
+                      ? "default target"
+                      : agent.version ?? "installed"}
                   </div>
                 </div>
               </button>

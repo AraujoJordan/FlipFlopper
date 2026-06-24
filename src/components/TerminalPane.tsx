@@ -20,7 +20,6 @@ import { markTabLimit, type SessionLimitInfo } from "../lib/store";
 interface Props {
   sessionId: string;
   active: boolean;
-  onLimitDetected?: (sessionId: string, limit: SessionLimitInfo) => void;
 }
 
 function stripAnsi(value: string): string {
@@ -132,7 +131,6 @@ const TerminalPane: Component<Props> = (props) => {
         if (limit) {
           limitDetected = true;
           markTabLimit(props.sessionId, limit);
-          props.onLimitDetected?.(props.sessionId, limit);
         }
       }
     });
