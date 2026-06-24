@@ -4,6 +4,7 @@ import {
   CONTINUE_AGENT_IDS,
   addTab,
   ensureTabSessionGroup,
+  hiddenInstallTool,
   markTabAutoContinued,
   rankContinueCandidates,
   recordContinueAgentUse,
@@ -18,8 +19,6 @@ import {
   getAgents,
   getRecentProjects,
   getToolCatalog,
-  installTool,
-  onPtyExit,
   openProject,
   ptyInput,
   spawnAgent,
@@ -79,29 +78,6 @@ async function resumeLatestSession(sessionId: string): Promise<void> {
 const App: Component = () => {
   const [restoreComplete, setRestoreComplete] = createSignal(false);
   const [autoContinuingFrom, setAutoContinuingFrom] = createSignal<string | null>(null);
-
-  async function waitForPtyExit(sessionId: string, timeoutMs = 10 * 60 * 1000) {
-    let unlisten: (() => void) | null = null;
-    await new Promise<void>(async (resolve) => {
-      const timeout = window.setTimeout(() => {
-        unlisten?.();
-        resolve();
-      }, timeoutMs);
-      unlisten = await onPtyExit(sessionId, () => {
-        window.clearTimeout(timeout);
-        unlisten?.();
-        resolve();
-      });
-    });
-  }
-
-  async function hiddenInstallTool(toolId: string, projectPath: string) {
-    const sessionId = await installTool(toolId, projectPath);
-    await waitForPtyExit(sessionId);
-    const [agents, tools] = await Promise.all([getAgents(), getToolCatalog()]);
-    setStore("agents", agents);
-    setStore("tools", tools);
-  }
 
   onMount(async () => {
     // Boot: load agents, recents, tool catalog
@@ -326,7 +302,7 @@ const Welcome: Component = () => (
       </div>
       <div class="step">
         <span class="step-num">4</span>
-        <span>Open more tabs to work in parallel. Tap <strong>Continue</strong> once a session wraps up</span>
+        <span>Hit <strong>+</strong> for a parallel agent (fresh context), or <strong>Hand off</strong> to pass the current session's context to another agent</span>
       </div>
     </div>
   </div>

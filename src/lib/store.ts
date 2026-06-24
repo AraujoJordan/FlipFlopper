@@ -3,6 +3,7 @@
  */
 import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
+import { getAgents, getToolCatalog, installTool, onPtyExit } from "./ipc";
 
 export interface Tab {
   sessionId: string;
@@ -256,4 +257,37 @@ export function clearFileSelection() {
 export function clearAllTabs() {
   setStore("tabs", []);
   setStore("activeTabId", null);
+}
+
+// ────────────────────────────────────────────────
+// Shared PTY / install helpers
+// ────────────────────────────────────────────────
+
+/** Resolves once the given PTY session exits (or times out). */
+export function waitForPtyExit(sessionId: string, timeoutMs = 10 * 60 * 1000): Promise<void> {
+  let unlisten: (() => void) | null = null;
+  return new Promise<void>(async (resolve) => {
+    const timeout = window.setTimeout(() => {
+      unlisten?.();
+      resolve();
+    }, timeoutMs);
+    unlisten = await onPtyExit(sessionId, () => {
+      window.clearTimeout(timeout);
+      unlisten?.();
+      resolve();
+    });
+  });
+}
+
+/** Install a tool in a hidden PTY, then refresh agents + tools in the store. */
+export async function hiddenInstallTool(
+  toolId: string,
+  projectPath: string
+): Promise<{ agents: AgentInfo[]; tools: ToolInfo[] }> {
+  const sessionId = await installTool(toolId, projectPath);
+  await waitForPtyExit(sessionId);
+  const [agents, tools] = await Promise.all([getAgents(), getToolCatalog()]);
+  setStore("agents", agents);
+  setStore("tools", tools);
+  return { agents, tools };
 }

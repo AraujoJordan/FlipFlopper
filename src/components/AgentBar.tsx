@@ -7,24 +7,20 @@ import {
   CONTINUE_AGENT_IDS,
   addTab,
   ensureTabSessionGroup,
+  hiddenInstallTool,
   isAgentRecentlyLimited,
   rankContinueCandidates,
   recordContinueAgentUse,
   removeTab,
   setActiveTab,
-  setStore,
   sessionGroupColor,
   store,
 } from "../lib/store";
 import {
   cliContinuesAvailable,
   continueAgent,
-  getAgents,
-  getToolCatalog,
-  onPtyExit,
   spawnAgent,
   ptyKill,
-  installTool,
 } from "../lib/ipc";
 import type { Tab } from "../lib/store";
 import IconMark from "./IconMark";
@@ -66,34 +62,6 @@ const AgentBar: Component = () => {
 
     return candidates[0];
   };
-
-  async function waitForPtyExit(sessionId: string, timeoutMs = 10 * 60 * 1000) {
-    let unlisten: (() => void) | null = null;
-    await new Promise<void>(async (resolve) => {
-      const timeout = window.setTimeout(() => {
-        unlisten?.();
-        resolve();
-      }, timeoutMs);
-      unlisten = await onPtyExit(sessionId, () => {
-        window.clearTimeout(timeout);
-        unlisten?.();
-        resolve();
-      });
-    });
-  }
-
-  async function refreshAvailability() {
-    const [agents, tools] = await Promise.all([getAgents(), getToolCatalog()]);
-    setStore("agents", agents);
-    setStore("tools", tools);
-    return { agents, tools };
-  }
-
-  async function hiddenInstallTool(toolId: string, projectPath: string) {
-    const sessionId = await installTool(toolId, projectPath);
-    await waitForPtyExit(sessionId);
-    return refreshAvailability();
-  }
 
   async function launchAgent(agentId: string) {
     const project = store.currentProject;
@@ -202,8 +170,8 @@ const AgentBar: Component = () => {
 
   const continueLabel = () => {
     const target = continueTarget();
-    if (continuing()) return "Continuing...";
-    return target ? `Continue with ${target.name}` : "Continue";
+    if (continuing()) return "Handing off...";
+    return target ? `Hand off to ${target.name}` : "Hand off session";
   };
 
   async function closeTab(sessionId: string, e: MouseEvent) {
@@ -238,6 +206,9 @@ const AgentBar: Component = () => {
               }
             >
               <IconMark class="tab-icon" icon={tab.agentIcon} alt="" />
+              <Show when={tab.sessionGroupId}>
+                <span class="tab-shared-badge" title="Shared session — context handed off from another agent">🔗</span>
+              </Show>
               <span class="tab-label">{tab.label}</span>
               <Show when={tab.limit}>
                 {(limit) => (
@@ -266,7 +237,7 @@ const AgentBar: Component = () => {
             setShowPicker((v) => !v);
             setShowContinuePicker(false);
           }}
-          title="Open new agent"
+          title="New parallel agent — runs alongside the current session with fresh context"
         >
           +
         </button>
@@ -280,8 +251,8 @@ const AgentBar: Component = () => {
           disabled={!continueTarget() || continuing()}
           title={
             continueTarget()
-              ? `Continue in ${continueTarget()!.name}`
-              : "Open an agent tab with another installed agent available"
+              ? `Hand off this session to ${continueTarget()!.name} — carries context across`
+              : "Open a project with at least two installed agents to hand off a session"
           }
         >
           <span class="tab-action-icon">↪</span>
@@ -295,7 +266,7 @@ const AgentBar: Component = () => {
             setShowPicker(false);
           }}
           disabled={continueMenuAgents().length === 0 || continuing()}
-          title="Choose continue target"
+          title="Choose which agent to hand off to"
         >
           ▾
         </button>
@@ -304,7 +275,8 @@ const AgentBar: Component = () => {
       {/* Agent picker dropdown */}
       <Show when={showPicker()}>
         <div class="agent-picker">
-          <div class="agent-picker__header">Select agent</div>
+          <div class="agent-picker__header">New parallel agent</div>
+          <div class="agent-picker__subhead">Runs alongside the current session with its own fresh context</div>
           <For each={store.agents}>
             {(agent) => (
               <button
@@ -334,7 +306,8 @@ const AgentBar: Component = () => {
 
       <Show when={showContinuePicker()}>
         <div class="agent-picker agent-picker--continue">
-          <div class="agent-picker__header">Continue with agent</div>
+          <div class="agent-picker__header">Hand off this session →</div>
+          <div class="agent-picker__subhead">Carries this session's context into another agent</div>
           <For each={continueMenuAgents()}>
             {(agent) => (
               <button

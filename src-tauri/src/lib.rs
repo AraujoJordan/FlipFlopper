@@ -10,7 +10,6 @@ use tauri_plugin_dialog::DialogExt;
 
 use agents::AgentInfo;
 use git::{CommitEntry, CommitResult, FileStatus};
-use handoff::HandoffResult;
 use project::{FileEntry, ProjectInfo};
 use pty::{PtyManager, SessionInfo};
 use tools::ToolInfo;
@@ -163,15 +162,6 @@ fn install_tool(
 // ════════════════════════════════════════════════
 
 #[tauri::command]
-fn handoff_agent(
-    project_path: String,
-    from_agent: String,
-    to_agent: String,
-) -> HandoffResult {
-    handoff::handoff(&project_path, &from_agent, &to_agent)
-}
-
-#[tauri::command]
 fn continue_agent(
     app: tauri::AppHandle,
     state: State<'_, PtyManager>,
@@ -272,7 +262,6 @@ pub fn run() {
             get_tool_catalog,
             install_tool,
             // Handoff
-            handoff_agent,
             continue_agent,
             cli_continues_available,
             // Dialog

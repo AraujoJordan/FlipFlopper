@@ -143,15 +143,13 @@ pub fn continue_launch(
     let to_tool = continues_tool_id(to_agent);
 
     // Determine the actual binary name for the target agent.
-    // If it differs from what cli-continues knows (e.g. "agy" vs "gemini"),
-    // skip --in and launch the real binary directly — context is already in
-    // .agents/context.md from the preceding handoff() call.
     let to_actual_binary = find_agent(to_agent)
         .and_then(|def| launch_binary(def))
         .unwrap_or_else(|| to_tool.to_string());
     let use_continues_target = to_actual_binary == to_tool;
 
     let command = if binary == "cli-continues" && use_continues_target {
+        // Happy path: cli-continues handles the full context transfer.
         format!(
             "{} from {} to {}",
             shell_quote(&binary),
@@ -167,10 +165,15 @@ pub fn continue_launch(
                 shell_quote(to_tool)
             )
         } else {
+            // cli-continues can't resolve a session — write context manually so
+            // the target agent still gets handoff notes, then launch directly.
+            let _ = handoff(project_path, from_agent, to_agent);
             shell_quote(&to_actual_binary)
         }
     } else {
-        // cli-continues doesn't know this binary by name; launch it directly.
+        // cli-continues doesn't know this binary by name (e.g. "agy" -> "gemini").
+        // Write context.md now so the target picks it up on launch.
+        let _ = handoff(project_path, from_agent, to_agent);
         shell_quote(&to_actual_binary)
     };
 

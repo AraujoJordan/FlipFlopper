@@ -66,12 +66,6 @@ export interface ToolInfo {
   install_cmd: string | null;
 }
 
-export interface HandoffResult {
-  success: boolean;
-  context_entry: string | null;
-  error: string | null;
-}
-
 // ────────────────────────────────────────────────
 // PTY
 // ────────────────────────────────────────────────
@@ -190,13 +184,6 @@ export const installTool = (
 // ────────────────────────────────────────────────
 // Handoff
 // ────────────────────────────────────────────────
-
-export const handoffAgent = (
-  projectPath: string,
-  fromAgent: string,
-  toAgent: string
-): Promise<HandoffResult> =>
-  invoke("handoff_agent", { projectPath, fromAgent, toAgent });
 
 export const continueAgent = (
   projectPath: string,
