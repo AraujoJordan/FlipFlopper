@@ -11,14 +11,7 @@ export interface Tab {
   agentId: string;
   agentIcon: string;
   isInstaller?: boolean;
-  limit?: SessionLimitInfo;
   sessionGroupId?: string;
-}
-
-export interface SessionLimitInfo {
-  detectedAt: number;
-  message: string;
-  resetText: string | null;
 }
 
 export type RightPanelView = "git" | "none";
@@ -209,10 +202,6 @@ export function ensureTabSessionGroup(sessionId: string) {
   const sessionGroupId = createSessionGroupId();
   setStore("tabs", (tab) => tab.sessionId === sessionId, "sessionGroupId", sessionGroupId);
   return sessionGroupId;
-}
-
-export function markTabLimit(sessionId: string, limit: SessionLimitInfo) {
-  setStore("tabs", (tab) => tab.sessionId === sessionId, "limit", limit);
 }
 
 export function toggleFileSelection(path: string) {

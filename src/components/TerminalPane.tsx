@@ -15,60 +15,10 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { onPtyOutput, onPtyExit, ptyInput, ptyResize } from "../lib/ipc";
-import { markTabLimit, type SessionLimitInfo } from "../lib/store";
 
 interface Props {
   sessionId: string;
   active: boolean;
-}
-
-function stripAnsi(value: string): string {
-  return value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-}
-
-function extractResetText(text: string): string | null {
-  const patterns = [
-    /\b(?:access\s+)?resets?\s+(?:in|at|on)\s+([^\n\r.]+)/i,
-    /\b(?:reset|available again|try again)\s+(?:in|at|on|after)\s+([^\n\r.]+)/i,
-    /\bretry[- ]after[:\s]+([^\n\r.]+)/i,
-    /\b(\d+\s*(?:h|hr|hrs|hour|hours)\s*(?:\d+\s*(?:m|min|mins|minute|minutes))?)/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match?.[1]) return match[0].trim();
-  }
-
-  return null;
-}
-
-function detectSessionLimit(output: string): SessionLimitInfo | null {
-  const text = stripAnsi(output).replace(/\s+/g, " ").trim();
-  const lower = text.toLowerCase();
-  if (!lower) return null;
-
-  if (
-    lower.includes("context window") ||
-    lower.includes("context length") ||
-    lower.includes("max session turns") ||
-    lower.includes("max wall time") ||
-    lower.includes("maximum output")
-  ) {
-    return null;
-  }
-
-  const hasLimitStop =
-    /\b(rate[- ]?limit|usage limit|quota|too many requests|insufficient[_ -]quota|resource_exhausted|credits? exhausted|limit reached|429)\b/i.test(text);
-  const hasAccountScope =
-    /\b(rate|usage|quota|request|message|credit|plan|daily|weekly|monthly|reset|429)\b/i.test(text);
-
-  if (!hasLimitStop || !hasAccountScope) return null;
-
-  return {
-    detectedAt: Date.now(),
-    message: text.slice(0, 220),
-    resetText: extractResetText(text),
-  };
 }
 
 const TerminalPane: Component<Props> = (props) => {
@@ -78,8 +28,6 @@ const TerminalPane: Component<Props> = (props) => {
   let unlisten: (() => void) | null = null;
   let unlistenExit: (() => void) | null = null;
   let resizeObserver: ResizeObserver | null = null;
-  let recentOutput = "";
-  let limitDetected = false;
 
   onMount(async () => {
     terminal = new Terminal({
@@ -124,15 +72,6 @@ const TerminalPane: Component<Props> = (props) => {
     // Stream PTY output into xterm
     unlisten = await onPtyOutput(props.sessionId, (data) => {
       terminal.write(data);
-      recentOutput = `${recentOutput}${data}`.slice(-4000);
-
-      if (!limitDetected && props.active) {
-        const limit = detectSessionLimit(recentOutput);
-        if (limit) {
-          limitDetected = true;
-          markTabLimit(props.sessionId, limit);
-        }
-      }
     });
 
     // When the PTY exits, mark the tab as dead

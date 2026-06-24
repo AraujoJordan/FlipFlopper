@@ -201,26 +201,13 @@ const AgentBar: Component = () => {
                   : undefined
               }
               onClick={() => setActiveTab(tab.sessionId)}
-              title={
-                tab.limit
-                  ? `Limit reached. ${
-                      tab.limit.resetText ?? "Reset time was not reported by this CLI."
-                    }`
-                  : tab.label
-              }
+              title={tab.label}
             >
               <IconMark class="tab-icon" icon={tab.agentIcon} alt="" />
               <Show when={tab.sessionGroupId}>
                 <span class="tab-shared-badge" title="Shared session — context handed off from another agent">🔗</span>
               </Show>
               <span class="tab-label">{tab.label}</span>
-              <Show when={tab.limit}>
-                {(limit) => (
-                  <span class="tab-limit-badge">
-                    {limit().resetText ?? "reset unknown"}
-                  </span>
-                )}
-              </Show>
               <span
                 class="tab-close"
                 onClick={(e) => closeTab(tab.sessionId, e as MouseEvent)}

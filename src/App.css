@@ -334,18 +334,6 @@ html, body, #root {
   font-size: 14px;
 }
 .tab-label { max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
-.tab-limit-badge {
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--yellow);
-  background: rgba(210, 153, 34, 0.14);
-  border: 1px solid rgba(210, 153, 34, 0.45);
-  border-radius: 4px;
-  padding: 1px 5px;
-  font-size: 10px;
-  line-height: 14px;
-}
 .tab-close {
   background: none;
   border: none;
