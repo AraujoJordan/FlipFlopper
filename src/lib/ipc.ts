@@ -191,6 +191,3 @@ export const continueAgent = (
   toAgent: string
 ): Promise<string> =>
   invoke("continue_agent", { projectPath, fromAgent, toAgent });
-
-export const cliContinuesAvailable = (): Promise<boolean> =>
-  invoke("cli_continues_available");

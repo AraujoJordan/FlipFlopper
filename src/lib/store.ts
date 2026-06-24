@@ -70,6 +70,9 @@ export const CONTINUE_AGENT_IDS = new Set([
   "cline",
   "qwen",
   "droid",
+  "aider",
+  "goose",
+  "plandex",
 ]);
 
 const CONTINUE_TARGET_KEY = "flipflopper:continue-targets";

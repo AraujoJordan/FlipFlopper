@@ -40,3 +40,6 @@ tokio         = { version = "1", features = ["full"] }
 # Home directory detection (cross-platform)
 dirs          = "5"
 
+# SQLite for reading OpenCode session storage
+rusqlite      = { version = "0.31", features = ["bundled"] }
+

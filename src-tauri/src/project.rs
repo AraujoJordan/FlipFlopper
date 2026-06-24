@@ -111,6 +111,13 @@ pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
             .map_err(|e| format!("Failed to write context.md: {e}"))?;
     }
 
+    // .gitignore — keep generated handoff.md out of the user's repo
+    let gitignore_path = dot_agents.join(".gitignore");
+    if !gitignore_path.exists() {
+        fs::write(&gitignore_path, "handoff.md\n")
+            .map_err(|e| format!("Failed to write .agents/.gitignore: {e}"))?;
+    }
+
     // Create CLAUDE.md symlink → AGENTS.md (macOS/Linux only; skip on Windows without elevation)
     #[cfg(unix)]
     {

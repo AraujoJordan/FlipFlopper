@@ -15,12 +15,7 @@ import {
   sessionGroupColor,
   store,
 } from "../lib/store";
-import {
-  cliContinuesAvailable,
-  continueAgent,
-  spawnAgent,
-  ptyKill,
-} from "../lib/ipc";
+import { continueAgent, spawnAgent, ptyKill } from "../lib/ipc";
 import type { Tab } from "../lib/store";
 import IconMark from "./IconMark";
 
@@ -109,24 +104,6 @@ const AgentBar: Component = () => {
     }
   }
 
-  async function installContinues() {
-    const project = store.currentProject;
-    if (!project) return false;
-
-    const tool = store.tools.find((t) => t.id === "cli-continues");
-    if (!tool?.install_cmd) {
-      return false;
-    }
-
-    try {
-      await hiddenInstallTool("cli-continues", project.path);
-      return cliContinuesAvailable();
-    } catch (e) {
-      console.error("Failed to install continues:", e);
-      return false;
-    }
-  }
-
   async function continueActive(targetId?: string) {
     const project = store.currentProject;
     const from = activeTab();
@@ -139,14 +116,6 @@ const AgentBar: Component = () => {
 
     setContinuing(true);
     try {
-      if (!(await cliContinuesAvailable())) {
-        const installed = await installContinues();
-        if (!installed) {
-          alert("continues is not installed and automatic installation did not complete.");
-          return;
-        }
-      }
-
       const sessionId = await continueAgent(project.path, from.agentId, target.id);
       const sessionGroupId = ensureTabSessionGroup(from.sessionId);
       const tab: Tab = {

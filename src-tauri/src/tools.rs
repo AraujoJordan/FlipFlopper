@@ -104,19 +104,6 @@ pub static CATALOG: &[ToolEntry] = &[
         ],
     },
     ToolEntry {
-        id: "cli-continues",
-        name: "continues",
-        description: "Hand off AI agent sessions across tools (Claude → Codex → agy…)",
-        binary: "continues",
-        icon: "🔄",
-        category: "Agents",
-        installs: &[
-            InstallSpec::Package { os: "macos", manager: "npm", package: "-g continues" },
-            InstallSpec::Package { os: "linux", manager: "npm", package: "-g continues" },
-            InstallSpec::Package { os: "windows", manager: "npm", package: "-g continues" },
-        ],
-    },
-    ToolEntry {
         id: "claude",
         name: "Claude Code",
         description: "Anthropic's official Claude CLI coding agent",
@@ -392,13 +379,6 @@ fn get_tool_version(binary: &str) -> Option<String> {
 }
 
 fn tool_binary(entry: &ToolEntry) -> Option<String> {
-    if entry.id == "cli-continues" {
-        return ["continues", "cont", "cli-continues"]
-            .iter()
-            .find(|bin| which(bin).is_ok())
-            .map(|bin| (*bin).to_string());
-    }
-
     which(entry.binary).ok().map(|_| entry.binary.to_string())
 }
 

@@ -173,11 +173,6 @@ fn continue_agent(
     pty::spawn_shell_command(&app, &state, &launch.label, &launch.command, &project_path)
 }
 
-#[tauri::command]
-fn cli_continues_available() -> bool {
-    handoff::cli_continues_available()
-}
-
 // ════════════════════════════════════════════════
 // Native dialog
 // ════════════════════════════════════════════════
@@ -263,7 +258,6 @@ pub fn run() {
             install_tool,
             // Handoff
             continue_agent,
-            cli_continues_available,
             // Dialog
             pick_project_folder,
             pick_prompt_file,
