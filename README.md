@@ -31,6 +31,15 @@ You bring the agents. FlipFlopper brings the real terminals, the file picker,
 the preview window, and the big shiny "switch from Claude to Codex mid-task"
 button.
 
+## Why bother?
+
+Right now the cheapest AI coding plans are heavily subsidized by venture capital
+and enterprise revenue. Translation: someone else is footing your bill, and that
+does not last forever. When the free-money music stops and prices correct, the
+people who can shrug and flip to whichever agent is cheapest that week are the
+ones who sleep fine. FlipFlopper is that flip button. No lock-in, no loyalty,
+may the best (and cheapest) agent win.
+
 ## Features
 
 - **Real embedded terminals** - a genuine PTY per agent (via `portable-pty`),
@@ -38,10 +47,6 @@ button.
 - **File tree with checkboxes** - tick some files, and FlipFlopper injects them
   as `@file` references straight into the agent. No more copy-pasting paths like
   it's 2009.
-- **One-click tool installer** - scrcpy, chromium, adb, and friends, with the
-  right install command for your OS already figured out.
-- **Webview preview** - watch your dev server changes without alt-tabbing into
-  oblivion.
 - **Git auto-commit** - everything lands on the `ai-work` branch, so `main`
   stays pristine and your future self stays calm.
 - **Agent handoff** - hot-swap Claude for Codex (or Gemini, or Aider) in the
