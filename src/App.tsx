@@ -39,7 +39,6 @@ const WORKSPACE_STORAGE_KEY = "flipflopper:last-workspace";
 
 interface PersistedTab {
   agentId: string;
-  sessionGroupId?: string;
 }
 
 interface PersistedWorkspace {
@@ -115,7 +114,6 @@ const App: Component = () => {
               label: agent.name,
               agentId: agent.id,
               agentIcon: agent.icon,
-              sessionGroupId: savedTab.sessionGroupId,
             });
           } catch (e) {
             console.error(`Failed to restore ${savedTab.agentId} tab:`, e);
@@ -202,10 +200,7 @@ const App: Component = () => {
 
     writePersistedWorkspace({
       projectPath: store.currentProject?.path ?? null,
-      tabs: tabs.map((tab) => ({
-        agentId: tab.agentId,
-        sessionGroupId: tab.sessionGroupId,
-      })),
+      tabs: tabs.map((tab) => ({ agentId: tab.agentId })),
       activeIndex,
     });
   });

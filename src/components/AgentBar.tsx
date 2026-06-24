@@ -78,6 +78,7 @@ const AgentBar: Component = () => {
         const { agents } = await hiddenInstallTool(agentId, project.path);
         const installedAgent = agents.find((a) => a.id === agentId && a.installed);
         if (installedAgent) {
+          setInstallingAgent(null); // clear before recursive call so spawn guard passes
           await launchAgent(agentId);
         }
         setShowPicker(false);
@@ -89,6 +90,9 @@ const AgentBar: Component = () => {
       }
       return;
     }
+    // Guard against double-invocation (e.g. double-click on picker item)
+    if (installingAgent() === agentId) return;
+    setInstallingAgent(agentId);
     try {
       const sessionId = await spawnAgent(agentId, project.path);
       const tab: Tab = {
@@ -102,6 +106,8 @@ const AgentBar: Component = () => {
     } catch (e) {
       console.error("Failed to spawn agent:", e);
       alert(`Failed to launch ${agent.name}: ${e}`);
+    } finally {
+      setInstallingAgent(null);
     }
   }
 
