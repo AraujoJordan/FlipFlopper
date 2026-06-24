@@ -128,7 +128,7 @@ const App: Component = () => {
         const restoredTabs: Tab[] = [];
 
         for (const savedTab of tabsToRestore) {
-          const agentId = savedTab.agentId === "gemini" ? "agy" : savedTab.agentId;
+          const agentId = savedTab.agentId;
           const agent = agents.find((a) => a.id === agentId);
           if (!agent?.installed) continue;
 

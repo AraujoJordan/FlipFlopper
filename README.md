@@ -6,7 +6,7 @@
 
 **One cockpit. Every CLI coding agent. Zero terminal-tab chaos.**
 
-Because juggling Claude Code, Codex, Gemini, and Aider in seven different
+Because juggling Claude Code, Codex, agy, and Aider in seven different
 terminal windows was making you flip out (and then flop back).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -49,14 +49,14 @@ may the best (and cheapest) agent win.
   it's 2009.
 - **Git auto-commit** - everything lands on the `ai-work` branch, so `main`
   stays pristine and your future self stays calm.
-- **Agent handoff** - hot-swap Claude for Codex (or Gemini, or Aider) in the
+- **Agent handoff** - hot-swap Claude for Codex (or agy, or Aider) in the
   middle of a session via `cli-continues`. Flip. Flop. Repeat.
 - **Shared config** - one `AGENTS.md` plus `.agents/` per project, read by every
   agent, following the Linux Foundation AAIF standard.
 
 ## Supported agents
 
-Claude Code, Codex, Gemini CLI, Aider, Goose, Cline, OpenCode, Qwen, Plandex,
+Claude Code, Codex, agy, Aider, Goose, Cline, OpenCode, Qwen, Plandex,
 and Droid. If your agent speaks "terminal", it'll probably feel right at home.
 
 ## Stack

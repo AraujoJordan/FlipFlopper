@@ -79,10 +79,10 @@ pub static AGENTS: &[AgentDef] = &[
         id: "agy",
         name: "Google AGY CLI",
         binary: "agy",
-        aliases: &["gemini"],
+        aliases: &[],
         description: "Google AGY CLI agent",
         launch_args: &[],
-        icon: "/agents/gemini.png",
+        icon: "/agents/agy.png",
     },
     AgentDef {
         id: "cline",

@@ -1,12 +1,16 @@
 # AGENTS.md — FlipFlopper
 
-Cross-tool AI agent instructions (read by Claude Code, Codex, Gemini CLI, Cursor, Aider, etc.
+Cross-tool AI agent instructions (read by Claude Code, Codex, agy, Cursor, Aider, etc.
 via the Linux Foundation AAIF standard).
+
+## Screenshot
+
+![FlipFlopper UI](public/screenshot.png)
 
 ## What this project is
 
 **FlipFlopper** — a cross-platform desktop app (Tauri 2 + SolidJS) that wraps CLI AI coding
-agents (Claude Code, Codex, Gemini CLI, Aider…) in a better GUI:
+agents (Claude Code, Codex, agy, Aider…) in a better GUI:
 
 - Real embedded terminals (PTY via `portable-pty`) per agent
 - File tree with checkbox selection → `@file` injection into the agent

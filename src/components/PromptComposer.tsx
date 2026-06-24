@@ -42,13 +42,6 @@ const AGENT_COMMANDS: Record<string, Array<{ cmd: string; desc: string }>> = {
     { cmd: "/clear", desc: "Clear conversation" },
     { cmd: "/add",   desc: "Add file to context" },
   ],
-  gemini: [
-    { cmd: "/help",   desc: "Show help" },
-    { cmd: "/clear",  desc: "Clear conversation" },
-    { cmd: "/memory", desc: "Show memory" },
-    { cmd: "/chat",   desc: "Enter chat mode" },
-    { cmd: "/tools",  desc: "List available tools" },
-  ],
   agy: [
     { cmd: "/help",        desc: "Show help" },
     { cmd: "/clear",       desc: "Clear conversation" },

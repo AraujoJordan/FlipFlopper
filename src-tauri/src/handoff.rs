@@ -1,3 +1,4 @@
+use crate::agents::{find_agent, launch_binary};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
@@ -141,22 +142,36 @@ pub fn continue_launch(
     let from_tool = continues_tool_id(from_agent);
     let to_tool = continues_tool_id(to_agent);
 
-    let command = if binary == "cli-continues" {
+    // Determine the actual binary name for the target agent.
+    // If it differs from what cli-continues knows (e.g. "agy" vs "gemini"),
+    // skip --in and launch the real binary directly — context is already in
+    // .agents/context.md from the preceding handoff() call.
+    let to_actual_binary = find_agent(to_agent)
+        .and_then(|def| launch_binary(def))
+        .unwrap_or_else(|| to_tool.to_string());
+    let use_continues_target = to_actual_binary == to_tool;
+
+    let command = if binary == "cli-continues" && use_continues_target {
         format!(
             "{} from {} to {}",
             shell_quote(&binary),
             shell_quote(from_tool),
             shell_quote(to_tool)
         )
-    } else if let Some(session_id) = latest_session_id(project_path, from_tool, &binary) {
-        format!(
-            "{} resume {} --in {}",
-            shell_quote(&binary),
-            shell_quote(&session_id),
-            shell_quote(to_tool)
-        )
+    } else if use_continues_target {
+        if let Some(session_id) = latest_session_id(project_path, from_tool, &binary) {
+            format!(
+                "{} resume {} --in {}",
+                shell_quote(&binary),
+                shell_quote(&session_id),
+                shell_quote(to_tool)
+            )
+        } else {
+            shell_quote(&to_actual_binary)
+        }
     } else {
-        shell_quote(&binary)
+        // cli-continues doesn't know this binary by name; launch it directly.
+        shell_quote(&to_actual_binary)
     };
 
     Ok(ContinueLaunch {
@@ -213,9 +228,12 @@ pub fn handoff(
         };
     }
 
+    let from_tool = continues_tool_id(from_agent);
+    let to_tool = continues_tool_id(to_agent);
+
     // cli-continues from <source> to <target>
     let result = Command::new("cli-continues")
-        .args(["from", from_agent, "to", to_agent])
+        .args(["from", from_tool, "to", to_tool])
         .current_dir(project_path)
         .output();
 

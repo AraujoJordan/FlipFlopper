@@ -106,7 +106,7 @@ pub static CATALOG: &[ToolEntry] = &[
     ToolEntry {
         id: "cli-continues",
         name: "continues",
-        description: "Hand off AI agent sessions across tools (Claude → Codex → Gemini…)",
+        description: "Hand off AI agent sessions across tools (Claude → Codex → agy…)",
         binary: "continues",
         icon: "🔄",
         category: "Agents",
@@ -202,7 +202,7 @@ pub static CATALOG: &[ToolEntry] = &[
         name: "Google AGY CLI",
         description: "Google AGY CLI agent",
         binary: "agy",
-        icon: "/agents/gemini.png",
+        icon: "/agents/agy.png",
         category: "Agents",
         installs: &[
             InstallSpec::Shell { os: "macos", command: "curl -fsSL https://antigravity.google/cli/install.sh | bash" },

@@ -74,7 +74,6 @@ export const CONTINUE_AGENT_IDS = new Set([
   "codex",
   "opencode",
   "agy",
-  "gemini",
   "cline",
   "qwen",
   "droid",

@@ -28,7 +28,7 @@ pub struct FileEntry {
 
 const AGENTS_MD_TEMPLATE: &str = r#"# AGENTS.md
 
-This file is read by all AI coding agents (Claude Code, Codex, Gemini CLI, Aider, Cursor, etc.)
+This file is read by all AI coding agents (Claude Code, Codex, agy, Aider, Cursor, etc.)
 via the AAIF/Linux Foundation AGENTS.md standard. Edit it to give every agent consistent
 project-wide instructions.
 
@@ -118,9 +118,9 @@ pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
         if !claude_md.exists() {
             let _ = std::os::unix::fs::symlink("AGENTS.md", &claude_md);
         }
-        let gemini_md = root.join("GEMINI.md");
-        if !gemini_md.exists() {
-            let _ = std::os::unix::fs::symlink("AGENTS.md", &gemini_md);
+        let agy_md = root.join("AGY.md");
+        if !agy_md.exists() {
+            let _ = std::os::unix::fs::symlink("AGENTS.md", &agy_md);
         }
     }
     // On Windows fall back to a copy (no privilege requirement for files)
@@ -130,9 +130,9 @@ pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
         if !claude_md.exists() {
             let _ = fs::copy(&agents_md, &claude_md);
         }
-        let gemini_md = root.join("GEMINI.md");
-        if !gemini_md.exists() {
-            let _ = fs::copy(&agents_md, &gemini_md);
+        let agy_md = root.join("AGY.md");
+        if !agy_md.exists() {
+            let _ = fs::copy(&agents_md, &agy_md);
         }
     }
 
