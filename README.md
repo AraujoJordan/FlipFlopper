@@ -101,7 +101,6 @@ npx tsc --noEmit               # TypeScript must also be happy
 
 PRs welcome. A few house rules so the bots and humans stay friends:
 
-- Work on the **`ai-work`** branch, never push straight to `main`.
 - Commits are imperative and scope-prefixed: `feat(pty): add resize support`.
 - `cargo check` and `npx tsc --noEmit` both have to pass.
 - No new crates or npm packages without a quick chat first.
