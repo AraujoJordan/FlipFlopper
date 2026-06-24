@@ -1,8 +1,18 @@
 {
   "name": "flipflopper",
   "version": "0.1.0",
-  "description": "",
+  "description": "One cockpit for every CLI AI coding agent. A blazingly fast Tauri + SolidJS desktop GUI that wraps Claude Code, Codex, Gemini, Aider, and friends.",
   "type": "module",
+  "author": "Jordan L. Araujo Jr.",
+  "license": "MIT",
+  "homepage": "https://github.com/AraujoJordan/FlipFlopper#readme",
+  "bugs": {
+    "url": "https://github.com/AraujoJordan/FlipFlopper/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AraujoJordan/FlipFlopper.git"
+  },
   "scripts": {
     "start": "vite",
     "dev": "vite",
@@ -10,7 +20,6 @@
     "serve": "vite preview",
     "tauri": "tauri"
   },
-  "license": "MIT",
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",

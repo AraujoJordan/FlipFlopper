@@ -5,8 +5,17 @@ dist
 src-tauri/target
 src-tauri/gen
 
-# Cargo
-Cargo.lock
+# Env / secrets
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editors
+.idea
 
 # OS
 .DS_Store
+Thumbs.db
