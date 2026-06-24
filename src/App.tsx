@@ -1,10 +1,25 @@
 import { Component, createEffect, createSignal, For, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { addTab, store, setStore } from "./lib/store";
 import {
+  CONTINUE_AGENT_IDS,
+  addTab,
+  ensureTabSessionGroup,
+  markTabAutoContinued,
+  rankContinueCandidates,
+  recordContinueAgentUse,
+  recordRecentAgentLimit,
+  store,
+  setStore,
+  type SessionLimitInfo,
+} from "./lib/store";
+import {
+  cliContinuesAvailable,
+  continueAgent,
   getAgents,
   getRecentProjects,
   getToolCatalog,
+  installTool,
+  onPtyExit,
   openProject,
   ptyInput,
   spawnAgent,
@@ -16,7 +31,6 @@ import AgentBar from "./components/AgentBar";
 import TerminalPane from "./components/TerminalPane";
 import FileTree from "./components/FileTree";
 import PreviewPane from "./components/PreviewPane";
-import ToolInstaller from "./components/ToolInstaller";
 import PromptComposer from "./components/PromptComposer";
 import flipflopperLogo from "./assets/flipflopperLogo.png";
 
@@ -26,6 +40,7 @@ const WORKSPACE_STORAGE_KEY = "flipflopper:last-workspace";
 
 interface PersistedTab {
   agentId: string;
+  sessionGroupId?: string;
 }
 
 interface PersistedWorkspace {
@@ -63,6 +78,30 @@ async function resumeLatestSession(sessionId: string): Promise<void> {
 
 const App: Component = () => {
   const [restoreComplete, setRestoreComplete] = createSignal(false);
+  const [autoContinuingFrom, setAutoContinuingFrom] = createSignal<string | null>(null);
+
+  async function waitForPtyExit(sessionId: string, timeoutMs = 10 * 60 * 1000) {
+    let unlisten: (() => void) | null = null;
+    await new Promise<void>(async (resolve) => {
+      const timeout = window.setTimeout(() => {
+        unlisten?.();
+        resolve();
+      }, timeoutMs);
+      unlisten = await onPtyExit(sessionId, () => {
+        window.clearTimeout(timeout);
+        unlisten?.();
+        resolve();
+      });
+    });
+  }
+
+  async function hiddenInstallTool(toolId: string, projectPath: string) {
+    const sessionId = await installTool(toolId, projectPath);
+    await waitForPtyExit(sessionId);
+    const [agents, tools] = await Promise.all([getAgents(), getToolCatalog()]);
+    setStore("agents", agents);
+    setStore("tools", tools);
+  }
 
   onMount(async () => {
     // Boot: load agents, recents, tool catalog
@@ -89,16 +128,18 @@ const App: Component = () => {
         const restoredTabs: Tab[] = [];
 
         for (const savedTab of tabsToRestore) {
-          const agent = agents.find((a) => a.id === savedTab.agentId);
+          const agentId = savedTab.agentId === "gemini" ? "agy" : savedTab.agentId;
+          const agent = agents.find((a) => a.id === agentId);
           if (!agent?.installed) continue;
 
           try {
-            const sessionId = await spawnAgent(savedTab.agentId, project.path);
+            const sessionId = await spawnAgent(agent.id, project.path);
             restoredTabs.push({
               sessionId,
               label: agent.name,
               agentId: agent.id,
               agentIcon: agent.icon,
+              sessionGroupId: savedTab.sessionGroupId,
             });
           } catch (e) {
             console.error(`Failed to restore ${savedTab.agentId} tab:`, e);
@@ -129,6 +170,51 @@ const App: Component = () => {
     setRestoreComplete(true);
   });
 
+  function continueTargetFor(fromAgentId: string) {
+    const project = store.currentProject;
+    if (!project || !CONTINUE_AGENT_IDS.has(fromAgentId)) return null;
+
+    const candidates = rankContinueCandidates(project.path, fromAgentId, store.agents);
+    if (candidates.length === 0) return null;
+
+    return candidates[0];
+  }
+
+  async function autoContinueLimitedTab(sessionId: string, _limit: SessionLimitInfo) {
+    const project = store.currentProject;
+    const from = store.tabs.find((tab) => tab.sessionId === sessionId);
+    if (!project || !from || from.isInstaller || from.limit?.autoContinuedSessionId) return;
+    if (store.activeTabId !== sessionId || autoContinuingFrom()) return;
+
+    recordRecentAgentLimit(project.path, from.agentId);
+    const target = continueTargetFor(from.agentId);
+    if (!target) return;
+
+    setAutoContinuingFrom(sessionId);
+    try {
+      if (!(await cliContinuesAvailable())) {
+        await hiddenInstallTool("cli-continues", project.path);
+      }
+      if (!(await cliContinuesAvailable())) return;
+
+      const continuedSessionId = await continueAgent(project.path, from.agentId, target.id);
+      const sessionGroupId = ensureTabSessionGroup(sessionId);
+      addTab({
+        sessionId: continuedSessionId,
+        label: target.name,
+        agentId: target.id,
+        agentIcon: target.icon,
+        sessionGroupId,
+      });
+      recordContinueAgentUse(project.path, target.id);
+      markTabAutoContinued(sessionId, continuedSessionId);
+    } catch (e) {
+      console.error("Automatic agent continuation failed:", e);
+    } finally {
+      setAutoContinuingFrom(null);
+    }
+  }
+
   createEffect(() => {
     if (!restoreComplete()) return;
 
@@ -140,16 +226,16 @@ const App: Component = () => {
 
     writePersistedWorkspace({
       projectPath: store.currentProject?.path ?? null,
-      tabs: tabs.map((tab) => ({ agentId: tab.agentId })),
+      tabs: tabs.map((tab) => ({
+        agentId: tab.agentId,
+        sessionGroupId: tab.sessionGroupId,
+      })),
       activeIndex,
     });
   });
 
   const hasTerminals = () => store.tabs.length > 0;
-  const rightPanelOpen = () =>
-    store.rightPanel === "preview" ||
-    store.rightPanel === "tools" ||
-    store.rightPanel === "git";
+  const rightPanelOpen = () => store.rightPanel === "git";
 
   return (
     <div class="app">
@@ -178,6 +264,7 @@ const App: Component = () => {
                 <TerminalPane
                   sessionId={tab.sessionId}
                   active={store.activeTabId === tab.sessionId}
+                  onLimitDetected={autoContinueLimitedTab}
                 />
               )}
             </For>
@@ -190,12 +277,7 @@ const App: Component = () => {
       {/* ── Right panel ── */}
       <Show when={rightPanelOpen()}>
         <aside class="right-panel">
-          <Show when={store.rightPanel === "tools"}>
-            <ToolInstaller />
-          </Show>
-          <Show when={store.rightPanel === "preview" || store.rightPanel === "git"}>
-            <PreviewPane />
-          </Show>
+          <PreviewPane />
         </aside>
       </Show>
 
@@ -218,24 +300,6 @@ const App: Component = () => {
           >
             🔀 Git
           </button>
-          <button
-            class={`toolbar-btn ${store.rightPanel === "preview" ? "toolbar-btn--active" : ""}`}
-            onClick={() =>
-              setStore("rightPanel", (v) => (v === "preview" ? "none" : "preview"))
-            }
-            title="Preview"
-          >
-            🌐 Preview
-          </button>
-          <button
-            class={`toolbar-btn ${store.rightPanel === "tools" ? "toolbar-btn--active" : ""}`}
-            onClick={() =>
-              setStore("rightPanel", (v) => (v === "tools" ? "none" : "tools"))
-            }
-            title="Tools"
-          >
-            🧰 Tools
-          </button>
         </div>
       </footer>
     </div>
@@ -246,7 +310,7 @@ const Welcome: Component = () => (
   <div class="welcome">
     <img class="welcome__logo" src={flipflopperLogo} alt="" />
     <h1 class="welcome__title">FlipFlopper</h1>
-    <p class="welcome__sub">Multi-agent CLI cockpit — better UX for AI coding tools</p>
+    <p class="welcome__sub">Multi-agent development platform. Run any AI coding agent, keep your workflow unified and your costs in check</p>
     <div class="welcome__steps">
       <div class="step">
         <span class="step-num">1</span>
@@ -262,24 +326,8 @@ const Welcome: Component = () => (
       </div>
       <div class="step">
         <span class="step-num">4</span>
-        <span>Use <strong>🔀 Flip</strong> to hand off to a different agent mid-task</span>
+        <span>Open more tabs to work in parallel. Tap <strong>Continue</strong> once a session wraps up</span>
       </div>
-    </div>
-    <div class="welcome__agents">
-      <For each={store.agents.filter((a) => a.installed)}>
-        {(a) => (
-          <span class="agent-chip installed">
-            {a.icon} {a.name}
-          </span>
-        )}
-      </For>
-      <For each={store.agents.filter((a) => !a.installed)}>
-        {(a) => (
-          <span class="agent-chip missing" title="Not installed — use 🧰 Tools">
-            {a.icon} {a.name}
-          </span>
-        )}
-      </For>
     </div>
   </div>
 );

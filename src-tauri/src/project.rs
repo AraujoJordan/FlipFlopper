@@ -204,6 +204,121 @@ pub fn list_dir(dir_path: &str) -> Result<Vec<FileEntry>, String> {
     Ok(entries)
 }
 
+/// Search project files and directories for prompt autocomplete.
+/// Returned names are project-relative paths using `/`, ready for `@path` refs.
+pub fn search_files(project_path: &str, query: &str, limit: usize) -> Result<Vec<FileEntry>, String> {
+    let root = PathBuf::from(project_path);
+    if !root.is_dir() {
+        return Err(format!("Not a directory: {project_path}"));
+    }
+
+    let normalized_query = query.trim_start_matches('@').trim_start_matches('/');
+    let mut matches: Vec<(i64, FileEntry)> = Vec::new();
+
+    let walker = WalkBuilder::new(&root)
+        .hidden(false)
+        .git_ignore(true)
+        .build();
+
+    for result in walker {
+        let Ok(entry) = result else {
+            continue;
+        };
+
+        let path = entry.path();
+        if path == root {
+            continue;
+        }
+
+        let Ok(rel_path) = path.strip_prefix(&root) else {
+            continue;
+        };
+
+        let rel = rel_path.to_string_lossy().replace('\\', "/");
+        if rel.is_empty() {
+            continue;
+        }
+
+        if let Some(score) = file_match_score(&rel, normalized_query, path.is_dir()) {
+            matches.push((
+                score,
+                FileEntry {
+                    name: rel,
+                    path: path.to_string_lossy().to_string(),
+                    is_dir: path.is_dir(),
+                },
+            ));
+        }
+    }
+
+    matches.sort_by(|(a_score, a), (b_score, b)| {
+        a_score
+            .cmp(b_score)
+            .then_with(|| match (a.is_dir, b.is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    Ok(matches
+        .into_iter()
+        .take(limit.max(1))
+        .map(|(_, entry)| entry)
+        .collect())
+}
+
+fn file_match_score(path: &str, query: &str, is_dir: bool) -> Option<i64> {
+    if query.is_empty() {
+        let depth = path.matches('/').count() as i64;
+        return Some(depth * 100 + if is_dir { 0 } else { 20 } + path.len() as i64);
+    }
+
+    let path_lower = path.to_lowercase();
+    let query_lower = query.to_lowercase();
+    let basename = path_lower.rsplit('/').next().unwrap_or(&path_lower);
+
+    if path_lower.starts_with(&query_lower) {
+        return Some(if is_dir { 0 } else { 10 } + path.len() as i64);
+    }
+
+    if basename.starts_with(&query_lower) {
+        return Some(100 + if is_dir { 0 } else { 10 } + path.len() as i64);
+    }
+
+    if let Some(index) = path_lower.find(&query_lower) {
+        return Some(300 + index as i64 + path.len() as i64);
+    }
+
+    fuzzy_score(&path_lower, &query_lower).map(|score| 700 + score + path.len() as i64)
+}
+
+fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
+    let mut score = 0_i64;
+    let mut last_match: Option<usize> = None;
+    let mut path_chars = path.char_indices();
+
+    for needle in query.chars() {
+        let mut found = None;
+        for (index, candidate) in path_chars.by_ref() {
+            if candidate == needle {
+                found = Some(index);
+                break;
+            }
+        }
+
+        let index = found?;
+        score += match last_match {
+            Some(prev) => (index.saturating_sub(prev + 1) as i64) * 8,
+            None => index as i64,
+        };
+        last_match = Some(index);
+    }
+
+    Some(score)
+}
+
 // ────────────────────────────────────────────────
 // Recent projects (stored in ~/.config/flipflopper/recents.json)
 // ────────────────────────────────────────────────

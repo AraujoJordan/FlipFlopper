@@ -129,6 +129,11 @@ fn git_rollback(project_path: String, sha: String) -> Result<(), String> {
     git::rollback(&project_path, &sha)
 }
 
+#[tauri::command]
+fn rename_commit(project_path: String, sha: String, message: String) -> Result<(), String> {
+    git::rename_commit(&project_path, &sha, &message)
+}
+
 // ════════════════════════════════════════════════
 // Tools commands
 // ════════════════════════════════════════════════
@@ -164,6 +169,18 @@ fn handoff_agent(
     to_agent: String,
 ) -> HandoffResult {
     handoff::handoff(&project_path, &from_agent, &to_agent)
+}
+
+#[tauri::command]
+fn continue_agent(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    from_agent: String,
+    to_agent: String,
+) -> Result<String, String> {
+    let launch = handoff::continue_launch(&project_path, &from_agent, &to_agent)?;
+    pty::spawn_shell_command(&app, &state, &launch.label, &launch.command, &project_path)
 }
 
 #[tauri::command]
@@ -250,11 +267,13 @@ pub fn run() {
             ensure_work_branch,
             get_git_log,
             git_rollback,
+            rename_commit,
             // Tools
             get_tool_catalog,
             install_tool,
             // Handoff
             handoff_agent,
+            continue_agent,
             cli_continues_available,
             // Dialog
             pick_project_folder,

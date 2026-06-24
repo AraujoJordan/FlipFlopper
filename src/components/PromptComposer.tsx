@@ -5,6 +5,8 @@ import {
   createSignal,
   For,
   on,
+  onCleanup,
+  onMount,
   Show,
 } from "solid-js";
 import { store } from "../lib/store";
@@ -46,6 +48,11 @@ const AGENT_COMMANDS: Record<string, Array<{ cmd: string; desc: string }>> = {
     { cmd: "/memory", desc: "Show memory" },
     { cmd: "/chat",   desc: "Enter chat mode" },
     { cmd: "/tools",  desc: "List available tools" },
+  ],
+  agy: [
+    { cmd: "/help",        desc: "Show help" },
+    { cmd: "/clear",       desc: "Clear conversation" },
+    { cmd: "/keybindings", desc: "Edit keybindings" },
   ],
   aider: [
     { cmd: "/help",      desc: "Show help" },
@@ -113,9 +120,15 @@ const PromptComposer: Component = () => {
   const [text, setText] = createSignal("");
   const [sending, setSending] = createSignal(false);
   const [ac, setAc] = createSignal<AcState | null>(null);
+  const [attachMenuOpen, setAttachMenuOpen] = createSignal(false);
   let textareaRef!: HTMLTextAreaElement;
   let mirrorRef!: HTMLPreElement;
+  let fieldRef!: HTMLDivElement;
+  let leftRef!: HTMLDivElement;
+  let actionsRef!: HTMLDivElement;
+  let sizerRef!: HTMLPreElement;
   let acListRef: HTMLUListElement | undefined;
+  let attachMenuRef: HTMLDivElement | undefined;
 
   // Race-condition guard for async file listings
   let acSeq = 0;
@@ -145,15 +158,70 @@ const PromptComposer: Component = () => {
     if (mirrorRef) mirrorRef.scrollTop = textareaRef.scrollTop;
   }
 
+  // Measure the natural (unwrapped) pixel width of a string using an
+  // off-screen <pre white-space:pre> that shares the textarea's font metrics.
+  // For multi-line input this returns the width of the widest line.
+  function measureWidth(s: string): number {
+    if (!sizerRef) return 0;
+    sizerRef.textContent = s;
+    return sizerRef.scrollWidth;
+  }
+
+  // Grows the field horizontally to fit the content (up to the parent's
+  // width), then vertically once it wraps — and rounds off the pill into a
+  // squarer shape the more it expands in either direction.
   function autoResize() {
+    if (!textareaRef || !fieldRef) return;
+
+    // ── Horizontal: fit the widest line, clamped to the parent ──
+    const parentW = fieldRef.parentElement?.clientWidth ?? window.innerWidth;
+    const sideMargin = 24; // breathing room from the parent edges
+    const maxFieldW = Math.max(280, parentW - sideMargin);
+
+    // Everything around the editable body (buttons, gaps, padding).
+    const chrome =
+      leftRef.offsetWidth +
+      actionsRef.offsetWidth +
+      24 /* two 12px flex gaps */ +
+      28 /* field horizontal padding (14 × 2) */ +
+      2; /* sub-pixel safety */
+
+    // Base width keeps the placeholder fully visible so the box never shrinks
+    // below its resting size while typing short messages.
+    const baseContentW = measureWidth(textareaRef.placeholder ?? "") + 80;
+    const textContentW = measureWidth(text());
+    const baseW = Math.min(Math.ceil(baseContentW + chrome), maxFieldW);
+    const desiredW = Math.ceil(Math.max(baseContentW, textContentW) + chrome);
+    const newW = Math.min(Math.max(desiredW, baseW), maxFieldW);
+    fieldRef.style.width = newW + "px";
+
+    // ── Vertical: depends on the width we just committed ──
     textareaRef.style.height = "auto";
     const maxH = Math.max(80, Math.floor(window.innerHeight * 0.35));
     const nextH = Math.min(textareaRef.scrollHeight, maxH);
     textareaRef.style.height = nextH + "px";
     textareaRef.style.overflowY =
       textareaRef.scrollHeight > maxH ? "auto" : "hidden";
+
+    // ── Shape: pill (t=0) → squared (t=1) as it fills out ──
+    const oneLineH = Math.ceil(13 * 1.65); // single-line textarea height
+    const widthT = maxFieldW > baseW ? (newW - baseW) / (maxFieldW - baseW) : 0;
+    const heightT = maxH > oneLineH ? (nextH - oneLineH) / (maxH - oneLineH) : 0;
+    const t = Math.min(1, Math.max(0, Math.max(widthT, heightT)));
+    const squareRadius = 14;
+    const pillRadius = fieldRef.offsetHeight / 2;
+    const radius = squareRadius + (pillRadius - squareRadius) * (1 - t);
+    fieldRef.style.borderRadius = radius + "px";
+
     syncScroll();
   }
+
+  onMount(() => {
+    autoResize();
+    const onResize = () => autoResize();
+    window.addEventListener("resize", onResize);
+    onCleanup(() => window.removeEventListener("resize", onResize));
+  });
 
   // ── Autocomplete trigger detection ────────────────────────────────────────
 
@@ -281,6 +349,7 @@ const PromptComposer: Component = () => {
 
   async function attachPickedPath(imageOnly = false) {
     if (!hasSession()) return;
+    setAttachMenuOpen(false);
 
     try {
       const path = await pickPromptFile(store.currentProject?.path ?? null, imageOnly);
@@ -295,7 +364,7 @@ const PromptComposer: Component = () => {
 
   function checkpointMessage(prompt: string): string {
     const first = prompt.trimStart().split("\n")[0].slice(0, 72);
-    return `checkpoint: ${first}`;
+    return first || "Checkpoint";
   }
 
   async function send() {
@@ -331,8 +400,8 @@ const PromptComposer: Component = () => {
     setText("");
     setAc(null);
     if (textareaRef) {
-      textareaRef.style.height = "auto";
       textareaRef.style.overflowY = "hidden";
+      autoResize();
     }
   }
 
@@ -360,6 +429,7 @@ const PromptComposer: Component = () => {
       if (e.key === "Escape") {
         e.preventDefault();
         setAc(null);
+        setAttachMenuOpen(false);
         return;
       }
     }
@@ -370,6 +440,7 @@ const PromptComposer: Component = () => {
       return;
     }
     if (e.key === "Escape" && !state) {
+      setAttachMenuOpen(false);
       textareaRef.blur();
     }
   }
@@ -378,30 +449,66 @@ const PromptComposer: Component = () => {
 
   return (
     <div
-      class="prompt-composer"
-      classList={{ "prompt-composer--idle": !hasSession() }}
+      ref={fieldRef!}
+      class="prompt-composer__field"
+      classList={{ "prompt-composer__field--idle": !hasSession() }}
     >
-      {/* Agent target label */}
-      <div class="prompt-composer__header">
-        <Show
-          when={activeTab()}
-          fallback={
-            <span class="prompt-header-hint">
-              Open an agent tab to start composing
-            </span>
-          }
+      {/* Off-screen sizer: measures the natural width of the prompt text */}
+      <pre ref={sizerRef!} class="prompt-sizer" aria-hidden="true" />
+
+      <div class="prompt-field-left" ref={leftRef!}>
+        <div
+          class="prompt-attach-menu"
+          ref={attachMenuRef!}
+          onFocusOut={() => {
+            setTimeout(() => {
+              if (!attachMenuRef?.contains(document.activeElement)) {
+                setAttachMenuOpen(false);
+              }
+            }, 0);
+          }}
         >
-          {(tab) => (
-            <>
-              <span class="prompt-header-icon">{tab().agentIcon}</span>
-              <span class="prompt-header-name">{tab().label}</span>
-              <span class="prompt-header-sep">·</span>
-              <span class="prompt-header-hint">
-                markdown · @file · /command · (⌘↵ sends)
-              </span>
-            </>
-          )}
-        </Show>
+          <button
+            class="prompt-btn-attach"
+            classList={{ "prompt-btn-attach--open": attachMenuOpen() }}
+            disabled={!hasSession() || sending()}
+            onClick={() => setAttachMenuOpen((open) => !open)}
+            title="Attach"
+            aria-haspopup="menu"
+            aria-expanded={attachMenuOpen()}
+          >
+            <svg
+              class="prompt-btn-attach-icon"
+              aria-hidden="true"
+              viewBox="0 -960 960 960"
+            >
+              <path
+                fill="currentColor"
+                d="M440-120v-320H120v-80h320v-320h80v320h320v80H520v320h-80Z"
+              />
+            </svg>
+          </button>
+          <Show when={attachMenuOpen()}>
+            <div class="prompt-attach-dropdown" role="menu">
+              <button
+                class="prompt-attach-item"
+                role="menuitem"
+                onClick={() => attachPickedPath()}
+              >
+                <span class="prompt-btn-icon" aria-hidden="true">📄</span>
+                <span>Attach a file</span>
+              </button>
+              <button
+                class="prompt-attach-item"
+                role="menuitem"
+                onClick={() => attachPickedPath(true)}
+              >
+                <span class="prompt-btn-icon" aria-hidden="true">🖼️</span>
+                <span>Attach an image</span>
+              </button>
+            </div>
+          </Show>
+        </div>
       </div>
 
       {/* Editor body: mirror div + transparent textarea + AC dropdown */}
@@ -417,12 +524,12 @@ const PromptComposer: Component = () => {
           class="prompt-textarea"
           placeholder={
             hasSession()
-              ? "Write a message… @file/path  /command  **bold**  `code`  (⌘↵ sends)"
+              ? "Write a message… @file/path  /command  (⌘↵ sends)"
               : "Open an agent tab first"
           }
           disabled={!hasSession() || sending()}
           value={text()}
-          rows={2}
+          rows={1}
           spellcheck={false}
           autocomplete="off"
           onInput={(e) => {
@@ -477,51 +584,37 @@ const PromptComposer: Component = () => {
         </Show>
       </div>
 
-      {/* Toolbar */}
-      <div class="prompt-composer__footer">
-        <div class="prompt-footer-left">
-          <button
-            class="prompt-btn-attach"
-            disabled={!hasSession() || sending()}
-            onClick={() => attachPickedPath()}
-            title="Attach file"
-          >
-            <span class="prompt-btn-icon" aria-hidden="true">📎</span>
-            <span>Attach</span>
+      <div class="prompt-field-actions" ref={actionsRef!}>
+        <Show when={text().length > 0}>
+          <span class="prompt-char-count">{text().length} chars</span>
+        </Show>
+        <Show when={text().length > 0 && !sending()}>
+          <button class="prompt-btn-clear" onClick={clear} title="Discard" aria-label="Discard prompt">
+            ×
           </button>
-          <button
-            class="prompt-btn-attach"
-            disabled={!hasSession() || sending()}
-            onClick={() => attachPickedPath(true)}
-            title="Attach image"
-          >
-            <span class="prompt-btn-icon" aria-hidden="true">🖼️</span>
-            <span>Image</span>
-          </button>
-          <Show when={text().length > 0}>
-            <span class="prompt-char-count">{text().length} chars</span>
+        </Show>
+        <button
+          class="prompt-btn-send"
+          classList={{ "prompt-btn-send--busy": sending() }}
+          disabled={!hasSession() || !text().trim() || sending()}
+          onClick={send}
+          title="Send (⌘↵)"
+          aria-label="Send prompt"
+        >
+          <Show when={!sending()} fallback={<span aria-hidden="true">…</span>}>
+            <svg
+              class="prompt-btn-send-icon"
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+            >
+              <path
+                fill="currentColor"
+                fill-rule="evenodd"
+                d="M16.6915026,12.4744748 L3.50612381,13.2599618 C3.19218622,13.2599618 3.03521743,13.4170592 3.03521743,13.5741566 L1.15159189,20.0151496 C0.8376543,20.8006365 0.99,21.89 1.77946707,22.52 C2.41,22.99 3.50612381,23.1 4.13399899,22.8429026 L21.714504,14.0454487 C22.6563168,13.5741566 23.1272231,12.6315722 22.9702544,11.6889879 C22.8132856,11.0605983 22.3423792,10.4322088 21.714504,10.118014 L4.13399899,1.16346272 C3.34915502,0.9 2.40734225,1.00636533 1.77946707,1.4776575 C0.994623095,2.10604706 0.8376543,3.0486314 1.15159189,3.99121575 L3.03521743,10.4322088 C3.03521743,10.5893061 3.34915502,10.7464035 3.50612381,10.7464035 L16.6915026,11.5318905 C16.6915026,11.5318905 17.1624089,11.5318905 17.1624089,12.0031827 C17.1624089,12.4744748 16.6915026,12.4744748 16.6915026,12.4744748 Z"
+              />
+            </svg>
           </Show>
-        </div>
-
-        <div class="prompt-footer-actions">
-          <Show when={text().length > 0 && !sending()}>
-            <button class="prompt-btn-clear" onClick={clear} title="Discard">
-              Clear
-            </button>
-          </Show>
-          <button
-            class="prompt-btn-send"
-            classList={{ "prompt-btn-send--busy": sending() }}
-            disabled={!hasSession() || !text().trim() || sending()}
-            onClick={send}
-            title="Send (⌘↵)"
-          >
-            <Show when={!sending()} fallback={<span>Sending…</span>}>
-              <span>Send</span>
-              <kbd class="prompt-kbd">⌘↵</kbd>
-            </Show>
-          </button>
-        </div>
+        </button>
       </div>
     </div>
   );

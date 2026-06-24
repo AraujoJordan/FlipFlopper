@@ -15,8 +15,21 @@ pub struct ToolEntry {
     pub binary: &'static str,
     pub icon: &'static str,
     pub category: &'static str,
-    /// Per-OS install commands: [(os, package_manager, package_name)]
-    pub installs: &'static [(&'static str, &'static str, &'static str)],
+    pub installs: &'static [InstallSpec],
+}
+
+/// Per-OS install command source.
+#[derive(Debug, Clone, Copy)]
+pub enum InstallSpec {
+    Package {
+        os: &'static str,
+        manager: &'static str,
+        package: &'static str,
+    },
+    Shell {
+        os: &'static str,
+        command: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,11 +57,11 @@ pub static CATALOG: &[ToolEntry] = &[
         icon: "📱",
         category: "Mobile",
         installs: &[
-            ("macos", "brew", "scrcpy"),
-            ("linux", "apt", "scrcpy"),
-            ("linux", "snap", "scrcpy"),
-            ("windows", "winget", "Genymobile.scrcpy"),
-            ("windows", "scoop", "scrcpy"),
+            InstallSpec::Package { os: "macos", manager: "brew", package: "scrcpy" },
+            InstallSpec::Package { os: "linux", manager: "apt", package: "scrcpy" },
+            InstallSpec::Package { os: "linux", manager: "snap", package: "scrcpy" },
+            InstallSpec::Package { os: "windows", manager: "winget", package: "Genymobile.scrcpy" },
+            InstallSpec::Package { os: "windows", manager: "scoop", package: "scrcpy" },
         ],
     },
     ToolEntry {
@@ -59,9 +72,9 @@ pub static CATALOG: &[ToolEntry] = &[
         icon: "🌐",
         category: "Web",
         installs: &[
-            ("macos", "brew", "--cask chromium"),
-            ("linux", "apt", "chromium-browser"),
-            ("windows", "winget", "Hibbiki.Chromium"),
+            InstallSpec::Package { os: "macos", manager: "brew", package: "--cask chromium" },
+            InstallSpec::Package { os: "linux", manager: "apt", package: "chromium-browser" },
+            InstallSpec::Package { os: "windows", manager: "winget", package: "Hibbiki.Chromium" },
         ],
     },
     ToolEntry {
@@ -72,9 +85,9 @@ pub static CATALOG: &[ToolEntry] = &[
         icon: "🤖",
         category: "Mobile",
         installs: &[
-            ("macos", "brew", "android-platform-tools"),
-            ("linux", "apt", "adb"),
-            ("windows", "winget", "Google.PlatformTools"),
+            InstallSpec::Package { os: "macos", manager: "brew", package: "android-platform-tools" },
+            InstallSpec::Package { os: "linux", manager: "apt", package: "adb" },
+            InstallSpec::Package { os: "windows", manager: "winget", package: "Google.PlatformTools" },
         ],
     },
     ToolEntry {
@@ -85,22 +98,173 @@ pub static CATALOG: &[ToolEntry] = &[
         icon: "🎬",
         category: "Media",
         installs: &[
-            ("macos", "brew", "ffmpeg"),
-            ("linux", "apt", "ffmpeg"),
-            ("windows", "winget", "Gyan.FFmpeg"),
+            InstallSpec::Package { os: "macos", manager: "brew", package: "ffmpeg" },
+            InstallSpec::Package { os: "linux", manager: "apt", package: "ffmpeg" },
+            InstallSpec::Package { os: "windows", manager: "winget", package: "Gyan.FFmpeg" },
         ],
     },
     ToolEntry {
         id: "cli-continues",
-        name: "cli-continues",
+        name: "continues",
         description: "Hand off AI agent sessions across tools (Claude → Codex → Gemini…)",
-        binary: "cli-continues",
+        binary: "continues",
         icon: "🔄",
         category: "Agents",
         installs: &[
-            ("macos", "npm", "-g cli-continues"),
-            ("linux", "npm", "-g cli-continues"),
-            ("windows", "npm", "-g cli-continues"),
+            InstallSpec::Package { os: "macos", manager: "npm", package: "-g continues" },
+            InstallSpec::Package { os: "linux", manager: "npm", package: "-g continues" },
+            InstallSpec::Package { os: "windows", manager: "npm", package: "-g continues" },
+        ],
+    },
+    ToolEntry {
+        id: "claude",
+        name: "Claude Code",
+        description: "Anthropic's official Claude CLI coding agent",
+        binary: "claude",
+        icon: "/agents/claude.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl -fsSL https://claude.ai/install.sh | bash" },
+            InstallSpec::Shell { os: "linux", command: "curl -fsSL https://claude.ai/install.sh | bash" },
+            InstallSpec::Shell { os: "windows", command: "powershell -ExecutionPolicy ByPass -c \"irm https://claude.ai/install.ps1 | iex\"" },
+            InstallSpec::Package { os: "macos", manager: "brew", package: "--cask claude-code@latest" },
+            InstallSpec::Package { os: "linux", manager: "brew", package: "--cask claude-code" },
+            InstallSpec::Package { os: "windows", manager: "winget", package: "Anthropic.ClaudeCode" },
+        ],
+    },
+    ToolEntry {
+        id: "codex",
+        name: "Codex CLI",
+        description: "OpenAI Codex CLI agent",
+        binary: "codex",
+        icon: "/agents/codex.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" },
+            InstallSpec::Shell { os: "linux", command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" },
+            InstallSpec::Shell { os: "windows", command: "powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"" },
+            InstallSpec::Package { os: "macos", manager: "npm", package: "-g @openai/codex" },
+            InstallSpec::Package { os: "linux", manager: "npm", package: "-g @openai/codex" },
+            InstallSpec::Package { os: "windows", manager: "npm", package: "-g @openai/codex" },
+            InstallSpec::Package { os: "macos", manager: "brew", package: "--cask codex" },
+        ],
+    },
+    ToolEntry {
+        id: "opencode",
+        name: "OpenCode",
+        description: "Open source AI coding agent for the terminal",
+        binary: "opencode",
+        icon: "/agents/opencode.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl -fsSL https://opencode.ai/install | bash" },
+            InstallSpec::Shell { os: "linux", command: "curl -fsSL https://opencode.ai/install | bash" },
+            InstallSpec::Package { os: "macos", manager: "npm", package: "-g opencode-ai" },
+            InstallSpec::Package { os: "linux", manager: "npm", package: "-g opencode-ai" },
+            InstallSpec::Package { os: "windows", manager: "npm", package: "-g opencode-ai" },
+            InstallSpec::Package { os: "macos", manager: "brew", package: "anomalyco/tap/opencode" },
+            InstallSpec::Package { os: "linux", manager: "brew", package: "anomalyco/tap/opencode" },
+            InstallSpec::Package { os: "windows", manager: "scoop", package: "opencode" },
+            InstallSpec::Package { os: "windows", manager: "choco", package: "opencode" },
+        ],
+    },
+    ToolEntry {
+        id: "aider",
+        name: "Aider",
+        description: "AI pair-programming in your terminal",
+        binary: "aider",
+        icon: "/agents/aider.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl -LsSf https://aider.chat/install.sh | sh" },
+            InstallSpec::Shell { os: "linux", command: "curl -LsSf https://aider.chat/install.sh | sh" },
+            InstallSpec::Shell { os: "windows", command: "powershell -ExecutionPolicy ByPass -c \"irm https://aider.chat/install.ps1 | iex\"" },
+            InstallSpec::Package { os: "macos", manager: "pipx", package: "aider-chat" },
+            InstallSpec::Package { os: "linux", manager: "pipx", package: "aider-chat" },
+            InstallSpec::Package { os: "windows", manager: "pipx", package: "aider-chat" },
+        ],
+    },
+    ToolEntry {
+        id: "goose",
+        name: "Goose",
+        description: "Open source local AI agent with CLI workflows",
+        binary: "goose",
+        icon: "/agents/goose.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash" },
+            InstallSpec::Shell { os: "linux", command: "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash" },
+            InstallSpec::Package { os: "macos", manager: "brew", package: "block/goose-cli/goose" },
+        ],
+    },
+    ToolEntry {
+        id: "agy",
+        name: "Google AGY CLI",
+        description: "Google AGY CLI agent",
+        binary: "agy",
+        icon: "/agents/gemini.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl -fsSL https://antigravity.google/cli/install.sh | bash" },
+            InstallSpec::Shell { os: "linux", command: "curl -fsSL https://antigravity.google/cli/install.sh | bash" },
+            InstallSpec::Shell { os: "windows", command: "powershell -ExecutionPolicy ByPass -c \"irm https://antigravity.google/cli/install.ps1 | iex\"" },
+        ],
+    },
+    ToolEntry {
+        id: "cline",
+        name: "Cline",
+        description: "Open coding agent for CLI, IDE, and SDK workflows",
+        binary: "cline",
+        icon: "/agents/cline.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Package { os: "macos", manager: "npm", package: "-g cline" },
+            InstallSpec::Package { os: "linux", manager: "npm", package: "-g cline" },
+            InstallSpec::Package { os: "windows", manager: "npm", package: "-g cline" },
+        ],
+    },
+    ToolEntry {
+        id: "qwen",
+        name: "Qwen Code",
+        description: "Qwen's agentic coding tool for the terminal",
+        binary: "qwen",
+        icon: "/agents/qwen.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "npm install -g @qwen-code/qwen-code@latest" },
+            InstallSpec::Shell { os: "linux", command: "npm install -g @qwen-code/qwen-code@latest" },
+            InstallSpec::Shell { os: "windows", command: "powershell -Command \"Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')\"" },
+            InstallSpec::Package { os: "macos", manager: "npm", package: "-g @qwen-code/qwen-code@latest" },
+            InstallSpec::Package { os: "linux", manager: "npm", package: "-g @qwen-code/qwen-code@latest" },
+            InstallSpec::Package { os: "windows", manager: "npm", package: "-g @qwen-code/qwen-code@latest" },
+        ],
+    },
+    ToolEntry {
+        id: "plandex",
+        name: "Plandex",
+        description: "Large-task coding agent",
+        binary: "plandex",
+        icon: "/agents/plandex.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl -sL https://plandex.ai/install.sh | bash" },
+            InstallSpec::Shell { os: "linux", command: "curl -sL https://plandex.ai/install.sh | bash" },
+        ],
+    },
+    ToolEntry {
+        id: "droid",
+        name: "Droid",
+        description: "Factory's agent-native software development CLI",
+        binary: "droid",
+        icon: "/agents/droid.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "npm install -g droid@latest" },
+            InstallSpec::Shell { os: "linux", command: "npm install -g droid@latest" },
+            InstallSpec::Shell { os: "windows", command: "powershell -Command \"irm https://app.factory.ai/cli/windows | iex\"" },
+            InstallSpec::Package { os: "macos", manager: "npm", package: "-g droid@latest" },
+            InstallSpec::Package { os: "linux", manager: "npm", package: "-g droid@latest" },
+            InstallSpec::Package { os: "windows", manager: "npm", package: "-g droid@latest" },
         ],
     },
 ];
@@ -114,6 +278,10 @@ fn detect_pkg_manager() -> &'static str {
     if which("brew").is_ok() {
         return "brew";
     }
+    #[cfg(target_os = "macos")]
+    if which("pipx").is_ok() {
+        return "pipx";
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -126,6 +294,9 @@ fn detect_pkg_manager() -> &'static str {
         if which("pacman").is_ok() {
             return "pacman";
         }
+        if which("pipx").is_ok() {
+            return "pipx";
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -135,6 +306,12 @@ fn detect_pkg_manager() -> &'static str {
         }
         if which("scoop").is_ok() {
             return "scoop";
+        }
+        if which("choco").is_ok() {
+            return "choco";
+        }
+        if which("pipx").is_ok() {
+            return "pipx";
         }
     }
 
@@ -158,21 +335,47 @@ fn pick_install_cmd(entry: &ToolEntry) -> Option<String> {
     let pm = detect_pkg_manager();
 
     // Prefer the detected package manager; fall back to any available for this OS
-    for &(e_os, e_pm, e_pkg) in entry.installs {
-        if e_os == os && e_pm == pm {
-            return Some(format!("{pm} install {e_pkg}"));
+    for spec in entry.installs {
+        if let InstallSpec::Package {
+            os: e_os,
+            manager,
+            package,
+        } = spec
+        {
+            if *e_os == os && *manager == pm {
+                return Some(format!("{pm} install {package}"));
+            }
         }
     }
-    // Any install for this OS
-    for &(e_os, e_pm, e_pkg) in entry.installs {
-        if e_os == os {
-            return Some(format!("{e_pm} install {e_pkg}"));
+    // Prefer official one-line installers before arbitrary package-manager fallbacks.
+    for spec in entry.installs {
+        if let InstallSpec::Shell { os: e_os, command } = spec {
+            if *e_os == os {
+                return Some((*command).to_string());
+            }
+        }
+    }
+    for spec in entry.installs {
+        if let InstallSpec::Package {
+            os: e_os,
+            manager,
+            package,
+        } = spec
+        {
+            if *e_os == os {
+                return Some(format!("{manager} install {package}"));
+            }
         }
     }
     None
 }
 
 fn get_tool_version(binary: &str) -> Option<String> {
+    // Plandex can open an interactive first-run auth prompt for `--version`.
+    if binary == "plandex" || binary == "pdx" {
+        return None;
+    }
+
     Command::new(binary)
         .arg("--version")
         .output()
@@ -188,6 +391,17 @@ fn get_tool_version(binary: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn tool_binary(entry: &ToolEntry) -> Option<String> {
+    if entry.id == "cli-continues" {
+        return ["continues", "cont", "cli-continues"]
+            .iter()
+            .find(|bin| which(bin).is_ok())
+            .map(|bin| (*bin).to_string());
+    }
+
+    which(entry.binary).ok().map(|_| entry.binary.to_string())
+}
+
 // ────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────
@@ -196,9 +410,9 @@ pub fn list_tools() -> Vec<ToolInfo> {
     CATALOG
         .iter()
         .map(|e| {
-            let installed = which(e.binary).is_ok();
-            let version = if installed {
-                get_tool_version(e.binary)
+            let binary = tool_binary(e);
+            let version = if let Some(binary) = binary.as_deref() {
+                get_tool_version(binary)
             } else {
                 None
             };
@@ -209,7 +423,7 @@ pub fn list_tools() -> Vec<ToolInfo> {
                 description: e.description.to_string(),
                 icon: e.icon.to_string(),
                 category: e.category.to_string(),
-                installed,
+                installed: binary.is_some(),
                 version,
                 install_cmd,
             }

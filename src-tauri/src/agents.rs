@@ -37,7 +37,7 @@ pub static AGENTS: &[AgentDef] = &[
         aliases: &[],
         description: "Anthropic's official Claude CLI coding agent",
         launch_args: &[],
-        icon: "🤖",
+        icon: "/agents/claude.png",
     },
     AgentDef {
         id: "codex",
@@ -46,16 +46,16 @@ pub static AGENTS: &[AgentDef] = &[
         aliases: &[],
         description: "OpenAI Codex CLI agent",
         launch_args: &[],
-        icon: "✨",
+        icon: "/agents/codex.png",
     },
     AgentDef {
-        id: "gemini",
-        name: "Gemini CLI",
-        binary: "gemini",
-        aliases: &["agy"],
-        description: "Google Gemini CLI agent",
+        id: "opencode",
+        name: "OpenCode",
+        binary: "opencode",
+        aliases: &[],
+        description: "Open source AI coding agent for the terminal",
         launch_args: &[],
-        icon: "💫",
+        icon: "/agents/opencode.png",
     },
     AgentDef {
         id: "aider",
@@ -64,16 +64,61 @@ pub static AGENTS: &[AgentDef] = &[
         aliases: &[],
         description: "AI pair-programming in your terminal",
         launch_args: &[],
-        icon: "🛠️",
+        icon: "/agents/aider.png",
     },
     AgentDef {
-        id: "amp",
-        name: "Amp",
-        binary: "amp",
+        id: "goose",
+        name: "Goose",
+        binary: "goose",
         aliases: &[],
-        description: "Amp CLI coding agent",
+        description: "Open source local AI agent with CLI workflows",
         launch_args: &[],
-        icon: "⚡",
+        icon: "/agents/goose.png",
+    },
+    AgentDef {
+        id: "agy",
+        name: "Google AGY CLI",
+        binary: "agy",
+        aliases: &["gemini"],
+        description: "Google AGY CLI agent",
+        launch_args: &[],
+        icon: "/agents/gemini.png",
+    },
+    AgentDef {
+        id: "cline",
+        name: "Cline",
+        binary: "cline",
+        aliases: &[],
+        description: "Open coding agent for CLI, IDE, and SDK workflows",
+        launch_args: &[],
+        icon: "/agents/cline.png",
+    },
+    AgentDef {
+        id: "qwen",
+        name: "Qwen Code",
+        binary: "qwen",
+        aliases: &[],
+        description: "Qwen's agentic coding tool for the terminal",
+        launch_args: &[],
+        icon: "/agents/qwen.png",
+    },
+    AgentDef {
+        id: "plandex",
+        name: "Plandex",
+        binary: "plandex",
+        aliases: &["pdx"],
+        description: "Large-task coding agent",
+        launch_args: &[],
+        icon: "/agents/plandex.png",
+    },
+    AgentDef {
+        id: "droid",
+        name: "Droid",
+        binary: "droid",
+        aliases: &[],
+        description: "Factory's agent-native software development CLI",
+        launch_args: &[],
+        icon: "/agents/droid.png",
     },
 ];
 
@@ -105,6 +150,11 @@ pub fn launch_binary(def: &AgentDef) -> Option<String> {
 
 /// Query version string by running `binary --version`.
 fn get_version(binary: &str) -> Option<String> {
+    // Plandex can open an interactive first-run auth prompt for `--version`.
+    if binary == "plandex" || binary == "pdx" {
+        return None;
+    }
+
     std::process::Command::new(binary)
         .arg("--version")
         .output()
@@ -113,7 +163,11 @@ fn get_version(binary: &str) -> Option<String> {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if s.is_empty() {
                 let s2 = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                if s2.is_empty() { None } else { Some(s2) }
+                if s2.is_empty() {
+                    None
+                } else {
+                    Some(s2)
+                }
             } else {
                 Some(s)
             }

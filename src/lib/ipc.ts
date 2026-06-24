@@ -169,6 +169,12 @@ export const gitRollback = (
   sha: string
 ): Promise<void> => invoke("git_rollback", { projectPath, sha });
 
+export const renameCommit = (
+  projectPath: string,
+  sha: string,
+  message: string
+): Promise<void> => invoke("rename_commit", { projectPath, sha, message });
+
 // ────────────────────────────────────────────────
 // Tools
 // ────────────────────────────────────────────────
@@ -191,6 +197,13 @@ export const handoffAgent = (
   toAgent: string
 ): Promise<HandoffResult> =>
   invoke("handoff_agent", { projectPath, fromAgent, toAgent });
+
+export const continueAgent = (
+  projectPath: string,
+  fromAgent: string,
+  toAgent: string
+): Promise<string> =>
+  invoke("continue_agent", { projectPath, fromAgent, toAgent });
 
 export const cliContinuesAvailable = (): Promise<boolean> =>
   invoke("cli_continues_available");

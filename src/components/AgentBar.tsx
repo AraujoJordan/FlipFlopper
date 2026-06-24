@@ -3,12 +3,97 @@
  * Shows running agent sessions; lets user add new ones, switch, or close.
  */
 import { Component, For, createSignal, Show } from "solid-js";
-import { store, setActiveTab, removeTab, addTab } from "../lib/store";
-import { spawnAgent, ptyKill } from "../lib/ipc";
+import {
+  CONTINUE_AGENT_IDS,
+  addTab,
+  ensureTabSessionGroup,
+  isAgentRecentlyLimited,
+  rankContinueCandidates,
+  recordContinueAgentUse,
+  removeTab,
+  setActiveTab,
+  setStore,
+  sessionGroupColor,
+  store,
+} from "../lib/store";
+import {
+  cliContinuesAvailable,
+  continueAgent,
+  getAgents,
+  getToolCatalog,
+  onPtyExit,
+  spawnAgent,
+  ptyKill,
+  installTool,
+} from "../lib/ipc";
 import type { Tab } from "../lib/store";
+import IconMark from "./IconMark";
 
 const AgentBar: Component = () => {
   const [showPicker, setShowPicker] = createSignal(false);
+  const [showContinuePicker, setShowContinuePicker] = createSignal(false);
+  const [installingAgent, setInstallingAgent] = createSignal<string | null>(null);
+  const [continuing, setContinuing] = createSignal(false);
+
+  const activeTab = () =>
+    store.tabs.find((tab) => tab.sessionId === store.activeTabId) ?? null;
+
+  const continueCandidates = () => {
+    const tab = activeTab();
+    if (!tab || tab.isInstaller) return [];
+    if (!CONTINUE_AGENT_IDS.has(tab.agentId)) return [];
+
+    return rankContinueCandidates(store.currentProject?.path ?? "", tab.agentId, store.agents);
+  };
+
+  const continueMenuAgents = () => {
+    const tab = activeTab();
+    if (!tab || tab.isInstaller || !CONTINUE_AGENT_IDS.has(tab.agentId)) return [];
+
+    return rankContinueCandidates(
+      store.currentProject?.path ?? "",
+      tab.agentId,
+      store.agents,
+      true,
+      false
+    );
+  };
+
+  const continueTarget = () => {
+    const project = store.currentProject;
+    const candidates = continueCandidates();
+    if (!project || candidates.length === 0) return null;
+
+    return candidates[0];
+  };
+
+  async function waitForPtyExit(sessionId: string, timeoutMs = 10 * 60 * 1000) {
+    let unlisten: (() => void) | null = null;
+    await new Promise<void>(async (resolve) => {
+      const timeout = window.setTimeout(() => {
+        unlisten?.();
+        resolve();
+      }, timeoutMs);
+      unlisten = await onPtyExit(sessionId, () => {
+        window.clearTimeout(timeout);
+        unlisten?.();
+        resolve();
+      });
+    });
+  }
+
+  async function refreshAvailability() {
+    const [agents, tools] = await Promise.all([getAgents(), getToolCatalog()]);
+    setStore("agents", agents);
+    setStore("tools", tools);
+    return { agents, tools };
+  }
+
+  async function hiddenInstallTool(toolId: string, projectPath: string) {
+    const sessionId = await installTool(toolId, projectPath);
+    await waitForPtyExit(sessionId);
+    return refreshAvailability();
+  }
 
   async function launchAgent(agentId: string) {
     const project = store.currentProject;
@@ -19,7 +104,21 @@ const AgentBar: Component = () => {
     const agent = store.agents.find((a) => a.id === agentId);
     if (!agent) return;
     if (!agent.installed) {
-      alert(`${agent.name} is not installed. Install it from the Tools panel.`);
+      if (installingAgent() === agentId) return;
+      setInstallingAgent(agentId);
+      try {
+        const { agents } = await hiddenInstallTool(agentId, project.path);
+        const installedAgent = agents.find((a) => a.id === agentId && a.installed);
+        if (installedAgent) {
+          await launchAgent(agentId);
+        }
+        setShowPicker(false);
+      } catch (e) {
+        console.error("Failed to install agent:", e);
+        alert(`Failed to install ${agent.name}: ${e}`);
+      } finally {
+        setInstallingAgent(null);
+      }
       return;
     }
     try {
@@ -38,6 +137,75 @@ const AgentBar: Component = () => {
     }
   }
 
+  async function installContinues() {
+    const project = store.currentProject;
+    if (!project) return false;
+
+    const tool = store.tools.find((t) => t.id === "cli-continues");
+    if (!tool?.install_cmd) {
+      return false;
+    }
+
+    try {
+      await hiddenInstallTool("cli-continues", project.path);
+      return cliContinuesAvailable();
+    } catch (e) {
+      console.error("Failed to install continues:", e);
+      return false;
+    }
+  }
+
+  async function continueActive(targetId?: string) {
+    const project = store.currentProject;
+    const from = activeTab();
+    const target = targetId
+      ? store.agents.find((agent) => agent.id === targetId)
+      : continueTarget();
+
+    if (!project || !from || from.isInstaller || !target) return;
+    if (continuing()) return;
+
+    setContinuing(true);
+    try {
+      if (!(await cliContinuesAvailable())) {
+        const installed = await installContinues();
+        if (!installed) {
+          alert("continues is not installed and automatic installation did not complete.");
+          return;
+        }
+      }
+
+      const sessionId = await continueAgent(project.path, from.agentId, target.id);
+      const sessionGroupId = ensureTabSessionGroup(from.sessionId);
+      const tab: Tab = {
+        sessionId,
+        label: target.name,
+        agentId: target.id,
+        agentIcon: target.icon,
+        sessionGroupId,
+      };
+      recordContinueAgentUse(project.path, target.id);
+      addTab(tab);
+      setShowContinuePicker(false);
+    } catch (e) {
+      console.error("Failed to continue in another agent:", e);
+      alert(`Failed to continue in ${target.name}: ${e}`);
+    } finally {
+      setContinuing(false);
+    }
+  }
+
+  function selectContinueTarget(agentId: string) {
+    setShowContinuePicker(false);
+    void continueActive(agentId);
+  }
+
+  const continueLabel = () => {
+    const target = continueTarget();
+    if (continuing()) return "Continuing...";
+    return target ? `Continue with ${target.name}` : "Continue";
+  };
+
   async function closeTab(sessionId: string, e: MouseEvent) {
     e.stopPropagation();
     try {
@@ -54,11 +222,30 @@ const AgentBar: Component = () => {
         <For each={store.tabs}>
           {(tab) => (
             <button
-              class={`tab ${store.activeTabId === tab.sessionId ? "tab--active" : ""}`}
+              class={`tab ${tab.sessionGroupId ? "tab--grouped" : ""} ${store.activeTabId === tab.sessionId ? "tab--active" : ""}`}
+              style={
+                tab.sessionGroupId
+                  ? ({ "--session-color": sessionGroupColor(tab.sessionGroupId) } as any)
+                  : undefined
+              }
               onClick={() => setActiveTab(tab.sessionId)}
+              title={
+                tab.limit
+                  ? `Limit reached. ${
+                      tab.limit.resetText ?? "Reset time was not reported by this CLI."
+                    }`
+                  : tab.label
+              }
             >
-              <span class="tab-icon">{tab.agentIcon}</span>
+              <IconMark class="tab-icon" icon={tab.agentIcon} alt="" />
               <span class="tab-label">{tab.label}</span>
+              <Show when={tab.limit}>
+                {(limit) => (
+                  <span class="tab-limit-badge">
+                    {limit().resetText ?? "reset unknown"}
+                  </span>
+                )}
+              </Show>
               <span
                 class="tab-close"
                 onClick={(e) => closeTab(tab.sessionId, e as MouseEvent)}
@@ -75,10 +262,42 @@ const AgentBar: Component = () => {
         {/* New tab button */}
         <button
           class="tab tab--new"
-          onClick={() => setShowPicker((v) => !v)}
+          onClick={() => {
+            setShowPicker((v) => !v);
+            setShowContinuePicker(false);
+          }}
           title="Open new agent"
         >
           +
+        </button>
+
+      </div>
+
+      <div class="agent-actions">
+        <button
+          class="tab tab--continue"
+          onClick={() => continueActive()}
+          disabled={!continueTarget() || continuing()}
+          title={
+            continueTarget()
+              ? `Continue in ${continueTarget()!.name}`
+              : "Open an agent tab with another installed agent available"
+          }
+        >
+          <span class="tab-action-icon">↪</span>
+          <span>{continueLabel()}</span>
+        </button>
+
+        <button
+          class="tab tab--continue-menu"
+          onClick={() => {
+            setShowContinuePicker((v) => !v);
+            setShowPicker(false);
+          }}
+          disabled={continueMenuAgents().length === 0 || continuing()}
+          title="Choose continue target"
+        >
+          ▾
         </button>
       </div>
 
@@ -89,18 +308,20 @@ const AgentBar: Component = () => {
           <For each={store.agents}>
             {(agent) => (
               <button
-                class={`agent-picker__item ${!agent.installed ? "agent-picker__item--disabled" : ""}`}
+                class={`agent-picker__item ${!agent.installed ? "agent-picker__item--missing" : ""}`}
                 onClick={() => launchAgent(agent.id)}
-                disabled={!agent.installed}
-                title={agent.installed ? agent.description : `Not installed — use Tools to install`}
+                disabled={installingAgent() === agent.id}
+                title={agent.installed ? agent.description : `Not installed — click to install`}
               >
-                <span class="picker-icon">{agent.icon}</span>
+                <IconMark class="picker-icon" icon={agent.icon} alt="" />
                 <div class="picker-info">
                   <div class="picker-name">{agent.name}</div>
                   <div class="picker-version">
                     {agent.installed
                       ? agent.version ?? "installed"
-                      : "not installed"}
+                      : installingAgent() === agent.id
+                        ? "installing..."
+                        : "click to install"}
                   </div>
                 </div>
               </button>
@@ -109,6 +330,34 @@ const AgentBar: Component = () => {
         </div>
         {/* Backdrop */}
         <div class="backdrop" onClick={() => setShowPicker(false)} />
+      </Show>
+
+      <Show when={showContinuePicker()}>
+        <div class="agent-picker agent-picker--continue">
+          <div class="agent-picker__header">Continue with agent</div>
+          <For each={continueMenuAgents()}>
+            {(agent) => (
+              <button
+                class={`agent-picker__item ${continueTarget()?.id === agent.id ? "agent-picker__item--selected" : ""}`}
+                onClick={() => selectContinueTarget(agent.id)}
+                title={agent.description}
+              >
+                <IconMark class="picker-icon" icon={agent.icon} alt="" />
+                <div class="picker-info">
+                  <div class="picker-name">{agent.name}</div>
+                  <div class="picker-version">
+                    {isAgentRecentlyLimited(store.currentProject?.path ?? "", agent.id)
+                      ? "recently limited"
+                      : continueTarget()?.id === agent.id
+                        ? "default target"
+                        : agent.version ?? "installed"}
+                  </div>
+                </div>
+              </button>
+            )}
+          </For>
+        </div>
+        <div class="backdrop" onClick={() => setShowContinuePicker(false)} />
       </Show>
     </div>
   );

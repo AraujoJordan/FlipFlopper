@@ -35,6 +35,14 @@ fn git(project_path: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
+fn git_output(project_path: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new("git")
+        .args(args)
+        .current_dir(project_path)
+        .output()
+        .map_err(|e| format!("git error: {e}"))
+}
+
 /// True if `project_path` is inside a git repo.
 #[allow(dead_code)]
 pub fn is_git_repo(project_path: &str) -> bool {
@@ -152,6 +160,53 @@ pub fn get_log(project_path: &str, limit: u32) -> Result<Vec<CommitEntry>, Strin
             }
         })
         .collect())
+}
+
+/// Rename a commit message on the current branch. Refuses on main/master and
+/// requires a clean working tree because older commits are rewritten.
+pub fn rename_commit(project_path: &str, sha: &str, message: &str) -> Result<(), String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("Commit message cannot be empty.".to_string());
+    }
+
+    let branch = git(project_path, &["branch", "--show-current"])?;
+    if branch == "main" || branch == "master" {
+        return Err("Rename refused: on main/master. Checkout a work branch first.".to_string());
+    }
+
+    if !get_status(project_path)?.is_empty() {
+        return Err("Rename refused: commit or stash your working tree changes first.".to_string());
+    }
+
+    let full_sha = git(project_path, &["rev-parse", &format!("{sha}^{{commit}}")])?;
+    let head_sha = git(project_path, &["rev-parse", "HEAD"])?;
+    let ancestor = git_output(project_path, &["merge-base", "--is-ancestor", &full_sha, "HEAD"])?;
+    if !ancestor.status.success() {
+        return Err("Rename refused: commit is not on the current branch.".to_string());
+    }
+
+    if full_sha == head_sha {
+        git(project_path, &["commit", "--amend", "-m", message])?;
+        return Ok(());
+    }
+
+    let script = format!(
+        "if [ \"$GIT_COMMIT\" = \"{}\" ]; then printf '%s\\n' \"$NEW_MESSAGE\"; else cat; fi",
+        full_sha
+    );
+    let out = Command::new("git")
+        .args(["filter-branch", "-f", "--msg-filter", &script, "HEAD"])
+        .env("NEW_MESSAGE", message)
+        .current_dir(project_path)
+        .output()
+        .map_err(|e| format!("git error: {e}"))?;
+
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 /// Hard-reset the current branch to `sha`. Refuses on main/master.
