@@ -1,34 +1,15 @@
-name: Build
+name: Release
 
 on:
   push:
-    branches: [main, ai-work]
-  pull_request:
-    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
-  typecheck:
-    name: TypeScript typecheck
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: TypeScript typecheck
-        run: npx tsc --noEmit
-
-  build:
-    needs: typecheck
-    name: Build (${{ matrix.platform }}${{ matrix.target && format(' / {0}', matrix.target) || '' }})
+  release:
+    name: Release (${{ matrix.platform }}${{ matrix.target && format(' / {0}', matrix.target) || '' }})
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -86,18 +67,28 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build the app
+      - name: Build & publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # ── macOS signing / notarization (add secrets later; absent = unsigned) ──
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # ── Windows signing (add secrets later) ──
+          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
-          args: ${{ matrix.args }}
+          tagName: ${{ github.ref_name }}
+          releaseName: "FlipFlopper ${{ github.ref_name }}"
+          releaseBody: |
+            Download the installer for your platform below.
 
-      - name: Upload bundles
-        uses: actions/upload-artifact@v4
-        with:
-          name: flipflopper-${{ matrix.platform }}${{ matrix.target && format('-{0}', matrix.target) || '' }}
-          path: |
-            src-tauri/target/release/bundle/**
-            src-tauri/target/*/release/bundle/**
-          if-no-files-found: error
+            > **Unsigned builds** — these are not code-signed yet.
+            > - **macOS:** right-click the `.dmg` → Open to bypass Gatekeeper.
+            > - **Windows:** click "More info" → "Run anyway" in the SmartScreen prompt.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
