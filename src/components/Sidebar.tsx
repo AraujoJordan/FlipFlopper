@@ -103,7 +103,7 @@ const Sidebar: Component = () => {
       <Show when={store.currentProject}>
         <div class="sidebar__footer">
           <span class="project-badge">
-            {store.currentProject!.is_git ? "🔀" : "📁"}&nbsp;
+            {store.currentProject!.is_git ? "🕐" : "📁"}&nbsp;
             {store.currentProject!.name}
           </span>
           <Show when={store.currentProject!.has_agents_md}>

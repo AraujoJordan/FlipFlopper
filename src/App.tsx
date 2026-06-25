@@ -154,6 +154,13 @@ const App: Component = () => {
 
   return (
     <div class="app">
+      {/* ── Ambient animated background ── */}
+      <div class="ambient-bg" aria-hidden="true">
+        <span class="ambient-blob ambient-blob--a" />
+        <span class="ambient-blob ambient-blob--b" />
+        <span class="ambient-blob ambient-blob--c" />
+      </div>
+
       {/* ── Left sidebar ── */}
       <Sidebar />
 
@@ -212,7 +219,7 @@ const App: Component = () => {
             }
             title="Git"
           >
-            🔀 Git
+            🕐 Git
           </button>
         </div>
       </footer>
@@ -222,7 +229,9 @@ const App: Component = () => {
 
 const Welcome: Component = () => (
   <div class="welcome">
-    <img class="welcome__logo" src={flipflopperLogo} alt="" />
+    <div class="welcome__logo-wrap">
+      <img class="welcome__logo" src={flipflopperLogo} alt="" />
+    </div>
     <h1 class="welcome__title">FlipFlopper</h1>
     <p class="welcome__sub">Multi-agent development platform. Run any AI coding agent, keep your workflow unified and your costs in check</p>
     <div class="welcome__steps">

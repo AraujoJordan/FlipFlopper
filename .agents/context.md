@@ -12,3 +12,11 @@ Built the full FlipFlopper skeleton:
 - Both `cargo check` and `tsc --noEmit` pass clean
 
 Next: `npm run tauri dev` to smoke-test the PTY vertical slice.
+
+## Handoff t=1782310490: agy → qwen
+
+Handoff written to .agents/handoff.md
+
+## Handoff t=1782310503: qwen → codex
+
+Handoff written to .agents/handoff.md

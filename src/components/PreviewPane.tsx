@@ -112,7 +112,7 @@ const PreviewPane: Component = () => {
   return (
     <div class="preview-pane">
       <div class="panel-header">
-        🔀 Git
+        🕐 Git
         <button class="btn-refresh" onClick={refresh} title="Refresh">↻</button>
       </div>
 

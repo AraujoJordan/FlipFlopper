@@ -34,7 +34,7 @@ const TerminalPane: Component<Props> = (props) => {
       theme: {
         background: "#0d1117",
         foreground: "#e6edf3",
-        cursor: "#58a6ff",
+        cursor: "#F5C200",
         selectionBackground: "#264f78",
         black: "#484f58",
         red: "#ff7b72",
@@ -125,14 +125,25 @@ const TerminalPane: Component<Props> = (props) => {
 
   return (
     <div
-      ref={containerRef}
       style={{
         width: "100%",
         height: "100%",
-        display: props.active ? "block" : "none",
+        display: props.active ? "flex" : "none",
+        "flex-direction": "column",
         overflow: "hidden",
+        padding: "6px 8px 4px",
+        "background": "#0d1117",   /* explicit opaque — must not inherit ambient */
+        "box-shadow": "inset 0 1px 0 rgba(255,255,255,.04)",
       }}
-    />
+    >
+      <div
+        ref={containerRef}
+        style={{
+          flex: "1",
+          overflow: "hidden",
+        }}
+      />
+    </div>
   );
 };
 
