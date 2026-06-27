@@ -2,8 +2,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
+use std::sync::{mpsc, Arc, Mutex};
 use uuid::Uuid;
 
 use crate::agents::{find_agent, launch_binary};
@@ -11,6 +10,15 @@ use crate::agents::{find_agent, launch_binary};
 // ────────────────────────────────────────────────
 // Types
 // ────────────────────────────────────────────────
+
+/// Events streamed from a PTY reader thread to the UI.
+#[derive(Debug)]
+pub enum PtyEvent {
+    /// Raw bytes from the PTY master (UTF-8 lossy).
+    Data(String),
+    /// The child process exited; this session is done.
+    Exit,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -30,7 +38,7 @@ pub struct PtySession {
     pub(crate) master: Box<dyn MasterPty + Send>,
 }
 
-/// Shared state stored in Tauri
+/// Shared state owned by the UI; PTY operations lock this from the main thread.
 pub struct PtyManager {
     pub sessions: Arc<Mutex<HashMap<String, PtySession>>>,
 }
@@ -48,13 +56,14 @@ impl PtyManager {
 // ────────────────────────────────────────────────
 
 /// Spawn a new PTY session running the given agent inside `project_path`.
-/// Returns the session ID. Emits events `pty://SESSION_ID` with `PtyOutput`.
+///
+/// Returns `(session_id, receiver)`.  The caller should store the receiver and
+/// drain it on the UI thread (e.g. via `EventLoop::on_tick` / `run_delay`).
 pub fn spawn_session(
-    app: &AppHandle,
     manager: &PtyManager,
     agent_id: &str,
     project_path: &str,
-) -> Result<String, String> {
+) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
     let def = find_agent(agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
     let binary = launch_binary(def).ok_or_else(|| {
         format!(
@@ -64,6 +73,7 @@ pub fn spawn_session(
     })?;
 
     let session_id = Uuid::new_v4().to_string();
+    let (tx, rx) = mpsc::channel::<PtyEvent>();
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -75,34 +85,28 @@ pub fn spawn_session(
         })
         .map_err(|e| format!("Failed to open PTY: {e}"))?;
 
-    // Build the command
     let mut cmd = CommandBuilder::new(&binary);
     for arg in def.launch_args {
         cmd.arg(arg);
     }
     cmd.cwd(project_path);
 
-    // Spawn in the slave end
     let _child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn {binary}: {e}"))?;
 
-    // Clone the reader for the background streaming thread
     let mut reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| format!("Failed to clone PTY reader: {e}"))?;
 
-    // Take the writer
     let writer = pair
         .master
         .take_writer()
         .map_err(|e| format!("Failed to take PTY writer: {e}"))?;
 
-    // Background thread: read from PTY → emit events to frontend
-    let sid_clone = session_id.clone();
-    let app_clone = app.clone();
+    // Background reader thread — sends PtyEvents through the channel.
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -110,15 +114,14 @@ pub fn spawn_session(
                 Ok(0) => break, // EOF — agent exited
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let event = format!("pty://{sid_clone}");
-                    // Best-effort emit; ignore if window is gone
-                    let _ = app_clone.emit(&event, &data);
+                    if tx.send(PtyEvent::Data(data)).is_err() {
+                        break; // receiver dropped (tab closed)
+                    }
                 }
                 Err(_) => break,
             }
         }
-        // Notify frontend that this session ended
-        let _ = app_clone.emit(&format!("pty-exit://{sid_clone}"), ());
+        let _ = tx.send(PtyEvent::Exit);
     });
 
     let session = PtySession {
@@ -135,7 +138,7 @@ pub fn spawn_session(
         .unwrap()
         .insert(session_id.clone(), session);
 
-    Ok(session_id)
+    Ok((session_id, rx))
 }
 
 /// Send keyboard input to a running session.
@@ -191,23 +194,24 @@ pub fn resize_session(
 /// Kill a session and remove it from the map.
 pub fn kill_session(manager: &PtyManager, session_id: &str) -> Result<(), String> {
     let mut sessions = manager.sessions.lock().unwrap();
-    // Dropping the session struct closes the master FD, killing the child
+    // Dropping the session struct closes the master FD, killing the child.
     sessions
         .remove(session_id)
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
     Ok(())
 }
 
-/// Spawn a one-off shell command (e.g. a tool installer) in a new PTY tab.
-/// Returns the session ID; the command runs in `sh -c CMD` (or `cmd /C CMD` on Windows).
+/// Spawn a one-off shell command (e.g. a tool installer or handoff) in a new PTY.
+///
+/// Returns `(session_id, receiver)`.
 pub fn spawn_shell_command(
-    app: &AppHandle,
     manager: &PtyManager,
     label: &str,
     command: &str,
     project_path: &str,
-) -> Result<String, String> {
+) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
     let session_id = Uuid::new_v4().to_string();
+    let (tx, rx) = mpsc::channel::<PtyEvent>();
 
     let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
     let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
@@ -241,8 +245,6 @@ pub fn spawn_shell_command(
         .take_writer()
         .map_err(|e| format!("Writer error: {e}"))?;
 
-    let sid = session_id.clone();
-    let app2 = app.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -250,11 +252,13 @@ pub fn spawn_shell_command(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let _ = app2.emit(&format!("pty://{sid}"), &data);
+                    if tx.send(PtyEvent::Data(data)).is_err() {
+                        break;
+                    }
                 }
             }
         }
-        let _ = app2.emit(&format!("pty-exit://{sid}"), ());
+        let _ = tx.send(PtyEvent::Exit);
     });
 
     let session = PtySession {
@@ -270,7 +274,7 @@ pub fn spawn_shell_command(
         .unwrap()
         .insert(session_id.clone(), session);
 
-    Ok(session_id)
+    Ok((session_id, rx))
 }
 
 /// List active sessions.
