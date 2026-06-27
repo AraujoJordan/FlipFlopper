@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use libui::controls::{Area, HorizontalBox, VerticalBox, Window, WindowType};
+use libui::controls::{Area, Group, HorizontalBox, VerticalBox, Window, WindowType};
 use libui::prelude::*;
 
 use crate::agents;
@@ -53,22 +53,13 @@ pub fn run() {
     let mut left = VerticalBox::new();
     left.set_padded(true);
 
-    let sidebar_widget = sidebar::build(
-        state.clone(),
-        win.clone(),
-        move |path| {
-            // Rebuild file tree when a project is opened.
-            // The file tree is a static widget and cannot be replaced in a
-            // libui VerticalBox after appending.  For now, opening a project
-            // refreshes the AppState; a full dynamic rebuild requires
-            // wrapping the file-tree slot in a Group and swapping children,
-            // which is deferred to the next iteration.
-            let _ = path;
-        },
-    );
-    left.append(sidebar_widget, LayoutStrategy::Compact);
+    // File-tree slot: a Group so we can swap its single child when the project
+    // changes (Group::set_child replaces the contents without needing to remove
+    // from a VerticalBox, which libui doesn't support).
+    let ft_slot = Rc::new(RefCell::new(Group::new("")));
+    ft_slot.borrow_mut().set_margined(false);
 
-    // File tree (built once at startup from the restored project path).
+    // Populate with the restored project's tree (if any), else an empty box.
     {
         let s = state.borrow();
         if let Some(ref proj) = s.project_path.clone() {
@@ -78,12 +69,33 @@ pub fn run() {
                 win.clone(),
                 pty_manager.clone(),
             );
-            left.append(ft, LayoutStrategy::Stretchy);
+            ft_slot.borrow_mut().set_child(ft);
         } else {
-            let placeholder = VerticalBox::new();
-            left.append(placeholder, LayoutStrategy::Stretchy);
+            ft_slot.borrow_mut().set_child(VerticalBox::new());
         }
     }
+
+    // Build sidebar, passing a callback that rebuilds the file-tree slot.
+    let ft_slot_cb = ft_slot.clone();
+    let state_ft = state.clone();
+    let win_ft = win.clone();
+    let pty_ft = pty_manager.clone();
+
+    let sidebar_widget = sidebar::build(
+        state.clone(),
+        win.clone(),
+        move |path| {
+            let new_ft = file_tree::build(
+                state_ft.clone(),
+                path,
+                win_ft.clone(),
+                pty_ft.clone(),
+            );
+            ft_slot_cb.borrow_mut().set_child(new_ft);
+        },
+    );
+    left.append(sidebar_widget, LayoutStrategy::Compact);
+    left.append(ft_slot.borrow().clone(), LayoutStrategy::Stretchy);
 
     hbox.append(left, LayoutStrategy::Compact);
 
@@ -130,9 +142,6 @@ pub fn run() {
             }
         }
     }
-    // TODO: re-spawn saved tabs (snapshot.tabs) with /resume — requires
-    // appending Area widgets dynamically, which is deferred until the basic
-    // layout is confirmed compiling.
 
     // ── Event loop: drain PTY channels every ~16 ms ───────────────────────────
     let mut event_loop = ui.event_loop();
@@ -148,7 +157,6 @@ pub fn run() {
             loop {
                 match tab.receiver.try_recv() {
                     Ok(PtyEvent::Data(bytes)) => {
-                        // Feed the whole byte-slice through the VT parser in one call.
                         tab.parser.advance(&mut tab.term, bytes.as_bytes());
                         got_data = true;
                         tab.dirty = true;
@@ -166,7 +174,6 @@ pub fn run() {
                 }
             }
 
-            // Request a repaint whenever new bytes were received.
             if got_data {
                 if let Some(area) = areas_map.get(&tab.id) {
                     area.queue_redraw_all();

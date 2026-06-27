@@ -23,7 +23,7 @@ use alacritty_terminal::{
 use libui::controls::{Area, AreaDrawParams, AreaHandler, AreaKeyEvent, AreaMouseEvent};
 use libui::draw::{Brush, DrawContext, Path, SolidBrush};
 
-use super::state::AppState;
+use super::state::{AppState, TermSize};
 
 // ── Cell geometry ─────────────────────────────────────────────────────────────
 
@@ -188,6 +188,31 @@ pub struct TerminalAreaHandler {
 
 impl AreaHandler for TerminalAreaHandler {
     fn draw(&mut self, _area: &Area, params: &AreaDrawParams) {
+        // ── Resize detection: update Term + PTY when the pixel area changes ──
+        let new_cols = ((params.area_width / CELL_W).floor() as usize).max(1);
+        let new_rows = ((params.area_height / CELL_H).floor() as usize).max(1);
+
+        let needs_resize = {
+            let state = self.state.borrow();
+            state.tab_index_by_id(&self.session_id).map(|idx| {
+                let tab = &state.tabs[idx];
+                tab.size.cols != new_cols || tab.size.rows != new_rows
+            }).unwrap_or(false)
+        };
+
+        if needs_resize {
+            let mut state = self.state.borrow_mut();
+            if let Some(idx) = state.tab_index_by_id(&self.session_id) {
+                let new_size = TermSize { cols: new_cols, rows: new_rows };
+                state.tabs[idx].size = new_size;
+                state.tabs[idx].term.resize(new_size);
+            }
+            drop(state);
+            let mgr = self.pty_manager.lock().unwrap();
+            let _ = crate::pty::resize_session(&mgr, &self.session_id, new_cols as u16, new_rows as u16);
+        }
+
+        // ── Render ────────────────────────────────────────────────────────────
         let state = self.state.borrow();
         let Some(idx) = state.tab_index_by_id(&self.session_id) else { return };
         let tab = &state.tabs[idx];
