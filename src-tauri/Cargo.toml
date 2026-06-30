@@ -5,40 +5,37 @@ description = "Multi-agent CLI cockpit — better UX for AI coding tools"
 authors = ["araujojordan"]
 edition = "2021"
 
-[[bin]]
-name = "flipflopper"
-path = "src/main.rs"
-
 [lib]
 name = "flipflopper_lib"
-crate-type = ["rlib"]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# ── Native GUI ────────────────────────────────────────────────────────────────
-libui            = "0.4"
-libui-ffi        = "0.4"          # raw FFI for text drawing (uiDrawText etc.)
+tauri               = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde               = { version = "1", features = ["derive"] }
+serde_json          = "1"
 
-# ── Terminal emulation ────────────────────────────────────────────────────────
-alacritty_terminal = "0.26"
+# PTY — cross-platform terminal multiplexing (Unix + Windows ConPTY)
+portable-pty  = "0.8"
 
-# ── PTY — cross-platform terminal multiplexing (Unix + Windows ConPTY) ───────
-portable-pty     = "0.8"
+# Session IDs
+uuid          = { version = "1", features = ["v4"] }
 
-# ── Serialization (used by handoff.rs, project.rs recents, state persistence) ─
-serde            = { version = "1", features = ["derive"] }
-serde_json       = "1"
+# Binary detection for agent/tool discovery
+which         = "6"
 
-# ── Session IDs ───────────────────────────────────────────────────────────────
-uuid             = { version = "1", features = ["v4"] }
+# .gitignore-aware directory walker (ripgrep's ignore crate)
+ignore        = "0.4"
 
-# ── Binary detection for agent/tool discovery ─────────────────────────────────
-which            = "6"
+# Async for background tasks
+tokio         = { version = "1", features = ["full"] }
 
-# ── .gitignore-aware directory walker (ripgrep's ignore crate) ───────────────
-ignore           = "0.4"
+# Home directory detection (cross-platform)
+dirs          = "5"
 
-# ── Home/config directory detection (cross-platform) ─────────────────────────
-dirs             = "5"
-
-# ── SQLite for reading OpenCode session storage ───────────────────────────────
-rusqlite         = { version = "0.31", features = ["bundled"] }
+# SQLite for reading OpenCode session storage
+rusqlite      = { version = "0.31", features = ["bundled"] }

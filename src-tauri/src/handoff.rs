@@ -65,7 +65,7 @@ struct GitContext {
 // Shell / filesystem utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     if value
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))

@@ -1,4 +1,4 @@
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -36,6 +36,11 @@ pub struct PtySession {
     pub(crate) writer: Box<dyn Write + Send>,
     /// The PTY master (used for resize)
     pub(crate) master: Box<dyn MasterPty + Send>,
+    /// The spawned child process — kept so `kill_session` can terminate it
+    /// directly. Dropping the master FD alone (the previous approach) sends
+    /// SIGHUP, but children that ignore it (e.g. the diffx Node server)
+    /// survive as orphaned, port-holding zombies.
+    pub(crate) child: Box<dyn Child + Send + Sync>,
 }
 
 /// Shared state owned by the UI; PTY operations lock this from the main thread.
@@ -91,7 +96,7 @@ pub fn spawn_session(
     }
     cmd.cwd(project_path);
 
-    let _child = pair
+    let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn {binary}: {e}"))?;
@@ -130,6 +135,7 @@ pub fn spawn_session(
         project_path: project_path.to_string(),
         writer,
         master: pair.master,
+        child,
     };
 
     manager
@@ -194,10 +200,12 @@ pub fn resize_session(
 /// Kill a session and remove it from the map.
 pub fn kill_session(manager: &PtyManager, session_id: &str) -> Result<(), String> {
     let mut sessions = manager.sessions.lock().unwrap();
-    // Dropping the session struct closes the master FD, killing the child.
-    sessions
+    let mut session = sessions
         .remove(session_id)
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
+    // Kill the child directly — some processes (e.g. the diffx Node server)
+    // ignore the SIGHUP that dropping the master FD would otherwise send.
+    let _ = session.child.kill();
     Ok(())
 }
 
@@ -231,7 +239,7 @@ pub fn spawn_shell_command(
     cmd.arg(command);
     cmd.cwd(project_path);
 
-    let _child = pair
+    let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Spawn error: {e}"))?;
@@ -267,6 +275,7 @@ pub fn spawn_shell_command(
         project_path: project_path.to_string(),
         writer,
         master: pair.master,
+        child,
     };
     manager
         .sessions
