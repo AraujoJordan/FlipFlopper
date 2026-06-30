@@ -254,6 +254,19 @@ pub static CATALOG: &[ToolEntry] = &[
             InstallSpec::Package { os: "windows", manager: "npm", package: "-g droid@latest" },
         ],
     },
+    ToolEntry {
+        id: "diffx",
+        name: "diffx",
+        description: "GitHub-style local code review UI for AI agent changes",
+        binary: "diffx",
+        icon: "🔍",
+        category: "Web",
+        installs: &[
+            InstallSpec::Shell { os: "macos",   command: "npm install -g diffx-cli" },
+            InstallSpec::Shell { os: "linux",   command: "npm install -g diffx-cli" },
+            InstallSpec::Shell { os: "windows", command: "npm install -g diffx-cli" },
+        ],
+    },
 ];
 
 // ────────────────────────────────────────────────
