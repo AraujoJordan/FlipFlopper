@@ -1,4 +1,5 @@
 import { Component, createEffect, createSignal, For, onMount, Show } from "solid-js";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { store, setStore, addTab } from "./lib/store";
 import {
   getAgents,
@@ -13,7 +14,7 @@ import AgentBar from "./components/AgentBar";
 import TerminalPane from "./components/TerminalPane";
 import FileTree from "./components/FileTree";
 import CommitTimeline from "./components/CommitTimeline";
-import DiffxPane from "./components/DiffxPane";
+import DiffPane from "./components/DiffPane";
 import PromptComposer from "./components/PromptComposer";
 import "./App.css";
 
@@ -62,6 +63,7 @@ export function agentLetter(agentId: string): string {
 }
 
 const App: Component = () => {
+  const win = getCurrentWindow();
   const [branch] = createSignal("main");
   const [continueOpen, setContinueOpen] = createSignal(false);
 
@@ -141,18 +143,42 @@ const App: Component = () => {
     }}>
 
       {/* ── TITLE BAR ── */}
-      <div style={{
-        height: "42px", flex: "0 0 42px",
-        background: "linear-gradient(#16181f, #121419)",
-        "border-bottom": "1px solid #20232d",
-        display: "flex", "align-items": "center",
-        padding: "0 16px", position: "relative",
-        "-webkit-app-region": "drag",
-      }}>
+      <div
+        data-tauri-drag-region
+        style={{
+          height: "42px", flex: "0 0 42px",
+          background: "linear-gradient(#16181f, #121419)",
+          "border-bottom": "1px solid #20232d",
+          display: "flex", "align-items": "center",
+          padding: "0 16px", position: "relative",
+        }}
+      >
+        {/* Traffic-light window controls */}
         <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-          <div style={{ width: "12px", height: "12px", "border-radius": "50%", background: "#ff5f57" }} />
-          <div style={{ width: "12px", height: "12px", "border-radius": "50%", background: "#febc2e" }} />
-          <div style={{ width: "12px", height: "12px", "border-radius": "50%", background: "#28c840" }} />
+          <div
+            onClick={() => win.close()}
+            title="Close"
+            style={{
+              width: "12px", height: "12px", "border-radius": "50%",
+              background: "#ff5f57", cursor: "pointer",
+            }}
+          />
+          <div
+            onClick={() => win.minimize()}
+            title="Minimize"
+            style={{
+              width: "12px", height: "12px", "border-radius": "50%",
+              background: "#febc2e", cursor: "pointer",
+            }}
+          />
+          <div
+            onClick={() => win.toggleMaximize()}
+            title="Maximize"
+            style={{
+              width: "12px", height: "12px", "border-radius": "50%",
+              background: "#28c840", cursor: "pointer",
+            }}
+          />
         </div>
 
         <div style={{
@@ -166,7 +192,7 @@ const App: Component = () => {
             style={{
               "pointer-events": "all", color: "#c4c8d2",
               "font-size": "12.5px", "font-weight": "500",
-              "-webkit-app-region": "no-drag", cursor: "pointer",
+              cursor: "pointer",
             }}
           >
             {store.currentProject?.name ?? "no project"}
@@ -372,8 +398,8 @@ const App: Component = () => {
                 />
               )}
             </For>
-            {/* diffx review pane — overlays terminals when open */}
-            <DiffxPane />
+            {/* native diff review pane — overlays terminals when open */}
+            <DiffPane />
           </div>
         </div>
 

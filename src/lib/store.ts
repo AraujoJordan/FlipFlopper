@@ -1,6 +1,6 @@
 import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
-import { getAgents, getToolCatalog, installTool, onPtyExit, ptyKill, startDiffx } from "./ipc";
+import { getAgents, getToolCatalog, installTool, onPtyExit } from "./ipc";
 
 export interface Tab {
   sessionId: string;
@@ -13,9 +13,11 @@ export interface Tab {
 
 export type SidebarView = "files" | "recents";
 
-export interface DiffxState {
-  sessionId: string;
-  url: string;
+export interface ReviewState {
+  /** git revision range (e.g. "sha~1..sha") or undefined for working-tree */
+  rev: string | undefined;
+  /** file path relative to project root, or undefined for whole-tree */
+  path: string | undefined;
   title: string;
 }
 
@@ -29,7 +31,7 @@ export interface AppStore {
   fileTreePath: string | null;
   tools: ToolInfo[];
   sidebarView: SidebarView;
-  diffx: DiffxState | null;
+  review: ReviewState | null;
 }
 
 const initial: AppStore = {
@@ -42,7 +44,7 @@ const initial: AppStore = {
   fileTreePath: null,
   tools: [],
   sidebarView: "recents",
-  diffx: null,
+  review: null,
 };
 
 export const [store, setStore] = createStore<AppStore>(initial);
@@ -197,35 +199,17 @@ export async function hiddenInstallTool(
   return { agents, tools };
 }
 
-// ── diffx review pane ─────────────────────────────────────────────────────────
+// ── Native diff review pane ───────────────────────────────────────────────────
 
-/** Launch diffx for the given revision range (or working tree if `rev` is
- *  undefined). Installs diffx silently if missing. Replaces any existing
- *  diffx session so ports don't pile up. */
-export async function openDiffx(rev: string | undefined, title: string) {
-  const project = store.currentProject;
-  if (!project) return;
-
-  // Auto-install if missing
-  const tool = store.tools.find((t) => t.id === "diffx");
-  if (tool && !tool.installed) {
-    await hiddenInstallTool("diffx", project.path);
-  }
-
-  // Kill any existing diffx process before starting a new one
-  if (store.diffx) {
-    await ptyKill(store.diffx.sessionId).catch(() => {});
-    setStore("diffx", null);
-  }
-
-  const s = await startDiffx(project.path, rev);
-  setStore("diffx", { sessionId: s.session_id, url: s.url, title });
+/** Open the native review pane for the given revision range (or working tree
+ *  if `rev` is undefined), optionally scoped to a single file.
+ *  No external process — the diff is computed on demand by the backend. */
+export function openReview(rev: string | undefined, title: string, path?: string) {
+  if (!store.currentProject) return;
+  setStore("review", { rev, path, title });
 }
 
-/** Stop the diffx server and close the review pane. */
-export async function closeDiffx() {
-  const d = store.diffx;
-  if (!d) return;
-  setStore("diffx", null);
-  await ptyKill(d.sessionId).catch(() => {});
+/** Close the native review pane. */
+export function closeReview() {
+  setStore("review", null);
 }

@@ -3,6 +3,7 @@ mod git;
 mod handoff;
 mod project;
 mod pty;
+mod review;
 mod tools;
 
 use tauri::{Emitter, State};
@@ -12,6 +13,7 @@ use agents::AgentInfo;
 use git::{CommitEntry, CommitResult, FileStatus};
 use project::{FileEntry, ProjectInfo};
 use pty::{PtyEvent, PtyManager, SessionInfo};
+use review::FileDiff;
 use tools::ToolInfo;
 
 // Bridge a PtyEvent receiver to Tauri events on the given session_id.
@@ -177,80 +179,19 @@ fn install_tool(
 }
 
 // ════════════════════════════════════════════════
-// diffx review server
+// Native diff review
 // ════════════════════════════════════════════════
 
-#[derive(serde::Serialize)]
-struct DiffxSession {
-    session_id: String,
-    port: u16,
-    url: String,
-}
-
-/// Bind to 127.0.0.1:0 so the OS gives us a free port, read it, then drop the
-/// listener. There's a tiny TOCTOU window but diffx grabs the port immediately.
-fn pick_free_port() -> Result<u16, String> {
-    use std::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("Failed to find free port: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to read port: {e}"))?
-        .port();
-    Ok(port)
-}
-
+/// Return structured diffs for a native GitHub-style review pane.
+/// `rev=None` → working-tree vs HEAD; `rev=Some("sha~1..sha")` → commit diff.
+/// `path` optionally scopes to a single file (relative to project root).
 #[tauri::command]
-fn start_diffx(
-    app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
+fn get_review_diff(
     project_path: String,
     rev: Option<String>,
     path: Option<String>,
-) -> Result<DiffxSession, String> {
-    let port = pick_free_port()?;
-    let mut cmd = format!("diffx --no-open -p {port}");
-    let rev = rev.filter(|r| !r.is_empty());
-    let path = path.filter(|p| !p.is_empty());
-    if rev.is_some() || path.is_some() {
-        cmd.push_str(" --");
-        if let Some(r) = &rev {
-            cmd.push(' ');
-            cmd.push_str(r);
-        }
-        if let Some(p) = &path {
-            cmd.push_str(" -- ");
-            cmd.push_str(&handoff::shell_quote(p));
-        }
-    }
-    let (session_id, rx) = pty::spawn_shell_command(&state, "diffx", &cmd, &project_path)?;
-    bridge_pty(app, session_id.clone(), rx);
-
-    // Wait until the diffx server is actually accepting connections before
-    // returning. The PTY spawn is async — Node can take 1-2s to bind its
-    // port, and if the frontend navigates the iframe while the port is still
-    // closed the cross-origin `onload` event is unreliable (WKWebView may
-    // never fire it), leaving the pane stuck on "Starting diffx…" forever.
-    // A Rust-side TCP check has none of those cross-origin quirks.
-    {
-        use std::net::TcpStream;
-        use std::time::{Duration, Instant};
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        // If we time out we still return the session — the pane's Reload /
-        // Open-in-browser buttons give the user an escape hatch.
-    }
-
-    Ok(DiffxSession {
-        session_id,
-        port,
-        url: format!("http://localhost:{port}"),
-    })
+) -> Result<Vec<FileDiff>, String> {
+    review::get_review_diff(&project_path, rev, path)
 }
 
 // ════════════════════════════════════════════════
@@ -350,7 +291,8 @@ pub fn run() {
             // Tools
             get_tool_catalog,
             install_tool,
-            start_diffx,
+            // Review
+            get_review_diff,
             // Handoff
             continue_agent,
             // Dialog

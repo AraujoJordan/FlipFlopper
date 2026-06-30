@@ -128,18 +128,42 @@ export const gitRollback = (projectPath: string, sha: string): Promise<void> =>
 export const renameCommit = (projectPath: string, sha: string, message: string): Promise<void> =>
   invoke("rename_commit", { projectPath, sha, message });
 
-// ── diffx review server ───────────────────────────────────────────────────────
+// ── Native diff review ───────────────────────────────────────────────────────
 
-export interface DiffxSession {
-  session_id: string;
-  port: number;
-  url: string;
+export interface DiffLine {
+  kind: "context" | "add" | "del";
+  old_lineno: number | null;
+  new_lineno: number | null;
+  content: string;
 }
 
-/** Start a diffx review server. `rev` is an optional git revision range like
- *  "abc123~1..abc123"; omit or pass undefined for working-tree changes. */
-export const startDiffx = (projectPath: string, rev?: string): Promise<DiffxSession> =>
-  invoke("start_diffx", { projectPath, rev: rev ?? null });
+export interface Hunk {
+  header: string;
+  old_start: number;
+  new_start: number;
+  lines: DiffLine[];
+}
+
+export interface FileDiff {
+  old_path: string | null;
+  new_path: string | null;
+  /** "added" | "modified" | "deleted" | "renamed" | "binary" */
+  status: string;
+  is_binary: boolean;
+  additions: number;
+  deletions: number;
+  hunks: Hunk[];
+}
+
+/** Return structured diffs for the native review pane.
+ *  `rev=undefined` → working-tree vs HEAD; `rev="sha~1..sha"` → commit diff.
+ *  `path` optionally scopes to one file (relative to project root). */
+export const getReviewDiff = (
+  projectPath: string,
+  rev?: string,
+  path?: string,
+): Promise<FileDiff[]> =>
+  invoke("get_review_diff", { projectPath, rev: rev ?? null, path: path ?? null });
 
 // ── Tools ────────────────────────────────────────────────────────────────────
 

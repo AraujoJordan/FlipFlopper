@@ -1,5 +1,5 @@
 import { Component, createResource, createSignal, For, Show, onCleanup } from "solid-js";
-import { store, openDiffx } from "../lib/store";
+import { store, openReview } from "../lib/store";
 import { getGitLog } from "../lib/ipc";
 import { agentColor, agentLetter } from "../App";
 
@@ -58,9 +58,9 @@ const CommitTimeline: Component = () => {
 
         {/* Review working-tree changes */}
         <button
-          onclick={() => openDiffx(undefined, "Working changes")}
+          onclick={() => openReview(undefined, "Working changes")}
           disabled={!store.currentProject}
-          title="Review uncommitted changes with diffx"
+          title="Review uncommitted changes"
           style={{
             "margin-left": "auto",
             display: "flex", "align-items": "center", gap: "5px",
@@ -96,7 +96,7 @@ const CommitTimeline: Component = () => {
 
             return (
               <div
-                onclick={() => openDiffx(`${commit.sha}~1..${commit.sha}`, commit.short_sha)}
+                onclick={() => openReview(`${commit.sha}~1..${commit.sha}`, commit.short_sha)}
                 title={`Review commit ${commit.short_sha}`}
                 style={{
                   position: "relative",
