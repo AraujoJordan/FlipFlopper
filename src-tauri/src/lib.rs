@@ -206,16 +206,46 @@ fn start_diffx(
     state: State<'_, PtyManager>,
     project_path: String,
     rev: Option<String>,
+    path: Option<String>,
 ) -> Result<DiffxSession, String> {
     let port = pick_free_port()?;
     let mut cmd = format!("diffx --no-open -p {port}");
-    if let Some(r) = rev {
-        if !r.is_empty() {
-            cmd.push_str(&format!(" -- {r}"));
+    let rev = rev.filter(|r| !r.is_empty());
+    let path = path.filter(|p| !p.is_empty());
+    if rev.is_some() || path.is_some() {
+        cmd.push_str(" --");
+        if let Some(r) = &rev {
+            cmd.push(' ');
+            cmd.push_str(r);
+        }
+        if let Some(p) = &path {
+            cmd.push_str(" -- ");
+            cmd.push_str(&handoff::shell_quote(p));
         }
     }
     let (session_id, rx) = pty::spawn_shell_command(&state, "diffx", &cmd, &project_path)?;
     bridge_pty(app, session_id.clone(), rx);
+
+    // Wait until the diffx server is actually accepting connections before
+    // returning. The PTY spawn is async — Node can take 1-2s to bind its
+    // port, and if the frontend navigates the iframe while the port is still
+    // closed the cross-origin `onload` event is unreliable (WKWebView may
+    // never fire it), leaving the pane stuck on "Starting diffx…" forever.
+    // A Rust-side TCP check has none of those cross-origin quirks.
+    {
+        use std::net::TcpStream;
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // If we time out we still return the session — the pane's Reload /
+        // Open-in-browser buttons give the user an escape hatch.
+    }
+
     Ok(DiffxSession {
         session_id,
         port,
