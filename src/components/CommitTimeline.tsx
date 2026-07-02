@@ -22,7 +22,7 @@ const CommitTimeline: Component = () => {
     return tab?.agentId ?? "claude";
   };
 
-  const branch = () => "main";
+  const branch = () => store.currentBranch;
 
   return (
     <div style={{

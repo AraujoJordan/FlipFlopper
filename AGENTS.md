@@ -1,77 +1,202 @@
-# AGENTS.md — FlipFlopper
+# AGENTS.md - FlipFlopper
 
-Cross-tool AI agent instructions (read by Claude Code, Codex, agy, Cursor, Aider, etc.
-via the Linux Foundation AAIF standard).
+Cross-tool AI agent instructions for this repository. `CLAUDE.md`, `AGY.md`,
+and `GEMINI.md` are symlinks to this file, so keep it accurate and practical.
 
-## Screenshot
+## Project Snapshot
 
-![FlipFlopper UI](public/screenshot.png)
+FlipFlopper is a cross-platform desktop cockpit for CLI AI coding agents. It
+uses Tauri 2 for the native shell, Rust for backend commands, and SolidJS +
+Vite + TypeScript for the UI.
 
-## What this project is
+The current source tree is a Tauri/Solid app. Older commits and some stale docs
+mention a libui rewrite, `cli-continues`, `diffx`, `Sidebar`, `ToolInstaller`,
+and `PreviewPane`; those are not the active implementation in `src/`.
 
-**FlipFlopper** — a cross-platform desktop app (Tauri 2 + SolidJS) that wraps CLI AI coding
-agents (Claude Code, Codex, agy, Aider…) in a better GUI:
+Currently implemented:
 
-- Real embedded terminals (PTY via `portable-pty`) per agent
-- File tree with checkbox selection → `@file` injection into the agent
-- Tool installer (scrcpy, chromium, adb…)
-- Webview preview for dev-server changes
-- Git auto-commit on the `ai-work` branch
-- Agent handoff via `cli-continues` (switch Claude → Codex mid-session)
-- Shared config for every agent per project via AGENTS.md + `.agents/`
+- Embedded PTY-backed terminal tabs for installed CLI agents.
+- Agent registry and install detection for Claude Code, Codex, OpenCode, Aider,
+  Goose, agy, Cline, Qwen Code, Plandex, and Droid.
+- Project picker, recent project persistence, and per-project `.agents/`
+  scaffolding.
+- Lazy, `.gitignore`-aware file explorer that highlights git status and opens
+  native diffs.
+- Prompt composer that sends text to the active PTY; if no agent is active, it
+  attempts a git auto-commit with the prompt as the message.
+- Commit timeline that opens per-commit diffs.
+- Native GitHub-style diff review overlay, replacing the old external `diffx`
+  iframe/server flow.
+- In-house agent handoff that reads native session stores when possible, writes
+  `.agents/handoff.md`, appends `.agents/context.md`, and launches the target
+  agent with seeded context where the target CLI supports it.
+- Tool catalog and install-command backend; no dedicated current
+  `ToolInstaller.tsx` panel exists.
 
-## Stack
+Known gaps / current quirks:
 
-- **Backend:** Rust + Tauri 2 (`src-tauri/`)
-- **Frontend:** SolidJS + Vite + TypeScript (`src/`)
-- **Key crates:** `portable-pty`, `which`, `ignore` (ripgrep), `dirs`, `tauri-plugin-dialog`
-- **Key npm packages:** `@xterm/xterm`, `@xterm/addon-fit`
+- The visible branch labels in `src/App.tsx` and
+  `src/components/CommitTimeline.tsx` are hardcoded to `main`.
+- The git backend refuses auto-commit, rollback, and commit rename on
+  `main`/`master`; use `ai-work` for agent work.
+- IPC wrappers exist for `ensure_work_branch`, `git_rollback`,
+  `rename_commit`, `inject_file_refs`, and `pick_prompt_file`, but the current
+  UI does not wire all of them.
+- `project::search_files` exists but is not exposed through `lib.rs`.
+- `.agents/settings.json` may still mention `cli-continues`; current
+  `handoff.rs` no longer depends on it.
+- The README is user-facing and partly stale. Prefer source files and this
+  AGENTS.md when resolving conflicts.
 
-## Build & dev
+## Build And Checks
 
 ```sh
-npm install            # frontend deps
-npm run tauri dev      # start dev mode (compiles Rust + hot-reloads frontend)
-npm run tauri build    # production build
+npm install
+npm run dev
+npm run tauri dev
+npm run build
+npm run tauri build
+npx tsc --noEmit
+cargo check
 ```
 
-Rust checks: `cd src-tauri && cargo check`
+Notes:
 
-## Architecture notes
+- Root `Cargo.toml` is a workspace with `src-tauri` as the member, so
+  `cargo check` works from the repo root. `cd src-tauri && cargo check` is also
+  fine.
+- `npm run dev` starts only Vite. Use `npm run tauri dev` for the desktop app.
+- For docs-only edits, build checks are usually unnecessary; still inspect the
+  diff.
 
-```
+## Source Map
+
+```text
 src/
-  App.tsx              — three-pane layout (sidebar | terminal tabs | right panel)
-  lib/ipc.ts           — all Tauri invoke() wrappers (typed)
-  lib/store.ts         — SolidJS store (global UI state)
+  App.tsx                    top-level app shell, title bar, tabs, layout,
+                             continue menu, workspace restore
+  App.css                    global UI styles
+  index.tsx                  Solid entry point
+  lib/ipc.ts                 typed Tauri invoke/listen wrappers
+  lib/store.ts               Solid store, tab/session helpers, review state
   components/
-    AgentBar.tsx       — tab bar for running agent sessions
-    TerminalPane.tsx   — xterm.js terminal connected to a PTY session
-    Sidebar.tsx        — project picker + file tree host
-    FileTree.tsx       — .gitignore-aware file tree with @ref injection
-    ToolInstaller.tsx  — curated tool catalog with per-OS install commands
-    PreviewPane.tsx    — webview preview + git commit panel
+    AgentBar.tsx             terminal tab strip and new-tab behavior
+    TerminalPane.tsx         xterm.js instance wired to PTY events
+    FileTree.tsx             lazy explorer, git status badges, review entry
+    PromptComposer.tsx       bottom prompt input, PTY send / auto-commit path
+    CommitTimeline.tsx       recent commits, working-tree review button
+    DiffPane.tsx             native unified/split diff overlay
 
 src-tauri/src/
-  pty.rs               — PTY session manager (spawn/read/write/resize/kill)
-  agents.rs            — agent registry + installed status detection
-  project.rs           — .agents/ + AGENTS.md scaffolding, file tree lister
-  git.rs               — git status + auto-commit (shell-based)
-  tools.rs             — tool catalog + per-OS install command resolution
-  handoff.rs           — cli-continues wrapper for agent switching
-  lib.rs               — Tauri Builder + all #[tauri::command] handlers
+  lib.rs                     Tauri builder, command registry, event bridge
+  main.rs                    native entry point
+  pty.rs                     portable-pty session lifecycle and shell commands
+  agents.rs                  static agent registry and PATH/version detection
+  project.rs                 AGENTS.md/.agents scaffolding, recents, file tree
+  git.rs                     shell-based status, commit, log, rename, rollback
+  review.rs                  git diff parser for native review pane
+  tools.rs                   tool catalog, package manager detection, installs
+  handoff.rs                 in-house session parser and handoff launcher
+
+public/
+  agents/                    bundled agent logo assets
+  screenshot.png             README/AGENTS screenshot
+
+.agents/
+  settings.json              dogfooded project settings
+  context.md                 rolling handoff notes
+  handoff.md                 generated, gitignored handoff payload
 ```
 
-## Conventions
+Large generated folders may exist locally (`node_modules/`, `dist/`, `target/`,
+`src-tauri/target/`). Exclude them from searches unless the task explicitly
+requires generated output.
 
-- **Commits:** imperative, specific, scope-prefixed — e.g. `feat(pty): add resize support`
-  Always commit to the `ai-work` branch, never directly to `main`.
-- **Rust:** `cargo check` must pass before committing; suppress dead_code warnings with `#[allow(dead_code)]` only if genuinely needed.
-- **TypeScript:** `npx tsc --noEmit` must pass.
-- **Error handling:** Tauri commands return `Result<T, String>` — surface the String to the user, never silently swallow.
-- **No new files without discussion** — ask before adding crates or npm packages.
+## Backend Contracts
 
-## File reference convention
+- Tauri commands return `Result<T, String>` for fallible work. Preserve useful
+  error text and surface it to the UI rather than silently swallowing it.
+- `lib.rs` is the IPC boundary. When adding a backend capability, update the
+  Rust command, `generate_handler!`, and the typed wrapper in `src/lib/ipc.ts`.
+- PTY output is bridged to frontend events named `pty://{session_id}` and
+  `pty-exit://{session_id}`.
+- `pty::kill_session` intentionally kills the child process directly. Do not
+  regress this to only dropping PTY handles.
+- `project::scaffold` must be idempotent and must not overwrite user-created
+  `AGENTS.md`, `.agents/settings.json`, or `.agents/context.md`.
+- `review.rs` shells out to `git diff` and parses unified diff text into
+  structured data. Keep parsing tolerant; malformed lines should not panic.
+- `handoff.rs` is best-effort. Missing session stores should fall back to git
+  context, not fail the handoff.
+- Handoff has structured readers for Claude Code, Codex, agy/Gemini, Qwen,
+  OpenCode, Droid, and Cline. Aider, Goose, and Plandex currently fall back to
+  git-only context.
 
-Use `@relative/path` (relative to the project root) when referencing files in agent prompts.
-Line ranges: `@src/pty.rs:42-60`.
+## Frontend Contracts
+
+- Match the current SolidJS style: small components, typed IPC calls, Solid
+  store helpers, and mostly inline styles with shared global CSS in `App.css`.
+- `store.review` controls the diff overlay. Use `openReview()` and
+  `closeReview()` rather than local duplicate state.
+- `TerminalPane` owns xterm lifecycle, PTY listeners, resize observer, and
+  input forwarding. Clean up listeners on unmount.
+- `FileTree` fetches one directory level at a time via `get_file_tree`; keep it
+  lazy for large repositories.
+- `CommitTimeline` and `FileTree` should open native review diffs, not spawn an
+  external preview server.
+- Keep UI text compact and operational. This is a desktop workbench, not a
+  marketing page.
+
+## Git And Commit Rules
+
+- Work on `ai-work`. Never commit directly to `main`.
+- If asked to commit, check the branch first:
+
+```sh
+git branch --show-current
+git status --short
+```
+
+- Commit messages should be imperative, specific, and usually scope-prefixed,
+  for example `feat(pty): add resize support`.
+- Do not run destructive git commands such as `git reset --hard`, checkout of
+  user changes, or rollback flows unless the user explicitly asks.
+- The app's `auto_commit` stages all changes and refuses `main`/`master`.
+  Treat that as a safety boundary.
+
+## Dependency Policy
+
+- Do not add new files, crates, or npm packages without discussing it first.
+- Prefer existing dependencies and local patterns:
+  `portable-pty`, `which`, `ignore`, `dirs`, `rusqlite`, Tauri plugins,
+  `@xterm/xterm`, `@xterm/addon-fit`, `highlight.js`, and SolidJS.
+- If a dependency change is approved, update the relevant lockfile and run the
+  matching checks.
+
+## Working Practices For Agents
+
+- Start by reading the relevant source files. Do not rely only on README claims.
+- Use `rg` and exclude generated folders:
+
+```sh
+rg "pattern" src src-tauri public AGENTS.md README.md
+rg --files -g '!node_modules/**' -g '!dist/**' -g '!target/**' -g '!src-tauri/target/**'
+```
+
+- Keep edits scoped. Avoid drive-by refactors, formatting churn, or generated
+  artifact changes.
+- Respect dirty worktrees. Never revert user changes unless explicitly asked.
+- For Rust backend changes, run `cargo check`.
+- For TypeScript/frontend changes, run `npx tsc --noEmit`.
+- For Tauri integration or PTY changes, prefer a manual `npm run tauri dev`
+  smoke test when practical.
+
+## File Reference Convention
+
+Use `@relative/path` when referring to files in agent prompts. Include line
+ranges when helpful:
+
+```text
+@src-tauri/src/pty.rs:42-60
+@src/components/DiffPane.tsx
+```

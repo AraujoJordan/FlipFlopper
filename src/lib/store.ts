@@ -1,6 +1,6 @@
 import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
-import { getAgents, getToolCatalog, installTool, onPtyExit, readFileText } from "./ipc";
+import { getAgents, getToolCatalog, installTool, onPtyExit, readFileText, getCurrentBranch } from "./ipc";
 
 export interface Tab {
   sessionId: string;
@@ -51,6 +51,7 @@ export interface AppStore {
   editorOpen: boolean;
   /** bumped after saves so git-status consumers refetch */
   gitStatusVersion: number;
+  currentBranch: string;
 }
 
 const initial: AppStore = {
@@ -68,6 +69,7 @@ const initial: AppStore = {
   activeEditorPath: null,
   editorOpen: false,
   gitStatusVersion: 0,
+  currentBranch: "main",
 };
 
 export const [store, setStore] = createStore<AppStore>(initial);
@@ -315,3 +317,21 @@ export function refreshEditorBaseline(path: string, content: string, modifiedMs:
 export function bumpGitStatus() {
   setStore("gitStatusVersion", (v) => v + 1);
 }
+
+// ── Git branch helpers ─────────────────────────────────────────────────────────
+
+/** Fetch current git branch and update the store. */
+export async function updateCurrentBranch() {
+  const projectPath = store.currentProject?.path;
+  if (!projectPath) {
+    setStore("currentBranch", "main");
+    return;
+  }
+  try {
+    const branchName = await getCurrentBranch(projectPath);
+    setStore("currentBranch", branchName || "main");
+  } catch (e) {
+    setStore("currentBranch", "main");
+  }
+}
+

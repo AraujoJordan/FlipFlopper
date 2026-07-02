@@ -220,3 +220,9 @@ pub fn rollback(project_path: &str, sha: &str) -> Result<(), String> {
     git(project_path, &["reset", "--hard", sha])?;
     Ok(())
 }
+
+/// Get the current active branch name.
+pub fn get_current_branch(project_path: &str) -> Result<String, String> {
+    git(project_path, &["branch", "--show-current"])
+}
+
