@@ -63,6 +63,52 @@ export function agentLetter(agentId: string): string {
   return map[agentId] ?? agentId[0]?.toUpperCase() ?? "?";
 }
 
+export const AgentLogo: Component<{
+  agentId: string;
+  icon?: string | null;
+  name?: string;
+  size?: number;
+  radius?: number;
+}> = (props) => {
+  const [imageFailed, setImageFailed] = createSignal(false);
+  const size = () => props.size ?? 24;
+  const radius = () => props.radius ?? 7;
+
+  return (
+    <span style={{
+      width: `${size()}px`, height: `${size()}px`,
+      "border-radius": `${radius()}px`,
+      background: `${agentColor(props.agentId)}22`,
+      border: "1px solid rgba(255,255,255,.08)",
+      display: "flex", "align-items": "center", "justify-content": "center",
+      overflow: "hidden",
+      flex: "0 0 auto",
+    }}>
+      <Show when={props.icon && !imageFailed()} fallback={
+        <span style={{
+          color: "#f0f6fc",
+          "font-family": "'JetBrains Mono', monospace",
+          "font-weight": "700", "font-size": `${Math.max(10, Math.round(size() * 0.52))}px`,
+          "line-height": "1",
+        }}>
+          {agentLetter(props.agentId)}
+        </span>
+      }>
+        <img
+          src={props.icon ?? ""}
+          alt={props.name ? `${props.name} logo` : ""}
+          onError={() => setImageFailed(true)}
+          style={{
+            width: "100%", height: "100%",
+            "object-fit": "contain",
+            display: "block",
+          }}
+        />
+      </Show>
+    </span>
+  );
+};
+
 const App: Component = () => {
   const win = getCurrentWindow();
   const [continueOpen, setContinueOpen] = createSignal(false);
@@ -293,17 +339,7 @@ const App: Component = () => {
                         "text-align": "left",
                       }}
                     >
-                      <span style={{
-                        width: "24px", height: "24px", "border-radius": "7px",
-                        background: agentColor(agent.id),
-                        color: "#0f0a1f",
-                        "font-family": "'JetBrains Mono', monospace",
-                        "font-weight": "700", "font-size": "13px",
-                        display: "flex", "align-items": "center", "justify-content": "center",
-                        flex: "0 0 auto",
-                      }}>
-                        {agentLetter(agent.id)}
-                      </span>
+                      <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
                       <div style={{ flex: "1" }}>
                         <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
                           {agent.name}
