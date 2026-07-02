@@ -11,6 +11,7 @@ import {
   updateCurrentBranch,
 } from "./lib/store";
 import {
+  continueAgent,
   getAgents,
   getRecentProjects,
   getToolCatalog,
@@ -193,6 +194,7 @@ const WorkspaceModeSwitch: Component = () => {
           const active = () => store.workspaceMode === item.mode;
           return (
             <button
+              class="workspace-mode-button"
               onclick={() => selectMode(item.mode)}
               title={item.label}
               style={{
@@ -204,6 +206,7 @@ const WorkspaceModeSwitch: Component = () => {
                 background: active() ? "#1a1d25" : "transparent",
                 color: active() ? "var(--fg-default)" : "var(--fg-muted)",
                 "box-shadow": active() ? "0 0 0 1px rgba(88,166,255,.14)" : "none",
+                transform: active() ? "translateY(-1px)" : "translateY(0)",
                 cursor: "pointer",
               }}
             >
@@ -234,6 +237,21 @@ const WorkspaceModeSwitch: Component = () => {
 const AgentWorkspace: Component = () => {
   const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
   const activeColor = () => agentColor(activeTab()?.agentId ?? "claude");
+  const handoffTargets = () => activeTab()
+    ? store.agents.filter((a) => a.installed && a.id !== activeTab()!.agentId)
+    : [];
+  const [continueOpen, setContinueOpen] = createSignal(false);
+  let continueRef: HTMLDivElement | undefined;
+
+  onMount(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (continueOpen() && continueRef && !continueRef.contains(e.target as Node)) {
+        setContinueOpen(false);
+      }
+    };
+    document.addEventListener("click", handleOutsideClick);
+    onCleanup(() => document.removeEventListener("click", handleOutsideClick));
+  });
 
   return (
     <div style={{
@@ -250,34 +268,100 @@ const AgentWorkspace: Component = () => {
         padding: "0 10px 0 12px", gap: "4px",
       }}>
         <AgentBar />
-        <div style={{
-          "margin-left": "auto",
-          display: "flex", "align-items": "center", gap: "8px",
-          "min-width": 0,
-          color: "var(--fg-subtle)",
-          "font-family": "'JetBrains Mono', monospace",
-          "font-size": "11.5px",
-        }}>
-          <Show when={activeTab()} fallback={<span>no agent running</span>}>
-            <span style={{
-              width: "16px", height: "16px", "border-radius": "4px",
-              background: activeColor(), color: "#0d1117",
-              "font-weight": "700", "font-size": "9.5px",
-              display: "flex", "align-items": "center", "justify-content": "center",
-              flex: "0 0 auto",
-            }}>
-              {agentLetter(activeTab()!.agentId)}
-            </span>
-            <span style={{
-              overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
-            }}>
-              {activeTab()!.label}
-              <span style={{ color: activeColor() }}>
-                {store.currentProject ? ` · ~/${store.currentProject.name}` : ""}
-              </span>
-            </span>
+
+        <Show when={handoffTargets().length > 0}>
+          <div ref={continueRef} style={{ "margin-left": "auto", "align-self": "center", position: "relative" }}>
+            <button
+              onclick={() => setContinueOpen((o) => !o)}
+              style={{
+                display: "flex", "align-items": "center", gap: "8px",
+                height: "30px", padding: "0 13px",
+                "border-radius": "8px",
+                background: "#1b1e26",
+                border: `1px solid ${activeColor()}99`,
+                color: "#79c0ff",
+                "font-size": "12.5px", "font-weight": "500",
+                "box-shadow": `0 0 0 1px ${activeColor()}22`,
+                transition: "border-color .16s ease, box-shadow .16s ease, background .16s ease",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={activeColor()} stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h13M13 6l6 6-6 6" />
+              </svg>
+              Continue on...
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+
+            <Show when={continueOpen()}>
+              <div style={{
+                position: "absolute", top: "38px", right: 0,
+                width: "288px",
+                background: "#14161d",
+                border: "1px solid #2a2e3a",
+                "border-radius": "11px",
+                "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+                padding: "7px", "z-index": "50",
+              }}>
+                <div style={{
+                  padding: "8px 10px 6px",
+                  "font-size": "10.5px", "letter-spacing": ".5px",
+                  "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
+                }}>
+                  Hand off this session
+                </div>
+                <For each={handoffTargets()}>
+                  {(agent) => (
+                    <button
+                      onclick={async () => {
+                        setContinueOpen(false);
+                        const from = activeTab()?.agentId ?? "";
+                        const project = store.currentProject;
+                        if (!project) return;
+                        try {
+                          const sessionId = await continueAgent(project.path, from, agent.id);
+                          addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
+                        } catch (e) { console.error(e); }
+                      }}
+                      style={{
+                        width: "100%", display: "flex", "align-items": "center",
+                        gap: "11px", padding: "9px 10px",
+                        "border-radius": "8px",
+                        "text-align": "left",
+                      }}
+                    >
+                      <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
+                      <div style={{ flex: "1" }}>
+                        <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
+                          {agent.name}
+                        </div>
+                        <div style={{
+                          "font-size": "10.5px", color: "var(--fg-subtle)",
+                          "font-family": "'JetBrains Mono', monospace",
+                        }}>
+                          {agent.version ?? ""}
+                        </div>
+                      </div>
+                    </button>
+                  )}
+                </For>
+                <div style={{ height: "1px", background: "#252834", margin: "7px 8px" }} />
+                <div style={{
+                  display: "flex", "align-items": "flex-start", gap: "9px",
+                  padding: "5px 10px 9px",
+                }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e7681" stroke-width="2" style={{ "margin-top": "1px", flex: "0 0 auto" }}>
+                    <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" stroke-linecap="round" />
+                  </svg>
+                  <div style={{ "font-size": "11px", color: "var(--fg-muted)", "line-height": "1.5" }}>
+                    Carries full transcript &amp; context into a new tab.
+                  </div>
+                </div>
+              </div>
+            </Show>
+          </div>
           </Show>
-        </div>
       </div>
 
       <div style={{ flex: "1", position: "relative", overflow: "hidden", "min-height": 0 }}>
@@ -309,8 +393,6 @@ const AgentWorkspace: Component = () => {
 
 const App: Component = () => {
   const win = getCurrentWindow();
-  const [continueOpen, setContinueOpen] = createSignal(false);
-  let continueRef: HTMLDivElement | undefined;
 
   onMount(async () => {
     const [agents, recents, tools] = await Promise.all([
@@ -355,16 +437,8 @@ const App: Component = () => {
 
     const branchInterval = setInterval(updateCurrentBranch, 15_000);
 
-    const handleOutsideClick = (e: MouseEvent) => {
-      if (continueOpen() && continueRef && !continueRef.contains(e.target as Node)) {
-        setContinueOpen(false);
-      }
-    };
-    document.addEventListener("click", handleOutsideClick);
-
     onCleanup(() => {
       clearInterval(branchInterval);
-      document.removeEventListener("click", handleOutsideClick);
     });
   });
 
@@ -391,12 +465,6 @@ const App: Component = () => {
       console.error("Failed to open project:", e);
     }
   }
-
-  const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
-  const activeColor = () => agentColor(activeTab()?.agentId ?? "claude");
-  const handoffTargets = () => activeTab()
-    ? store.agents.filter((a) => a.installed && a.id !== activeTab()!.agentId)
-    : [];
 
   return (
     <div style={{
@@ -483,106 +551,10 @@ const App: Component = () => {
         height: "46px", flex: "0 0 46px",
         background: "#0f1116",
         "border-bottom": "1px solid #1d2028",
-        display: "flex", "align-items": "center",
+        display: "flex", "align-items": "center", "justify-content": "center",
         padding: "0 10px 0 12px", gap: "12px",
       }}>
         <WorkspaceModeSwitch />
-
-        {/* Continue on… button */}
-        <Show when={handoffTargets().length > 0}>
-          <div ref={continueRef} style={{ "margin-left": "auto", "align-self": "center", position: "relative" }}>
-            <button
-              onclick={() => setContinueOpen((o) => !o)}
-              style={{
-                display: "flex", "align-items": "center", gap: "8px",
-                height: "30px", padding: "0 13px",
-                "border-radius": "8px",
-                background: "#1b1e26",
-                border: `1px solid ${activeColor()}99`,
-                color: "#79c0ff",
-                "font-size": "12.5px", "font-weight": "500",
-                "box-shadow": `0 0 0 1px ${activeColor()}22`,
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={activeColor()} stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M5 12h13M13 6l6 6-6 6" />
-              </svg>
-              Continue on…
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M6 9l6 6 6-6" />
-              </svg>
-            </button>
-
-            <Show when={continueOpen()}>
-              <div style={{
-                position: "absolute", top: "38px", right: 0,
-                width: "288px",
-                background: "#14161d",
-                border: "1px solid #2a2e3a",
-                "border-radius": "11px",
-                "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
-                padding: "7px", "z-index": "50",
-              }}>
-                <div style={{
-                  padding: "8px 10px 6px",
-                  "font-size": "10.5px", "letter-spacing": ".5px",
-                  "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
-                }}>
-                  Hand off this session
-                </div>
-                <For each={handoffTargets()}>
-                  {(agent) => (
-                    <button
-                      onclick={async () => {
-                        setContinueOpen(false);
-                        const from = activeTab()?.agentId ?? "";
-                        const project = store.currentProject;
-                        if (!project) return;
-                        try {
-                          const { continueAgent } = await import("./lib/ipc");
-                          const sessionId = await continueAgent(project.path, from, agent.id);
-                          const { addTab: _addTab } = await import("./lib/store");
-                          _addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
-                        } catch (e) { console.error(e); }
-                      }}
-                      style={{
-                        width: "100%", display: "flex", "align-items": "center",
-                        gap: "11px", padding: "9px 10px",
-                        "border-radius": "8px",
-                        "text-align": "left",
-                      }}
-                    >
-                      <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
-                      <div style={{ flex: "1" }}>
-                        <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
-                          {agent.name}
-                        </div>
-                        <div style={{
-                          "font-size": "10.5px", color: "var(--fg-subtle)",
-                          "font-family": "'JetBrains Mono', monospace",
-                        }}>
-                          {agent.version ?? ""}
-                        </div>
-                      </div>
-                    </button>
-                  )}
-                </For>
-                <div style={{ height: "1px", background: "#252834", margin: "7px 8px" }} />
-                <div style={{
-                  display: "flex", "align-items": "flex-start", gap: "9px",
-                  padding: "5px 10px 9px",
-                }}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e7681" stroke-width="2" style={{ "margin-top": "1px", flex: "0 0 auto" }}>
-                    <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" stroke-linecap="round" />
-                  </svg>
-                  <div style={{ "font-size": "11px", color: "var(--fg-muted)", "line-height": "1.5" }}>
-                    Carries full transcript &amp; context into a new tab.
-                  </div>
-                </div>
-              </div>
-            </Show>
-          </div>
-        </Show>
       </div>
 
       {/* ── BODY ── */}
@@ -598,30 +570,31 @@ const App: Component = () => {
         }}>
           <div style={{
             flex: "1",
+            position: "relative",
             overflow: "hidden",
             "min-height": 0,
           }}>
-            <div style={{
-              height: "100%",
-              display: store.workspaceMode === "code" ? "flex" : "none",
-              "flex-direction": "column",
-            }}>
+            <div
+              class="workspace-pane"
+              classList={{ "workspace-pane-active": store.workspaceMode === "code" }}
+              aria-hidden={store.workspaceMode !== "code"}
+            >
               {/* code editor */}
               <EditorPane />
             </div>
-            <div style={{
-              height: "100%",
-              display: store.workspaceMode === "review" ? "flex" : "none",
-              "flex-direction": "column",
-            }}>
+            <div
+              class="workspace-pane"
+              classList={{ "workspace-pane-active": store.workspaceMode === "review" }}
+              aria-hidden={store.workspaceMode !== "review"}
+            >
               {/* native diff review */}
               <DiffPane />
             </div>
-            <div style={{
-              height: "100%",
-              display: store.workspaceMode === "agent" ? "flex" : "none",
-              "flex-direction": "column",
-            }}>
+            <div
+              class="workspace-pane"
+              classList={{ "workspace-pane-active": store.workspaceMode === "agent" }}
+              aria-hidden={store.workspaceMode !== "agent"}
+            >
               {/* AI agent terminals */}
               <AgentWorkspace />
             </div>
