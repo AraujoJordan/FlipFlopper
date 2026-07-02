@@ -1,7 +1,7 @@
 import { Component, createSignal, For, Show } from "solid-js";
 import { store, addTab, removeTab, setActiveTab } from "../lib/store";
 import { spawnAgent, type AgentInfo } from "../lib/ipc";
-import { agentColor, agentLetter } from "../App";
+import { agentColor, agentLetter, AgentLogo } from "../App";
 
 const AgentBar: Component = () => {
   const [menuOpen, setMenuOpen] = createSignal(false);
@@ -128,17 +128,7 @@ const AgentBar: Component = () => {
                     "text-align": "left",
                   }}
                 >
-                  <span style={{
-                    width: "24px", height: "24px", "border-radius": "7px",
-                    background: agentColor(agent.id),
-                    color: "#0f0a1f",
-                    "font-family": "'JetBrains Mono', monospace",
-                    "font-weight": "700", "font-size": "13px",
-                    display: "flex", "align-items": "center", "justify-content": "center",
-                    flex: "0 0 auto",
-                  }}>
-                    {agentLetter(agent.id)}
-                  </span>
+                  <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
                   <div style={{ flex: "1" }}>
                     <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
                       {agent.name}
