@@ -1,14 +1,15 @@
-import { Component, For, Show } from "solid-js";
+import { Component, createSignal, For, Show } from "solid-js";
 import { store, addTab, removeTab, setActiveTab } from "../lib/store";
-import { spawnAgent } from "../lib/ipc";
+import { spawnAgent, type AgentInfo } from "../lib/ipc";
 import { agentColor, agentLetter } from "../App";
 
 const AgentBar: Component = () => {
-  async function handleNewTab() {
+  const [menuOpen, setMenuOpen] = createSignal(false);
+
+  async function handlePick(agent: AgentInfo) {
+    setMenuOpen(false);
     const project = store.currentProject;
     if (!project) return;
-    const agent = store.agents.find((a) => a.installed);
-    if (!agent) return;
     try {
       const sessionId = await spawnAgent(agent.id, project.path);
       addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
@@ -88,15 +89,73 @@ const AgentBar: Component = () => {
       </For>
 
       {/* New tab button */}
-      <button
-        onclick={handleNewTab}
-        style={{
-          display: "flex", "align-items": "center", "justify-content": "center",
-          width: "30px", color: "var(--fg-subtle)", "font-size": "18px", "align-self": "center",
-        }}
-      >
-        +
-      </button>
+      <div style={{ position: "relative", "align-self": "center" }}>
+        <button
+          onclick={() => setMenuOpen((o) => !o)}
+          style={{
+            display: "flex", "align-items": "center", "justify-content": "center",
+            width: "30px", color: "var(--fg-subtle)", "font-size": "18px", "align-self": "center",
+          }}
+        >
+          +
+        </button>
+
+        <Show when={menuOpen()}>
+          <div style={{
+            position: "absolute", top: "38px", left: 0,
+            width: "288px",
+            background: "#14161d",
+            border: "1px solid #2a2e3a",
+            "border-radius": "11px",
+            "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+            padding: "7px", "z-index": "50",
+          }}>
+            <div style={{
+              padding: "8px 10px 6px",
+              "font-size": "10.5px", "letter-spacing": ".5px",
+              "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
+            }}>
+              New session
+            </div>
+            <For each={store.agents.filter((a) => a.installed)}>
+              {(agent) => (
+                <button
+                  onclick={() => handlePick(agent)}
+                  style={{
+                    width: "100%", display: "flex", "align-items": "center",
+                    gap: "11px", padding: "9px 10px",
+                    "border-radius": "8px",
+                    "text-align": "left",
+                  }}
+                >
+                  <span style={{
+                    width: "24px", height: "24px", "border-radius": "7px",
+                    background: agentColor(agent.id),
+                    color: "#0f0a1f",
+                    "font-family": "'JetBrains Mono', monospace",
+                    "font-weight": "700", "font-size": "13px",
+                    display: "flex", "align-items": "center", "justify-content": "center",
+                    flex: "0 0 auto",
+                  }}>
+                    {agentLetter(agent.id)}
+                  </span>
+                  <div style={{ flex: "1" }}>
+                    <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
+                      {agent.name}
+                    </div>
+                    <div style={{
+                      "font-size": "10.5px", color: "var(--fg-subtle)",
+                      "font-family": "'JetBrains Mono', monospace",
+                    }}>
+                      {agent.version ?? ""}
+                    </div>
+                  </div>
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+      </div>
     </>
   );
 };
