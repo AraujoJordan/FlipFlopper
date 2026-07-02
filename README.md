@@ -84,6 +84,23 @@ src-tauri/src/
   lib.rs               Tauri builder + command handlers
 ```
 
+## Download
+
+Pre-built binaries for every platform are attached to each
+[GitHub Release](https://github.com/AraujoJordan/FlipFlopper/releases):
+
+| Platform | Installer |
+|---|---|
+| macOS (Apple Silicon) | `.dmg` (arm64) |
+| macOS (Intel) | `.dmg` (x64) |
+| Windows | `.msi` or NSIS `.exe` |
+| Linux | `.AppImage` or `.deb` |
+
+> **Heads up:** builds are currently unsigned.
+> macOS: right-click the `.dmg` → Open. Windows: "More info" → "Run anyway".
+
+---
+
 ## Getting started
 
 You'll need [Node.js](https://nodejs.org), [Rust](https://rustup.rs), and the
