@@ -13,7 +13,7 @@ use tauri_plugin_dialog::DialogExt;
 use agents::AgentInfo;
 use editor::FileContent;
 use git::{CommitEntry, CommitResult, FileStatus};
-use project::{FileEntry, ProjectInfo};
+use project::{FileEntry, ProjectInfo, SkillEntry};
 use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
 use tools::ToolInfo;
@@ -52,11 +52,7 @@ fn spawn_agent(
 }
 
 #[tauri::command]
-fn pty_input(
-    state: State<'_, PtyManager>,
-    session_id: String,
-    data: String,
-) -> Result<(), String> {
+fn pty_input(state: State<'_, PtyManager>, session_id: String, data: String) -> Result<(), String> {
     pty::send_input(&state, &session_id, &data)
 }
 
@@ -71,10 +67,7 @@ fn pty_resize(
 }
 
 #[tauri::command]
-fn pty_kill(
-    state: State<'_, PtyManager>,
-    session_id: String,
-) -> Result<(), String> {
+fn pty_kill(state: State<'_, PtyManager>, session_id: String) -> Result<(), String> {
     pty::kill_session(&state, &session_id)
 }
 
@@ -111,6 +104,20 @@ fn get_recent_projects() -> Vec<ProjectInfo> {
 #[tauri::command]
 fn get_file_tree(path: String) -> Result<Vec<FileEntry>, String> {
     project::list_dir(&path)
+}
+
+#[tauri::command]
+fn search_prompt_files(
+    project_path: String,
+    query: String,
+    limit: usize,
+) -> Result<Vec<FileEntry>, String> {
+    project::search_files(&project_path, &query, limit)
+}
+
+#[tauri::command]
+fn list_prompt_skills(project_path: Option<String>) -> Vec<SkillEntry> {
+    project::list_skills(project_path.as_deref())
 }
 
 #[tauri::command]
@@ -164,7 +171,6 @@ fn ensure_work_branch(project_path: String, branch: String) -> Result<String, St
 fn get_current_branch(project_path: String) -> Result<String, String> {
     git::get_current_branch(&project_path)
 }
-
 
 #[tauri::command]
 fn get_git_log(project_path: String, limit: u32) -> Result<Vec<CommitEntry>, String> {
@@ -234,7 +240,8 @@ fn continue_agent(
     to_agent: String,
 ) -> Result<String, String> {
     let launch = handoff::continue_launch(&project_path, &from_agent, &to_agent)?;
-    let (session_id, rx) = pty::spawn_shell_command(&state, &launch.label, &launch.command, &project_path)?;
+    let (session_id, rx) =
+        pty::spawn_shell_command(&state, &launch.label, &launch.command, &project_path)?;
     bridge_pty(app, session_id.clone(), rx);
     Ok(session_id)
 }
@@ -267,14 +274,20 @@ async fn pick_prompt_file(
     let mut dialog = app
         .dialog()
         .file()
-        .set_title(if image_only.unwrap_or(false) { "Attach image" } else { "Attach file" });
+        .set_title(if image_only.unwrap_or(false) {
+            "Attach image"
+        } else {
+            "Attach file"
+        });
     if let Some(path) = project_path {
         dialog = dialog.set_directory(path);
     }
     if image_only.unwrap_or(false) {
         dialog = dialog.add_filter(
             "Images",
-            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg"],
+            &[
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg",
+            ],
         );
     }
 
@@ -307,6 +320,8 @@ pub fn run() {
             open_project,
             get_recent_projects,
             get_file_tree,
+            search_prompt_files,
+            list_prompt_skills,
             inject_file_refs,
             // Editor
             read_file_text,
@@ -318,7 +333,6 @@ pub fn run() {
             ensure_work_branch,
             get_current_branch,
             get_git_log,
-
             git_rollback,
             rename_commit,
             // Tools

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Multi-agent CLI cockpit — better UX for AI coding tools"
 authors = ["araujojordan"]
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "flipflopper_lib"

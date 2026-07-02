@@ -32,6 +32,13 @@ export interface FileEntry {
   is_dir: boolean;
 }
 
+export interface PromptSkill {
+  name: string;
+  path: string;
+  source: string;
+  description: string | null;
+}
+
 export interface FileStatus {
   path: string;
   status: string;
@@ -98,6 +105,16 @@ export const getRecentProjects = (): Promise<ProjectInfo[]> =>
 
 export const getFileTree = (path: string): Promise<FileEntry[]> =>
   invoke("get_file_tree", { path });
+
+export const searchPromptFiles = (
+  projectPath: string,
+  query: string,
+  limit: number,
+): Promise<FileEntry[]> =>
+  invoke("search_prompt_files", { projectPath, query, limit });
+
+export const listPromptSkills = (projectPath: string | null): Promise<PromptSkill[]> =>
+  invoke("list_prompt_skills", { projectPath });
 
 export const injectFileRefs = (sessionId: string, paths: string[]): Promise<void> =>
   invoke("inject_file_refs", { sessionId, paths });

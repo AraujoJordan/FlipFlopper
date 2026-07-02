@@ -1,5 +1,6 @@
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,14 @@ pub struct FileEntry {
     pub name: String,
     pub path: String,
     pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillEntry {
+    pub name: String,
+    pub path: String,
+    pub source: String,
+    pub description: Option<String>,
 }
 
 // ────────────────────────────────────────────────
@@ -93,8 +102,7 @@ pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
     // Create .agents/ directory
     let dot_agents = root.join(".agents");
     if !dot_agents.exists() {
-        fs::create_dir_all(&dot_agents)
-            .map_err(|e| format!("Failed to create .agents/: {e}"))?;
+        fs::create_dir_all(&dot_agents).map_err(|e| format!("Failed to create .agents/: {e}"))?;
     }
 
     // settings.json
@@ -213,13 +221,22 @@ pub fn list_dir(dir_path: &str) -> Result<Vec<FileEntry>, String> {
 
 /// Search project files and directories for prompt autocomplete.
 /// Returned names are project-relative paths using `/`, ready for `@path` refs.
-pub fn search_files(project_path: &str, query: &str, limit: usize) -> Result<Vec<FileEntry>, String> {
+pub fn search_files(
+    project_path: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<FileEntry>, String> {
     let root = PathBuf::from(project_path);
     if !root.is_dir() {
         return Err(format!("Not a directory: {project_path}"));
     }
 
     let normalized_query = query.trim_start_matches('@').trim_start_matches('/');
+    if normalized_query.is_empty() {
+        return list_dir(project_path)
+            .map(|entries| entries.into_iter().take(limit.max(1)).collect());
+    }
+
     let mut matches: Vec<(i64, FileEntry)> = Vec::new();
 
     let walker = WalkBuilder::new(&root)
@@ -327,12 +344,169 @@ fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
 }
 
 // ────────────────────────────────────────────────
+// Prompt skill autocomplete
+// ────────────────────────────────────────────────
+
+/// Discover local and user-installed Codex/agent skills for `/skill` prompt autocomplete.
+pub fn list_skills(project_path: Option<&str>) -> Vec<SkillEntry> {
+    let mut roots: Vec<(PathBuf, String)> = Vec::new();
+
+    if let Some(project_path) = project_path {
+        let project = PathBuf::from(project_path);
+        roots.push((project.join(".codex").join("skills"), "project".to_string()));
+        roots.push((
+            project.join(".agents").join("skills"),
+            "project".to_string(),
+        ));
+    }
+
+    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+        roots.push((
+            PathBuf::from(codex_home).join("skills"),
+            "codex".to_string(),
+        ));
+    } else if let Some(home) = dirs::home_dir() {
+        roots.push((home.join(".codex").join("skills"), "codex".to_string()));
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        roots.push((home.join(".agents").join("skills"), "agents".to_string()));
+    }
+
+    let mut entries = Vec::new();
+    let mut seen_roots = HashSet::new();
+    let mut seen_names = HashSet::new();
+
+    for (root, source) in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let root_key = root.to_string_lossy().to_string();
+        if !seen_roots.insert(root_key) {
+            continue;
+        }
+        collect_skills_from_root(&root, &source, &mut entries, &mut seen_names);
+    }
+
+    entries.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.source.cmp(&b.source))
+    });
+    entries
+}
+
+fn collect_skills_from_root(
+    root: &Path,
+    source: &str,
+    entries: &mut Vec<SkillEntry>,
+    seen_names: &mut HashSet<String>,
+) {
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .max_depth(Some(5))
+        .build();
+
+    for result in walker {
+        let Ok(entry) = result else {
+            continue;
+        };
+        let path = entry.path();
+        if !path.is_file() || path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
+            continue;
+        }
+
+        let fallback_name = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "skill".to_string());
+        let (name, description) = read_skill_metadata(path, &fallback_name);
+        let dedupe_key = name.to_lowercase();
+        if !seen_names.insert(dedupe_key) {
+            continue;
+        }
+
+        entries.push(SkillEntry {
+            name,
+            path: path.parent().unwrap_or(path).to_string_lossy().to_string(),
+            source: source.to_string(),
+            description,
+        });
+    }
+}
+
+fn read_skill_metadata(skill_md: &Path, fallback_name: &str) -> (String, Option<String>) {
+    let content = fs::read_to_string(skill_md).unwrap_or_default();
+    let mut name = fallback_name.to_string();
+    let mut description = None;
+
+    let mut lines = content.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return (name, description);
+    }
+
+    let frontmatter: Vec<&str> = lines
+        .by_ref()
+        .take_while(|line| line.trim() != "---")
+        .collect();
+
+    let mut index = 0;
+    while index < frontmatter.len() {
+        let line = frontmatter[index].trim();
+        if let Some(raw) = line.strip_prefix("name:") {
+            let parsed = clean_yaml_scalar(raw);
+            if !parsed.is_empty() {
+                name = parsed;
+            }
+        } else if let Some(raw) = line.strip_prefix("description:") {
+            let parsed = clean_yaml_scalar(raw);
+            if parsed == ">" || parsed == "|" {
+                let mut folded = Vec::new();
+                index += 1;
+                while index < frontmatter.len() {
+                    let next = frontmatter[index];
+                    if !next.starts_with(' ') && !next.starts_with('\t') {
+                        index -= 1;
+                        break;
+                    }
+                    let trimmed = next.trim();
+                    if !trimmed.is_empty() {
+                        folded.push(trimmed);
+                    }
+                    index += 1;
+                }
+                if !folded.is_empty() {
+                    description = Some(folded.join(" "));
+                }
+            } else if !parsed.is_empty() {
+                description = Some(parsed);
+            }
+        }
+        index += 1;
+    }
+
+    (name, description)
+}
+
+fn clean_yaml_scalar(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
+// ────────────────────────────────────────────────
 // Recent projects (stored in ~/.config/flipflopper/recents.json)
 // ────────────────────────────────────────────────
 
 fn recents_path() -> PathBuf {
     let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join(".config").join("flipflopper").join("recents.json")
+    base.join(".config")
+        .join("flipflopper")
+        .join("recents.json")
 }
 
 pub fn get_recent_projects() -> Vec<ProjectInfo> {
@@ -353,5 +527,8 @@ pub fn add_recent_project(info: &ProjectInfo) {
     recents.retain(|r| r.path != info.path);
     recents.insert(0, info.clone());
     recents.truncate(20);
-    let _ = fs::write(&path, serde_json::to_string_pretty(&recents).unwrap_or_default());
+    let _ = fs::write(
+        &path,
+        serde_json::to_string_pretty(&recents).unwrap_or_default(),
+    );
 }
