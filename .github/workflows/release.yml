@@ -17,15 +17,23 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
+            binary: target/aarch64-apple-darwin/release/flipflopper
+            archive: FlipFlopper-macos-aarch64-binary.tar.gz
           - platform: macos-latest
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
+            binary: target/x86_64-apple-darwin/release/flipflopper
+            archive: FlipFlopper-macos-x86_64-binary.tar.gz
           - platform: ubuntu-22.04
             target: ''
             args: ''
+            binary: target/release/flipflopper
+            archive: FlipFlopper-linux-x86_64-binary.tar.gz
           - platform: windows-latest
             target: ''
             args: ''
+            binary: target/release/flipflopper.exe
+            archive: FlipFlopper-windows-x86_64-binary.tar.gz
 
     runs-on: ${{ matrix.platform }}
 
@@ -62,7 +70,7 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: ./src-tauri -> target
+          workspaces: ./ -> target
 
       - name: Install frontend dependencies
         run: npm ci
@@ -84,7 +92,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "FlipFlopper ${{ github.ref_name }}"
           releaseBody: |
-            Download the installer for your platform below.
+            Download the installer or binary archive for your platform below.
 
             > **Unsigned builds** — these are not code-signed yet.
             > - **macOS:** right-click the `.dmg` → Open to bypass Gatekeeper.
@@ -92,3 +100,15 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Package binary
+        shell: bash
+        run: |
+          mkdir -p artifacts/binary
+          cp "${{ matrix.binary }}" artifacts/binary/
+          tar -czf "artifacts/${{ matrix.archive }}" -C artifacts/binary .
+
+      - name: Upload binary to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" "artifacts/${{ matrix.archive }}" --clobber
