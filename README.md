@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="src/assets/flipflopperLogo.png" alt="FlipFlopper logo" width="160" />
+<img src="src-tauri/icons/icon.png" alt="FlipFlopper logo" width="160" />
 
 # FlipFlopper
 
@@ -19,6 +19,12 @@ terminal windows was making you flip out (and then flop back).
 
 ---
 
+<div align="center">
+  <video src="public/video.mp4" controls autoplay loop muted playsinline width="800"></video>
+</div>
+
+---
+
 ## What is this?
 
 FlipFlopper is a cross-platform desktop app that wraps your favorite CLI AI
@@ -27,8 +33,8 @@ coding agents in a GUI that doesn't make you cry. It is, naturally,
 this), uses **zero-cost abstractions**, and is **memory safe** (no agents were
 segfaulted in the making of this app).
 
-You bring the agents. FlipFlopper brings the real terminals, the file picker,
-the preview window, and the big shiny "switch from Claude to Codex mid-task"
+You bring the agents. FlipFlopper brings the real terminals, the file explorer,
+the native diff review overlay, and the big shiny "switch from Claude to Codex mid-task"
 button.
 
 ## Why bother?
@@ -47,12 +53,13 @@ may the best (and cheapest) agent win.
 - **File tree with checkboxes** - tick some files, and FlipFlopper injects them
   as `@file` references straight into the agent. No more copy-pasting paths like
   it's 2009.
+- **Built-in code editor** - view and edit files directly in the app using a CodeMirror-based code editor with syntax highlighting, auto-saving, conflict detection, and tabbed file support.
 - **Native code review & diffs** - inspect working-tree changes and commit history
   natively. Features unified and split layout toggles, change statistics, and
   syntax highlighting.
 - **Git auto-commit** - auto-commits changes on your current active branch so your progress is saved.
 - **Agent handoff** - hot-swap Claude for Codex (or agy, or Aider) in the
-  middle of a session via `cli-continues`. Flip. Flop. Repeat.
+  middle of a session. It automatically reads active session stores, writes `.agents/handoff.md`, appends to `.agents/context.md`, and launches the target agent with seeded context. Flip. Flop. Repeat.
 - **Shared config** - one `AGENTS.md` plus `.agents/` per project, read by every
   agent, following the Linux Foundation AAIF standard.
 
@@ -70,21 +77,32 @@ and Droid. If your agent speaks "terminal", it'll probably feel right at home.
 
 ```
 src/
-  App.tsx              three-pane layout (sidebar | terminals | right panel)
-  lib/ipc.ts           typed Tauri invoke() wrappers
-  lib/store.ts         global UI state (SolidJS store)
-  components/          AgentBar, TerminalPane, FileTree, CommitTimeline,
-                       DiffPane, PromptComposer
+  App.tsx                    top-level app shell, title bar, tabs, layout, continue menu, workspace restore
+  App.css                    global UI styles
+  index.tsx                  Solid entry point
+  lib/
+    cmTheme.ts               custom CodeMirror editor theme
+    ipc.ts                   typed Tauri invoke/listen wrappers
+    store.ts                 Solid store, tab/session helpers, review/editor state
+  components/
+    AgentBar.tsx             terminal tab strip and new-tab behavior
+    TerminalPane.tsx         xterm.js instance wired to PTY events
+    FileTree.tsx             lazy explorer, git status badges, review entry
+    EditorPane.tsx           embedded CodeMirror file viewer/editor with conflict detection
+    PromptComposer.tsx       bottom prompt input, PTY send / auto-commit path
+    CommitTimeline.tsx       recent commits, working-tree review button
+    DiffPane.tsx             native unified/split diff overlay
 
 src-tauri/src/
-  pty.rs               PTY session manager (spawn/read/write/resize/kill)
-  agents.rs            agent registry + installed-status detection
-  project.rs           .agents/ + AGENTS.md scaffolding, file-tree lister
-  git.rs               git status + auto-commit
-  tools.rs             tool catalog + per-OS install commands
-  handoff.rs           cli-continues wrapper for agent switching
-  review.rs            unified and split diff parser for native review pane
-  lib.rs               Tauri builder + command handlers
+  lib.rs                     Tauri builder, command registry, event bridge
+  main.rs                    native entry point
+  pty.rs                     portable-pty session lifecycle and shell commands
+  agents.rs                  static agent registry and PATH/version detection
+  project.rs                 AGENTS.md/.agents scaffolding, recents, file tree
+  git.rs                     shell-based status, commit, log, rename, rollback
+  review.rs                  git diff parser for native review pane
+  tools.rs                   tool catalog, package manager detection, installs
+  handoff.rs                 in-house session parser and handoff launcher
 ```
 
 ## Download
