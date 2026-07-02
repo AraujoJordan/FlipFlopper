@@ -20,7 +20,7 @@ terminal windows was making you flip out (and then flop back).
 ---
 
 <div align="center">
-  <video src="public/video.mp4" controls autoplay loop muted playsinline width="800"></video>
+  <img src="public/video.gif" alt="FlipFlopper UI Demo" width="800" />
 </div>
 
 ---
