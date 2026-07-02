@@ -19,3 +19,6 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Rust workspace build output
+target
