@@ -5,7 +5,10 @@ mod handoff;
 mod project;
 mod pty;
 mod review;
+mod runner;
 mod tools;
+
+use std::process::Command;
 
 use tauri::{Emitter, State};
 use tauri_plugin_dialog::DialogExt;
@@ -16,14 +19,37 @@ use git::{CommitEntry, CommitResult, FileStatus};
 use project::{FileEntry, ProjectInfo, SkillEntry};
 use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
+use runner::RunTarget;
 use tools::ToolInfo;
 
 // Bridge a PtyEvent receiver to Tauri events on the given session_id.
 fn bridge_pty(app: tauri::AppHandle, session_id: String, rx: std::sync::mpsc::Receiver<PtyEvent>) {
+    bridge_pty_with_browser(app, session_id, rx, false);
+}
+
+fn bridge_pty_with_browser(
+    app: tauri::AppHandle,
+    session_id: String,
+    rx: std::sync::mpsc::Receiver<PtyEvent>,
+    auto_open_browser: bool,
+) {
     std::thread::spawn(move || {
+        let mut browser_opened = false;
+        let mut recent_output = String::new();
         for event in rx {
             match event {
                 PtyEvent::Data(data) => {
+                    if auto_open_browser && !browser_opened {
+                        recent_output.push_str(&data);
+                        if recent_output.len() > 8192 {
+                            let kept = recent_output.chars().rev().take(4096).collect::<String>();
+                            recent_output = kept.chars().rev().collect();
+                        }
+                        if let Some(url) = find_local_browser_url(&recent_output) {
+                            browser_opened = true;
+                            let _ = open_browser_url(&url);
+                        }
+                    }
                     let _ = app.emit(&format!("pty://{session_id}"), data);
                 }
                 PtyEvent::Exit => {
@@ -33,6 +59,182 @@ fn bridge_pty(app: tauri::AppHandle, session_id: String, rx: std::sync::mpsc::Re
             }
         }
     });
+}
+
+fn find_local_browser_url(output: &str) -> Option<String> {
+    let clean_output = strip_terminal_sequences(output);
+    let output = clean_output.as_str();
+    let mut index = 0;
+    while index < output.len() {
+        let next_http = output[index..].find("http://").map(|i| index + i);
+        let next_https = output[index..].find("https://").map(|i| index + i);
+        let Some(start) = [next_http, next_https].into_iter().flatten().min() else {
+            break;
+        };
+        let rest = &output[start..];
+        let end = rest
+            .char_indices()
+            .find_map(|(i, ch)| {
+                if i == 0 {
+                    None
+                } else if ch.is_whitespace()
+                    || matches!(ch, '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | '\x1b')
+                {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(rest.len());
+        if let Some(url) = normalize_local_browser_url(&rest[..end]) {
+            return Some(url);
+        }
+        index = start + end.max(1);
+    }
+    None
+}
+
+fn normalize_local_browser_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_end_matches(['.', ',', ';']);
+    let (scheme, rest) = if let Some(rest) = trimmed.strip_prefix("http://") {
+        ("http://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("https://") {
+        ("https://", rest)
+    } else {
+        return None;
+    };
+
+    let host_end = rest
+        .char_indices()
+        .find_map(|(i, ch)| matches!(ch, '/' | '?' | '#').then_some(i))
+        .unwrap_or(rest.len());
+    let host_port = &rest[..host_end];
+    let tail = &rest[host_end..];
+
+    let normalized_host = normalize_local_host_port(host_port)?;
+
+    Some(format!("{scheme}{normalized_host}{tail}"))
+}
+
+fn normalize_local_host_port(host_port: &str) -> Option<String> {
+    let port = if let Some(port) = host_port.strip_prefix("localhost:") {
+        port
+    } else if let Some(port) = host_port.strip_prefix("127.0.0.1:") {
+        port
+    } else if let Some(port) = host_port.strip_prefix("0.0.0.0:") {
+        port
+    } else if let Some(port) = host_port.strip_prefix("[::1]:") {
+        port
+    } else {
+        return None;
+    };
+
+    if port.is_empty() || !port.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(format!("localhost:{port}"))
+}
+
+fn strip_terminal_sequences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if next == '\x07' {
+                            break;
+                        }
+                        if next == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some('(' | ')' | '*' | '+') => {
+                    chars.next();
+                    chars.next();
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if ch == '\r' {
+            output.push('\n');
+        } else if !ch.is_control() || ch == '\n' || ch == '\t' {
+            output.push(ch);
+        }
+    }
+
+    output
+}
+
+fn open_browser_url(url: &str) -> Result<(), String> {
+    let mut command = if tools::current_os() == "macos" {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        cmd
+    } else if tools::current_os() == "windows" {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", "", url]);
+        cmd
+    } else {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(url);
+        cmd
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Failed to open browser: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_local_browser_url;
+
+    #[test]
+    fn finds_local_url_with_port() {
+        assert_eq!(
+            find_local_browser_url("Local: http://localhost:5173/"),
+            Some("http://localhost:5173/".to_string())
+        );
+    }
+
+    #[test]
+    fn keeps_port_when_terminal_colors_it() {
+        assert_eq!(
+            find_local_browser_url("Local: http://localhost:\x1b[36m5173\x1b[39m/"),
+            Some("http://localhost:5173/".to_string())
+        );
+    }
+
+    #[test]
+    fn normalizes_wildcard_local_host_with_port() {
+        assert_eq!(
+            find_local_browser_url("Network: http://0.0.0.0:3000/"),
+            Some("http://localhost:3000/".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_local_url_without_port() {
+        assert_eq!(find_local_browser_url("Local: http://localhost/"), None);
+    }
 }
 
 // ════════════════════════════════════════════════
@@ -212,6 +414,31 @@ fn install_tool(
 }
 
 // ════════════════════════════════════════════════
+// Project runner commands
+// ════════════════════════════════════════════════
+
+#[tauri::command]
+fn detect_run_targets(project_path: String) -> Result<Vec<RunTarget>, String> {
+    runner::detect_run_targets(&project_path)
+}
+
+#[tauri::command]
+fn run_project(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    target_id: Option<String>,
+) -> Result<String, String> {
+    let target = runner::resolve_run_command(&project_path, target_id.as_deref())?;
+    let auto_open_browser = runner::should_auto_open_browser(&target);
+    let label = format!("run:{}", target.kind);
+    let (session_id, rx) =
+        pty::spawn_shell_command(&state, &label, &target.command, &project_path)?;
+    bridge_pty_with_browser(app, session_id.clone(), rx, auto_open_browser);
+    Ok(session_id)
+}
+
+// ════════════════════════════════════════════════
 // Native diff review
 // ════════════════════════════════════════════════
 
@@ -338,6 +565,9 @@ pub fn run() {
             // Tools
             get_tool_catalog,
             install_tool,
+            // Runner
+            detect_run_targets,
+            run_project,
             // Review
             get_review_diff,
             // Handoff

@@ -48,6 +48,7 @@ export interface AppStore {
   editorFiles: EditorFile[];
   activeEditorPath: string | null;
   editorOpen: boolean;
+  runSessionId: string | null;
   /** bumped after saves so git-status consumers refetch */
   gitStatusVersion: number;
   currentBranch: string;
@@ -68,6 +69,7 @@ const initial: AppStore = {
   editorFiles: [],
   activeEditorPath: null,
   editorOpen: false,
+  runSessionId: null,
   gitStatusVersion: 0,
   currentBranch: "",
   pendingLineFocus: null,
@@ -117,6 +119,7 @@ export const CONTINUE_AGENT_IDS = new Set([
 
 const CONTINUE_TARGET_KEY = "flipflopper:continue-targets";
 const CONTINUE_USAGE_KEY = "flipflopper:continue-agent-usage";
+const RUN_TARGET_KEY = "flipflopper:run-targets";
 
 export function readContinueTargets(): Record<string, string> {
   try {
@@ -130,6 +133,21 @@ export function writeContinueTarget(projectPath: string, agentId: string) {
     const targets = readContinueTargets();
     targets[projectPath] = agentId;
     localStorage.setItem(CONTINUE_TARGET_KEY, JSON.stringify(targets));
+  } catch { /* ignore */ }
+}
+
+export function readRunTargets(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(RUN_TARGET_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+export function writeRunTarget(projectPath: string, targetId: string) {
+  try {
+    const targets = readRunTargets();
+    targets[projectPath] = targetId;
+    localStorage.setItem(RUN_TARGET_KEY, JSON.stringify(targets));
   } catch { /* ignore */ }
 }
 

@@ -67,6 +67,14 @@ export interface ToolInfo {
   install_cmd: string | null;
 }
 
+export interface RunTarget {
+  id: string;
+  label: string;
+  command: string;
+  kind: string;
+  needs_emulator: string | null;
+}
+
 // ── PTY ──────────────────────────────────────────────────────────────────────
 
 export const spawnAgent = (agentId: string, projectPath: string): Promise<string> =>
@@ -211,6 +219,14 @@ export const getToolCatalog = (): Promise<ToolInfo[]> =>
 
 export const installTool = (toolId: string, projectPath: string): Promise<string> =>
   invoke("install_tool", { toolId, projectPath });
+
+// ── Runner ───────────────────────────────────────────────────────────────────
+
+export const detectRunTargets = (projectPath: string): Promise<RunTarget[]> =>
+  invoke("detect_run_targets", { projectPath });
+
+export const runProject = (projectPath: string, targetId?: string): Promise<string> =>
+  invoke("run_project", { projectPath, targetId: targetId ?? null });
 
 // ── Handoff ──────────────────────────────────────────────────────────────────
 

@@ -27,6 +27,7 @@ import CommitTimeline from "./components/CommitTimeline";
 import DiffPane from "./components/DiffPane";
 import EditorPane from "./components/EditorPane";
 import PromptComposer from "./components/PromptComposer";
+import RunButton from "./components/RunButton";
 import { Button, Menu, MenuLabel, MenuItem, Spinner, ToastHost, ConfirmHost, toast } from "./components/ui";
 import { installGlobalShortcuts } from "./lib/shortcuts";
 import "./App.css";
@@ -62,6 +63,7 @@ const AGENT_COLORS: Record<string, string> = {
   goose: "#56d364",
   plandex: "#a5d6ff",
   droid: "#f778ba",
+  run: "#3fb950",
 };
 
 export function agentColor(agentId: string): string {
@@ -72,6 +74,7 @@ export function agentLetter(agentId: string): string {
   const map: Record<string, string> = {
     claude: "C", qwen: "Q", gemini: "G", codex: "X",
     agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R",
+    run: "▶",
   };
   return map[agentId] ?? agentId[0]?.toUpperCase() ?? "?";
 }
@@ -593,6 +596,7 @@ const App: Component = () => {
         </div>
 
         <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "14px", color: "var(--fg-subtle)" }}>
+          <RunButton />
           <BranchIndicator />
         </div>
       </div>

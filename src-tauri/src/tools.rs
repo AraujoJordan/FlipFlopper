@@ -305,7 +305,7 @@ fn detect_pkg_manager() -> &'static str {
     "npm" // fallback
 }
 
-fn current_os() -> &'static str {
+pub(crate) fn current_os() -> &'static str {
     #[cfg(target_os = "macos")]
     return "macos";
     #[cfg(target_os = "linux")]
