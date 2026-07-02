@@ -3,7 +3,7 @@ import {
 } from "solid-js";
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
-import { store, closeReview, openReview } from "../lib/store";
+import { store, closeReview, openReview, openEditorFile } from "../lib/store";
 import { getReviewDiff, type FileDiff, type DiffLine } from "../lib/ipc";
 
 // ── Layout toggle ────────────────────────────────────────────────────────────
@@ -82,7 +82,12 @@ const LINENO_STYLE = {
 } as const;
 
 // ── Unified row ───────────────────────────────────────────────────────────────
-const UnifiedRow: Component<{ line: DiffLine; lang: string | null; lineCount: number }> = (props) => {
+const UnifiedRow: Component<{
+  line: DiffLine;
+  lang: string | null;
+  lineCount: number;
+  onLineClick: (lineNo: number) => void;
+}> = (props) => {
   const bg = () =>
     props.line.kind === "add" ? ADD_BG :
     props.line.kind === "del" ? DEL_BG :
@@ -101,13 +106,22 @@ const UnifiedRow: Component<{ line: DiffLine; lang: string | null; lineCount: nu
       ? highlight(props.line.content, props.lang)
       : escapeHtml(props.line.content);
 
+  const lineNo = () => props.line.new_lineno ?? props.line.old_lineno;
+
   return (
-    <div style={{
-      display: "flex", "align-items": "flex-start",
-      background: bg(),
-      "min-height": "20px",
-      "line-height": "20px",
-    }}>
+    <div
+      class="diff-row"
+      onclick={() => {
+        const ln = lineNo();
+        if (ln != null) props.onLineClick(ln);
+      }}
+      style={{
+        display: "flex", "align-items": "flex-start",
+        background: bg(),
+        "min-height": "20px",
+        "line-height": "20px",
+      }}
+    >
       {/* old line number */}
       <span style={LINENO_STYLE}>
         {props.line.old_lineno ?? ""}
@@ -174,6 +188,7 @@ const SplitCell: Component<{
   lang: string | null;
   lineCount: number;
   side: "left" | "right";
+  onLineClick: (lineNo: number) => void;
 }> = (props) => {
   const bg = () =>
     !props.line ? CTX_BG :
@@ -192,14 +207,28 @@ const SplitCell: Component<{
     return highlight(props.line.content, props.lang);
   };
 
+  const lineNo = () => {
+    if (!props.line) return null;
+    return props.side === "left"
+      ? (props.line.old_lineno ?? props.line.new_lineno)
+      : (props.line.new_lineno ?? props.line.old_lineno);
+  };
+
   return (
-    <div style={{
-      flex: "1", "min-width": "0",
-      display: "flex", "align-items": "flex-start",
-      background: bg(),
-      "border-right": props.side === "left" ? "1px solid #1d2028" : "none",
-      "min-height": "20px", "line-height": "20px",
-    }}>
+    <div
+      class={props.line ? "diff-row" : ""}
+      onclick={() => {
+        const ln = lineNo();
+        if (ln != null) props.onLineClick(ln);
+      }}
+      style={{
+        flex: "1", "min-width": "0",
+        display: "flex", "align-items": "flex-start",
+        background: bg(),
+        "border-right": props.side === "left" ? "1px solid #1d2028" : "none",
+        "min-height": "20px", "line-height": "20px",
+      }}
+    >
       <span style={LINENO_STYLE}>{lineno()}</span>
       <span
         style={{ "white-space": "pre-wrap", "word-break": "break-all", flex: "1", "min-width": "0" }}
@@ -215,6 +244,13 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
   const lang = createMemo(() => langForPath(props.file.new_path ?? props.file.old_path));
   const st = () => STATUS_COLORS[props.file.status] ?? STATUS_COLORS.modified;
   const displayPath = () => props.file.new_path ?? props.file.old_path ?? "(unknown)";
+
+  const handleLineClick = (lineNo: number) => {
+    const relPath = props.file.new_path ?? props.file.old_path;
+    if (!relPath) return;
+    const name = relPath.split("/").pop() ?? "";
+    openEditorFile(relPath, name, lineNo);
+  };
 
   return (
     <div style={{
@@ -307,7 +343,12 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
                   <Show when={props.mode === "unified"}>
                     <For each={hunk.lines}>
                       {(line) => (
-                        <UnifiedRow line={line} lang={lang()} lineCount={props.totalLines} />
+                        <UnifiedRow
+                          line={line}
+                          lang={lang()}
+                          lineCount={props.totalLines}
+                          onLineClick={handleLineClick}
+                        />
                       )}
                     </For>
                   </Show>
@@ -315,8 +356,20 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
                     <For each={buildSplitPairs(hunk.lines)}>
                       {(pair) => (
                         <div style={{ display: "flex" }}>
-                          <SplitCell line={pair.left}  lang={lang()} lineCount={props.totalLines} side="left"  />
-                          <SplitCell line={pair.right} lang={lang()} lineCount={props.totalLines} side="right" />
+                          <SplitCell
+                            line={pair.left}
+                            lang={lang()}
+                            lineCount={props.totalLines}
+                            side="left"
+                            onLineClick={handleLineClick}
+                          />
+                          <SplitCell
+                            line={pair.right}
+                            lang={lang()}
+                            lineCount={props.totalLines}
+                            side="right"
+                            onLineClick={handleLineClick}
+                          />
                         </div>
                       )}
                     </For>

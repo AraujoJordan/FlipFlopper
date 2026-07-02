@@ -60,6 +60,19 @@ button {
   background: #1a1d25;
 }
 
+.diff-row {
+  cursor: pointer;
+  position: relative;
+}
+
+.diff-row:hover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-color: rgba(255, 255, 255, 0.04);
+  pointer-events: none;
+}
+
 .workspace-pane {
   position: absolute;
   inset: 0;

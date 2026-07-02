@@ -8,6 +8,7 @@ import { languages } from "@codemirror/language-data";
 import { LanguageDescription } from "@codemirror/language";
 import {
   store,
+  setStore,
   openReview,
   closeEditorFile,
   setActiveEditorFile,
@@ -18,6 +19,7 @@ import {
   type EditorFile,
 } from "../lib/store";
 import { readFileText, writeFileText, statFile } from "../lib/ipc";
+import { getFileIcon } from "./FileTree";
 import { flipflopperTheme } from "../lib/cmTheme";
 
 const POLL_MS = 3000;
@@ -144,6 +146,24 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       view.requestMeasure();
       view.focus();
       checkStale();
+
+      const focus = store.pendingLineFocus;
+      if (focus && focus.path === props.file.path) {
+        // Clear the focus request immediately
+        setStore("pendingLineFocus", null);
+
+        const lineNo = focus.line;
+        setTimeout(() => {
+          if (view && lineNo > 0 && lineNo <= view.state.doc.lines) {
+            const line = view.state.doc.line(lineNo);
+            view.dispatch({
+              selection: { anchor: line.from, head: line.from },
+              effects: EditorView.scrollIntoView(line.from, { y: "center" })
+            });
+            view.focus();
+          }
+        }, 100);
+      }
     }
   });
 
@@ -275,6 +295,14 @@ const EditorPane: Component = () => {
                     "white-space": "nowrap",
                   }}
                 >
+                  {(() => {
+                    const iconPath = getFileIcon(file.name);
+                    return iconPath ? (
+                      <img src={iconPath} style={{ width: "14px", height: "14px", "flex-shrink": 0 }} alt="" />
+                    ) : (
+                      <svg data-component="Octicon" aria-hidden="true" class="octicon octicon-file icon-file" viewBox="0 0 16 16" width="14" height="14" fill="currentColor" display="inline-block" overflow="visible" style={{ "vertical-align": "text-bottom", "flex-shrink": 0 }}><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l3.414 3.414c.329.328.513.773.513 1.237v8.086A1.75 1.75 0 0 1 13.75 15H3.75A1.75 1.75 0 0 1 2 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v11.5c0 .138.112.25.25.25h10a.25.25 0 0 0 .25-.25V5.5h-2.75A1.75 1.75 0 0 1 9.5 3.75V1.5Zm7.25 1.94V3.75a.25.25 0 0 0 .25.25h1.81L11 3.19Z"></path></svg>
+                    );
+                  })()}
                   {file.name}
                   <Show when={file.dirty}>
                     <span style={{

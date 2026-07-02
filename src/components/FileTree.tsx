@@ -16,7 +16,7 @@ function statusKey(s: string): string | null {
   return null;
 }
 
-function getFileIcon(filename: string): string | null {
+export function getFileIcon(filename: string): string | null {
   const ext = filename.split('.').pop()?.toLowerCase();
   if (!ext) return null;
 

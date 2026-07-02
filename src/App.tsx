@@ -157,16 +157,7 @@ const ModeIcon: Component<{ mode: WorkspaceMode; active: boolean }> = (props) =>
   );
 };
 
-const WorkspaceModeSwitch: Component = () => {
-  const activeFile = () => store.editorFiles.find((f) => f.path === store.activeEditorPath);
-  const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
-
-  function detailFor(mode: WorkspaceMode): string {
-    if (mode === "code") return activeFile()?.name ?? "No file";
-    if (mode === "review") return store.review?.title ?? "Working changes";
-    return activeTab()?.label ?? "No agent";
-  }
-
+const WorkspaceModeSwitch: Component = () => {  
   function selectMode(mode: WorkspaceMode) {
     if (mode === "code") {
       showCode();
@@ -182,12 +173,12 @@ const WorkspaceModeSwitch: Component = () => {
 
   return (
     <div style={{
-      display: "flex", "align-items": "center", gap: "6px",
-      padding: "4px",
-      background: "#0b0d12",
-      border: "1px solid #242833",
-      "border-radius": "8px",
-      "min-width": 0,
+      display: "flex", "align-items": "center", gap: "2px",
+      padding: "2px",
+      background: "#0d0e12",
+      border: "1px solid #232731",
+      "border-radius": "6px",
+      height: "28px",
     }}>
       <For each={WORKSPACE_MODES}>
         {(item) => {
@@ -198,34 +189,20 @@ const WorkspaceModeSwitch: Component = () => {
               onclick={() => selectMode(item.mode)}
               title={item.label}
               style={{
-                height: "34px",
-                display: "flex", "align-items": "center", gap: "8px",
-                padding: "0 12px",
-                "border-radius": "6px",
-                border: active() ? "1px solid #3a3e4a" : "1px solid transparent",
-                background: active() ? "#1a1d25" : "transparent",
-                color: active() ? "var(--fg-default)" : "var(--fg-muted)",
-                "box-shadow": active() ? "0 0 0 1px rgba(88,166,255,.14)" : "none",
-                transform: active() ? "translateY(-1px)" : "translateY(0)",
+                height: "22px",
+                display: "flex", "align-items": "center", gap: "6px",
+                padding: "0 10px",
+                "border-radius": "4px",
+                background: active() ? "#1c1f26" : "transparent",
+                color: active() ? "var(--fg-default)" : "var(--fg-subtle)",
+                "font-size": "11px",
+                "font-weight": "500",
                 cursor: "pointer",
+                "white-space": "nowrap",
               }}
             >
               <ModeIcon mode={item.mode} active={active()} />
-              <span style={{ display: "flex", "flex-direction": "column", "align-items": "flex-start", "line-height": "1.05" }}>
-                <span style={{ "font-size": "12px", "font-weight": "600", "white-space": "nowrap" }}>
-                  {item.label}
-                </span>
-                <span style={{
-                  "font-size": "10px",
-                  color: active() ? "#8b949e" : "#6e7681",
-                  "max-width": "110px",
-                  overflow: "hidden",
-                  "text-overflow": "ellipsis",
-                  "white-space": "nowrap",
-                }}>
-                  {detailFor(item.mode)}
-                </span>
-              </span>
+              <span>{item.label}</span>
             </button>
           );
         }}
@@ -513,23 +490,34 @@ const App: Component = () => {
           />
         </div>
 
-        <div style={{
-          position: "absolute", left: 0, right: 0,
-          "text-align": "center", "pointer-events": "none",
-          "font-size": "12.5px", color: "var(--fg-muted)",
-          "font-weight": "500", "letter-spacing": ".2px",
-        }}>
+        {/* Project Picker (on the left side next to traffic lights) */}
+        <div style={{ "margin-left": "24px", display: "flex", "align-items": "center" }}>
           <button
             onclick={handlePickProject}
             style={{
-              "pointer-events": "all", color: "var(--fg-body)",
-              "font-size": "12.5px", "font-weight": "500",
+              color: "var(--fg-body)",
+              "font-size": "12px", "font-weight": "500",
               cursor: "pointer",
+              display: "flex", "align-items": "center", gap: "6px",
+              padding: "4px 8px", "border-radius": "6px",
+              background: "#16181f", border: "1px solid #20232d",
+              "pointer-events": "all"
             }}
           >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--fg-muted)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
             {store.currentProject?.name ?? "no project"}
           </button>
-          <span style={{ color: "var(--fg-subtle)" }}> &nbsp;·&nbsp; flipflopper</span>
+        </div>
+
+        {/* Center Mode Switcher */}
+        <div style={{
+          position: "absolute", left: "50%", transform: "translateX(-50%)",
+          display: "flex", "align-items": "center",
+          "pointer-events": "all"
+        }}>
+          <WorkspaceModeSwitch />
         </div>
 
         <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "14px", color: "var(--fg-subtle)" }}>
@@ -544,17 +532,6 @@ const App: Component = () => {
             {store.currentBranch}
           </span>
         </div>
-      </div>
-
-      {/* ── WORKSPACE SWITCH ── */}
-      <div style={{
-        height: "46px", flex: "0 0 46px",
-        background: "#0f1116",
-        "border-bottom": "1px solid #1d2028",
-        display: "flex", "align-items": "center", "justify-content": "center",
-        padding: "0 10px 0 12px", gap: "12px",
-      }}>
-        <WorkspaceModeSwitch />
       </div>
 
       {/* ── BODY ── */}

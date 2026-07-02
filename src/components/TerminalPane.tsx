@@ -44,7 +44,7 @@ const TerminalPane: Component<Props> = (props) => {
       },
       fontFamily: '"JetBrains Mono", "Fira Code", Menlo, monospace',
       fontSize: 13,
-      lineHeight: 1.75,
+      lineHeight: 1.0,
       cursorBlink: true,
       allowProposedApi: true,
       scrollback: 5000,

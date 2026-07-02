@@ -54,6 +54,7 @@ export interface AppStore {
   /** bumped after saves so git-status consumers refetch */
   gitStatusVersion: number;
   currentBranch: string;
+  pendingLineFocus: { path: string; line: number } | null;
 }
 
 const initial: AppStore = {
@@ -73,6 +74,7 @@ const initial: AppStore = {
   editorOpen: false,
   gitStatusVersion: 0,
   currentBranch: "main",
+  pendingLineFocus: null,
 };
 
 export const [store, setStore] = createStore<AppStore>(initial);
@@ -269,32 +271,60 @@ export function closeReview() {
 
 // ── File editor ───────────────────────────────────────────────────────────────
 
+const inFlightOpens = new Set<string>();
+
 /** Open a file in the editor (or focus its tab if already open). */
-export async function openEditorFile(relPath: string, name: string) {
+export async function openEditorFile(relPath: string, name: string, lineNo?: number) {
   const project = store.currentProject;
   if (!project) return;
 
-  const existing = store.editorFiles.find((f) => f.path === relPath);
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/^\.?\//, "").toLowerCase();
+  const normalizedRelPath = norm(relPath);
+
+  const existing = store.editorFiles.find((f) => norm(f.path) === normalizedRelPath);
   if (existing) {
-    setStore("activeEditorPath", relPath);
+    setStore("activeEditorPath", existing.path);
+    if (lineNo !== undefined) {
+      setStore("pendingLineFocus", { path: existing.path, line: lineNo });
+    }
     showCode();
     return;
   }
 
-  const file = await readFileText(project.path, relPath);
-  setStore("editorFiles", (files) => [
-    ...files,
-    {
-      path: relPath,
-      name,
-      baseline: file.content,
-      dirty: false,
-      modifiedMs: file.modified_ms,
-      binary: file.is_binary || file.too_large,
-    },
-  ]);
-  setStore("activeEditorPath", relPath);
-  showCode();
+  if (inFlightOpens.has(normalizedRelPath)) {
+    return;
+  }
+  inFlightOpens.add(normalizedRelPath);
+
+  try {
+    const file = await readFileText(project.path, relPath);
+    
+    // Check again, in case it was added while we were reading the file
+    const doubleCheck = store.editorFiles.find((f) => norm(f.path) === normalizedRelPath);
+    if (!doubleCheck) {
+      setStore("editorFiles", (files) => [
+        ...files,
+        {
+          path: relPath,
+          name,
+          baseline: file.content,
+          dirty: false,
+          modifiedMs: file.modified_ms,
+          binary: file.is_binary || file.too_large,
+        },
+      ]);
+    }
+    const finalPath = doubleCheck ? doubleCheck.path : relPath;
+    setStore("activeEditorPath", finalPath);
+    if (lineNo !== undefined) {
+      setStore("pendingLineFocus", { path: finalPath, line: lineNo });
+    }
+    showCode();
+  } catch (e) {
+    console.error("Failed to open file:", e);
+  } finally {
+    inFlightOpens.delete(normalizedRelPath);
+  }
 }
 
 /** Close an editor tab; prompts if there are unsaved changes. */
