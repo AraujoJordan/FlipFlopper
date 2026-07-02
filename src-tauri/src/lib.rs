@@ -161,6 +161,12 @@ fn ensure_work_branch(project_path: String, branch: String) -> Result<String, St
 }
 
 #[tauri::command]
+fn get_current_branch(project_path: String) -> Result<String, String> {
+    git::get_current_branch(&project_path)
+}
+
+
+#[tauri::command]
 fn get_git_log(project_path: String, limit: u32) -> Result<Vec<CommitEntry>, String> {
     git::get_log(&project_path, limit)
 }
@@ -310,7 +316,9 @@ pub fn run() {
             get_git_status,
             auto_commit,
             ensure_work_branch,
+            get_current_branch,
             get_git_log,
+
             git_rollback,
             rename_commit,
             // Tools

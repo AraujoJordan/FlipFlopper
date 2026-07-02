@@ -138,6 +138,9 @@ export const autoCommit = (projectPath: string, message: string): Promise<Commit
 export const ensureWorkBranch = (projectPath: string, branch: string): Promise<string> =>
   invoke("ensure_work_branch", { projectPath, branch });
 
+export const getCurrentBranch = (projectPath: string): Promise<string> =>
+  invoke("get_current_branch", { projectPath });
+
 export const getGitLog = (projectPath: string, limit: number): Promise<CommitEntry[]> =>
   invoke("get_git_log", { projectPath, limit });
 

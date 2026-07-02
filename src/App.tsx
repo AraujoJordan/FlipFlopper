@@ -1,6 +1,6 @@
-import { Component, createEffect, createSignal, For, onMount, Show } from "solid-js";
+import { Component, createEffect, createSignal, For, onMount, Show, onCleanup } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { store, setStore, addTab } from "./lib/store";
+import { store, setStore, addTab, updateCurrentBranch } from "./lib/store";
 import {
   getAgents,
   getRecentProjects,
@@ -65,7 +65,6 @@ export function agentLetter(agentId: string): string {
 
 const App: Component = () => {
   const win = getCurrentWindow();
-  const [branch] = createSignal("main");
   const [continueOpen, setContinueOpen] = createSignal(false);
 
   onMount(async () => {
@@ -105,8 +104,12 @@ const App: Component = () => {
             addTab(tab);
           } catch { /* skip failed restore */ }
         }
+        updateCurrentBranch();
       } catch { /* first run or path gone */ }
     }
+
+    const branchInterval = setInterval(updateCurrentBranch, 15_000);
+    onCleanup(() => clearInterval(branchInterval));
   });
 
   createEffect(() => {
@@ -127,6 +130,7 @@ const App: Component = () => {
       const project = await openProject(path);
       setStore("currentProject", project);
       setStore("fileTreePath", project.path);
+      updateCurrentBranch();
     } catch (e) {
       console.error("Failed to open project:", e);
     }
@@ -210,7 +214,7 @@ const App: Component = () => {
               width: "7px", height: "7px", "border-radius": "50%",
               background: "#3fb950", "box-shadow": "0 0 7px #3fb950",
             }} />
-            {branch()}
+            {store.currentBranch}
           </span>
         </div>
       </div>
