@@ -112,6 +112,7 @@ export const AgentLogo: Component<{
 const App: Component = () => {
   const win = getCurrentWindow();
   const [continueOpen, setContinueOpen] = createSignal(false);
+  let continueRef: HTMLDivElement | undefined;
 
   onMount(async () => {
     const [agents, recents, tools] = await Promise.all([
@@ -155,7 +156,18 @@ const App: Component = () => {
     }
 
     const branchInterval = setInterval(updateCurrentBranch, 15_000);
-    onCleanup(() => clearInterval(branchInterval));
+
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (continueOpen() && continueRef && !continueRef.contains(e.target as Node)) {
+        setContinueOpen(false);
+      }
+    };
+    document.addEventListener("click", handleOutsideClick);
+
+    onCleanup(() => {
+      clearInterval(branchInterval);
+      document.removeEventListener("click", handleOutsideClick);
+    });
   });
 
   createEffect(() => {
@@ -277,7 +289,7 @@ const App: Component = () => {
 
         {/* Continue on… button */}
         <Show when={store.agents.filter((a) => a.installed && a.id !== (activeTab()?.agentId ?? "")).length > 0}>
-          <div style={{ "margin-left": "auto", "align-self": "center", position: "relative" }}>
+          <div ref={continueRef} style={{ "margin-left": "auto", "align-self": "center", position: "relative" }}>
             <button
               onclick={() => setContinueOpen((o) => !o)}
               style={{

@@ -1,10 +1,21 @@
-import { Component, createSignal, For, Show } from "solid-js";
+import { Component, createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { store, addTab, removeTab, setActiveTab } from "../lib/store";
 import { spawnAgent, type AgentInfo } from "../lib/ipc";
 import { agentColor, agentLetter, AgentLogo } from "../App";
 
 const AgentBar: Component = () => {
   const [menuOpen, setMenuOpen] = createSignal(false);
+  let containerRef: HTMLDivElement | undefined;
+
+  onMount(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (menuOpen() && containerRef && !containerRef.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("click", handleOutsideClick);
+    onCleanup(() => document.removeEventListener("click", handleOutsideClick));
+  });
 
   async function handlePick(agent: AgentInfo) {
     setMenuOpen(false);
@@ -89,7 +100,7 @@ const AgentBar: Component = () => {
       </For>
 
       {/* New tab button */}
-      <div style={{ position: "relative", "align-self": "center" }}>
+      <div ref={containerRef} style={{ position: "relative", "align-self": "center" }}>
         <button
           onclick={() => setMenuOpen((o) => !o)}
           style={{
