@@ -1,6 +1,7 @@
 import {
-  Component, JSX, For, Show, createSignal, onMount, onCleanup,
+  Component, JSX, For, Show, createSignal, createEffect, onMount, onCleanup,
 } from "solid-js";
+import { Portal } from "solid-js/web";
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
 
@@ -77,6 +78,18 @@ export const Button: Component<{
 // "Continue on..." handoff menu. `anchorRef` must be the toggle element that
 // opens the menu, so clicking it doesn't get treated as an outside click.
 
+interface MenuPos {
+  top?: number;
+  bottom?: number;
+  left?: number;
+  right?: number;
+  maxHeight: number;
+}
+
+const MENU_GAP = 6;
+const MENU_MAX_HEIGHT = 420;
+const MENU_MIN_HEIGHT = 120;
+
 export const Menu: Component<{
   open: boolean;
   onClose: () => void;
@@ -87,6 +100,36 @@ export const Menu: Component<{
   children: JSX.Element;
 }> = (props) => {
   let ref: HTMLDivElement | undefined;
+  const [pos, setPos] = createSignal<MenuPos | null>(null);
+
+  // Rendered through a Portal at viewport-fixed coordinates so the dropdown
+  // is never clipped by an ancestor's `overflow: hidden` (e.g. the terminal
+  // pane) or constrained by a scrolled/transformed positioning context.
+  // Opens toward whichever side (above/below the anchor) has more room, and
+  // clamps its own max-height to that real available space — so however
+  // close the anchor sits to a screen edge, the menu never renders partly
+  // or wholly outside the viewport.
+  createEffect(() => {
+    if (!props.open || !props.anchorRef) return;
+    const rect = props.anchorRef.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom - MENU_GAP;
+    const spaceAbove = rect.top - MENU_GAP;
+    const openUpward = spaceAbove > spaceBelow;
+    const maxHeight = Math.max(
+      MENU_MIN_HEIGHT,
+      Math.min(MENU_MAX_HEIGHT, openUpward ? spaceAbove : spaceBelow)
+    );
+
+    setPos({
+      ...(openUpward
+        ? { bottom: window.innerHeight - rect.top + MENU_GAP }
+        : { top: rect.bottom + MENU_GAP }),
+      ...(props.align === "right"
+        ? { right: window.innerWidth - rect.right }
+        : { left: rect.left }),
+      maxHeight,
+    });
+  });
 
   onMount(() => {
     function handleClick(e: MouseEvent) {
@@ -111,26 +154,33 @@ export const Menu: Component<{
   });
 
   return (
-    <Show when={props.open}>
-      <div
-        ref={ref}
-        role="menu"
-        style={{
-          position: "absolute", top: "38px",
-          ...(props.align === "right" ? { right: "0" } : { left: "0" }),
-          width: `${props.width ?? 288}px`,
-          "max-height": "min(60vh, 420px)",
-          overflow: "auto",
-          background: "var(--surface-3)",
-          border: "1px solid var(--border-default)",
-          "border-radius": "var(--radius-xl)",
-          "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
-          padding: "7px", "z-index": "50",
-          ...(props.style ?? {}),
-        }}
-      >
-        {props.children}
-      </div>
+    <Show when={props.open && pos()}>
+      {(p) => (
+        <Portal>
+          <div
+            ref={ref}
+            role="menu"
+            style={{
+              position: "fixed",
+              ...(p().top !== undefined ? { top: `${p().top}px` } : {}),
+              ...(p().bottom !== undefined ? { bottom: `${p().bottom}px` } : {}),
+              ...(p().left !== undefined ? { left: `${p().left}px` } : {}),
+              ...(p().right !== undefined ? { right: `${p().right}px` } : {}),
+              width: `${props.width ?? 288}px`,
+              "max-height": `min(60vh, ${p().maxHeight}px)`,
+              overflow: "auto",
+              background: "var(--surface-3)",
+              border: "1px solid var(--border-default)",
+              "border-radius": "var(--radius-xl)",
+              "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+              padding: "7px", "z-index": "150",
+              ...(props.style ?? {}),
+            }}
+          >
+            {props.children}
+          </div>
+        </Portal>
+      )}
     </Show>
   );
 };
