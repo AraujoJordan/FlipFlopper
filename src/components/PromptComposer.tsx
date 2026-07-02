@@ -1,7 +1,8 @@
-import { Component, createEffect, createMemo, createResource, createSignal, For, Show } from "solid-js";
-import { store } from "../lib/store";
+import { Component, createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { store, bumpGitStatus } from "../lib/store";
 import {
   autoCommit,
+  ensureWorkBranch,
   listPromptSkills,
   pickPromptFile,
   ptyInput,
@@ -11,6 +12,9 @@ import {
 } from "../lib/ipc";
 import { agentColor, AgentLogo } from "../App";
 import { getFileIcon } from "./FileTree";
+import { NewAgentMenu } from "./AgentBar";
+import { toast } from "./ui";
+import { registerShortcutHandler } from "../lib/shortcuts";
 
 type CompletionKind = "file" | "skill";
 
@@ -113,7 +117,14 @@ const PromptComposer: Component = () => {
   const [caretPosition, setCaretPosition] = createSignal(0);
   const [selectedIndex, setSelectedIndex] = createSignal(0);
   const [dismissedTokenKey, setDismissedTokenKey] = createSignal<string | null>(null);
+  const [newAgentMenuOpen, setNewAgentMenuOpen] = createSignal(false);
   let textareaRef!: HTMLTextAreaElement;
+  let newAgentToggleRef: HTMLButtonElement | undefined;
+
+  onMount(() => {
+    const unregister = registerShortcutHandler("focus-prompt", () => textareaRef?.focus());
+    onCleanup(unregister);
+  });
 
   const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
   const activeColor = () => activeTab() ? agentColor(activeTab()!.agentId) : "#8b949e";
@@ -242,6 +253,34 @@ const PromptComposer: Component = () => {
     insertAtCaret(`@${ref} `);
   }
 
+  async function commitWithRetry(projectPath: string, text: string): Promise<boolean> {
+    try {
+      const result = await autoCommit(projectPath, text);
+      toast(`Committed ${result.sha.slice(0, 7)}`, "success");
+      bumpGitStatus();
+      return true;
+    } catch (e) {
+      const message = String(e);
+      if (message.includes("main/master")) {
+        toast(message, "error", {
+          sticky: true,
+          actionLabel: "Create work branch & retry",
+          onAction: async () => {
+            try {
+              await ensureWorkBranch(projectPath, "flipflopper/work");
+              await commitWithRetry(projectPath, text);
+            } catch (retryErr) {
+              toast(`Failed to switch branch: ${String(retryErr)}`, "error");
+            }
+          },
+        });
+      } else {
+        toast(message, "error");
+      }
+      return false;
+    }
+  }
+
   async function send() {
     const text = value().trim();
     if (!text || sending()) return;
@@ -253,13 +292,17 @@ const PromptComposer: Component = () => {
       if (tab) {
         await ptyInput(tab.sessionId, text + "\r");
       } else if (store.currentProject) {
-        await autoCommit(store.currentProject.path, text);
+        const committed = await commitWithRetry(store.currentProject.path, text);
+        if (!committed) return;
+      } else {
+        return;
       }
       setValue("");
       setCaretPosition(0);
       setDismissedTokenKey(null);
     } catch (e) {
       console.error(e);
+      toast(String(e), "error");
     } finally {
       setSending(false);
     }
@@ -384,17 +427,32 @@ const PromptComposer: Component = () => {
         </Show>
 
         <Show when={activeTab()} fallback={
-          <span style={{
-            width: "20px", height: "20px", "border-radius": "6px",
-            background: "#1a1d25", color: "#6e7681",
-            display: "flex", "align-items": "center", "justify-content": "center",
-            flex: "0 0 auto",
-          }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M5 12h14" />
-              <path d="M12 5v14" />
-            </svg>
-          </span>
+          <div style={{ position: "relative", flex: "0 0 auto" }}>
+            <button
+              ref={(el) => (newAgentToggleRef = el)}
+              type="button"
+              onclick={() => store.currentProject && setNewAgentMenuOpen((o) => !o)}
+              disabled={!store.currentProject}
+              title={store.currentProject ? "Start an agent" : "Open a project to start an agent"}
+              style={{
+                width: "20px", height: "20px", "border-radius": "var(--radius-md)",
+                background: "var(--surface-4)", color: "var(--fg-subtle)",
+                display: "flex", "align-items": "center", "justify-content": "center",
+                cursor: store.currentProject ? "pointer" : "default",
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h14" />
+                <path d="M12 5v14" />
+              </svg>
+            </button>
+            <NewAgentMenu
+              open={newAgentMenuOpen()}
+              onClose={() => setNewAgentMenuOpen(false)}
+              anchorRef={newAgentToggleRef}
+              align="left"
+            />
+          </div>
         }>
           {(tab) => (
             <AgentLogo

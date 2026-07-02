@@ -180,16 +180,16 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
           flex: "0 0 auto",
           display: "flex", "align-items": "center", gap: "10px",
           padding: "7px 14px",
-          background: "#2a2519",
-          "border-bottom": "1px solid #d2992255",
-          "font-size": "12px", color: "#d29922",
+          background: "var(--status-mod-bg)",
+          "border-bottom": "1px solid var(--status-mod)55",
+          "font-size": "12px", color: "var(--status-mod)",
         }}>
           <span style={{ flex: "1" }}>File changed on disk</span>
           <button
             onclick={() => reloadFromDisk()}
             style={{
               padding: "3px 10px", "border-radius": "6px",
-              border: "1px solid #d2992288", color: "#d29922",
+              border: "1px solid var(--status-mod)88", color: "var(--status-mod)",
               "font-size": "11.5px", cursor: "pointer",
             }}
           >
@@ -199,7 +199,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
             onclick={() => setConflict(false)}
             style={{
               padding: "3px 10px", "border-radius": "6px",
-              border: "1px solid #3a3e4a", color: "var(--fg-muted)",
+              border: "1px solid var(--border-strong)", color: "var(--fg-muted)",
               "font-size": "11.5px", cursor: "pointer",
             }}
           >
@@ -214,8 +214,8 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
           flex: "0 0 auto",
           padding: "7px 14px",
           background: "rgba(248,81,73,0.15)",
-          "border-bottom": "1px solid #f8514955",
-          "font-size": "12px", color: "#f85149",
+          "border-bottom": "1px solid var(--status-del)55",
+          "font-size": "12px", color: "var(--status-del)",
         }}>
           {saveError()}
         </div>
@@ -248,7 +248,7 @@ const EditorPane: Component = () => {
     <div style={{
       height: "100%",
       display: "flex", "flex-direction": "column",
-      background: "#0b0c10",
+      background: "var(--surface-1)",
       "min-height": 0,
     }}>
       <Show
@@ -272,8 +272,8 @@ const EditorPane: Component = () => {
         <div style={{
           height: "34px", flex: "0 0 34px",
           display: "flex", "align-items": "stretch",
-          background: "#0f1116",
-          "border-bottom": "1px solid #1d2028",
+          background: "var(--surface-2)",
+          "border-bottom": "1px solid var(--border-muted)",
           overflow: "auto hidden",
         }}>
           <For each={store.editorFiles}>
@@ -289,8 +289,8 @@ const EditorPane: Component = () => {
                     "font-family": "'JetBrains Mono', monospace",
                     "font-size": "12px",
                     color: isActive() ? "var(--fg-default)" : "var(--fg-muted)",
-                    background: isActive() ? "#1b1e26" : "transparent",
-                    "border-right": "1px solid #1a1d25",
+                    background: isActive() ? "var(--surface-4)" : "transparent",
+                    "border-right": "1px solid var(--border-muted)",
                     cursor: "pointer",
                     "white-space": "nowrap",
                   }}
@@ -307,7 +307,7 @@ const EditorPane: Component = () => {
                   <Show when={file.dirty}>
                     <span style={{
                       width: "7px", height: "7px", "border-radius": "50%",
-                      background: "#d29922", flex: "0 0 auto",
+                      background: "var(--status-mod)", flex: "0 0 auto",
                     }} />
                   </Show>
                   <button
@@ -338,7 +338,7 @@ const EditorPane: Component = () => {
               height: "38px", flex: "0 0 38px",
               display: "flex", "align-items": "center", gap: "10px",
               padding: "0 16px",
-              "border-bottom": "1px solid #1a1d25",
+              "border-bottom": "1px solid var(--border-muted)",
             }}>
               <span style={{
                 "font-family": "'JetBrains Mono', monospace",
@@ -348,7 +348,7 @@ const EditorPane: Component = () => {
                 {file().path}
               </span>
               <Show when={file().dirty}>
-                <span style={{ "font-size": "11px", color: "#d29922" }}>modified</span>
+                <span style={{ "font-size": "11px", color: "var(--status-mod)" }}>modified</span>
               </Show>
 
               <div style={{ "margin-left": "auto", display: "flex", gap: "8px" }}>
@@ -357,7 +357,7 @@ const EditorPane: Component = () => {
                   title="Review changes vs HEAD"
                   style={{
                     padding: "4px 12px", "border-radius": "7px",
-                    border: "1px solid #3a3e4a",
+                    border: "1px solid var(--border-strong)",
                     color: "var(--fg-muted)", "font-size": "11.5px",
                     cursor: "pointer",
                   }}
@@ -370,8 +370,8 @@ const EditorPane: Component = () => {
                   title="Save (⌘S)"
                   style={{
                     padding: "4px 14px", "border-radius": "7px",
-                    border: `1px solid ${file().dirty ? "#58a6ff" : "#3a3e4a"}`,
-                    color: file().dirty ? "#58a6ff" : "var(--fg-subtle)",
+                    border: `1px solid ${file().dirty ? "var(--accent)" : "var(--border-strong)"}`,
+                    color: file().dirty ? "var(--accent)" : "var(--fg-subtle)",
                     "font-size": "11.5px", "font-weight": "500",
                     cursor: file().dirty ? "pointer" : "default",
                     opacity: file().dirty ? "1" : ".55",

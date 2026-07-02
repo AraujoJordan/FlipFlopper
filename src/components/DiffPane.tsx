@@ -5,6 +5,7 @@ import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
 import { store, closeReview, openReview, openEditorFile } from "../lib/store";
 import { getReviewDiff, type FileDiff, type DiffLine } from "../lib/ipc";
+import { Button, Spinner } from "./ui";
 
 // ── Layout toggle ────────────────────────────────────────────────────────────
 type LayoutMode = "unified" | "split";
@@ -12,17 +13,17 @@ type LayoutMode = "unified" | "split";
 // ── Colors — match GitHub dark's diff palette ────────────────────────────────
 const ADD_BG   = "rgba(46,160,67,0.15)";
 const DEL_BG   = "rgba(248,81,73,0.15)";
-const ADD_SIGN = "#3fb950";
-const DEL_SIGN = "#f85149";
+const ADD_SIGN = "var(--status-add)";
+const DEL_SIGN = "var(--status-del)";
 const CTX_BG   = "transparent";
 
 // ── Status pill colours — mirrors FileTree.tsx ───────────────────────────────
 const STATUS_COLORS: Record<string, { color: string; label: string }> = {
-  added:    { color: "#3fb950", label: "A" },
-  modified: { color: "#d29922", label: "M" },
-  deleted:  { color: "#f85149", label: "D" },
-  renamed:  { color: "#58a6ff", label: "R" },
-  binary:   { color: "#8b949e", label: "B" },
+  added:    { color: "var(--status-add)", label: "A" },
+  modified: { color: "var(--status-mod)", label: "M" },
+  deleted:  { color: "var(--status-del)", label: "D" },
+  renamed:  { color: "var(--status-renamed)", label: "R" },
+  binary:   { color: "var(--fg-muted)", label: "B" },
 };
 
 // ── Language detection ────────────────────────────────────────────────────────
@@ -225,7 +226,7 @@ const SplitCell: Component<{
         flex: "1", "min-width": "0",
         display: "flex", "align-items": "flex-start",
         background: bg(),
-        "border-right": props.side === "left" ? "1px solid #1d2028" : "none",
+        "border-right": props.side === "left" ? "1px solid var(--border-muted)" : "none",
         "min-height": "20px", "line-height": "20px",
       }}
     >
@@ -254,7 +255,7 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
 
   return (
     <div style={{
-      border: "1px solid #1d2028",
+      border: "1px solid var(--border-muted)",
       "border-radius": "8px",
       overflow: "hidden",
       "margin-bottom": "16px",
@@ -265,8 +266,8 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         style={{
           display: "flex", "align-items": "center", gap: "10px",
           padding: "8px 14px",
-          background: "#0c0e14",
-          "border-bottom": collapsed() ? "none" : "1px solid #1d2028",
+          background: "var(--surface-2)",
+          "border-bottom": collapsed() ? "none" : "1px solid var(--border-muted)",
           cursor: "pointer",
           "user-select": "none",
         }}
@@ -323,18 +324,18 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
           </div>
         </Show>
         <Show when={!props.file.is_binary && props.file.hunks.length > 0}>
-          <div style={{ overflow: "auto", "font-family": MONO, "font-size": "12px" }}>
+          <div style={{ overflow: "visible", "font-family": MONO, "font-size": "12px" }}>
             <For each={props.file.hunks}>
               {(hunk) => (
                 <>
                   {/* Hunk header */}
                   <div style={{
                     padding: "4px 12px",
-                    background: "#0a0d16",
+                    background: "var(--surface-2)",
                     color: "var(--fg-faint)",
                     "font-family": MONO, "font-size": "11px",
-                    "border-top": "1px solid #1d2028",
-                    "border-bottom": "1px solid #1d2028",
+                    "border-top": "1px solid var(--border-muted)",
+                    "border-bottom": "1px solid var(--border-muted)",
                   }}>
                     {hunk.header}
                   </div>
@@ -405,14 +406,14 @@ const DiffPane: Component = () => {
   );
 
   const headerStyle = {
-    height: "40px",
-    "flex": "0 0 40px",
+    height: "38px",
+    "flex": "0 0 38px",
     display: "flex",
     "align-items": "center",
     gap: "10px",
     padding: "0 14px",
-    "border-bottom": "1px solid #1a1d25",
-    background: "#0c0e14",
+    "border-bottom": "1px solid var(--border-muted)",
+    background: "var(--surface-2)",
     "flex-shrink": "0",
   } as const;
 
@@ -421,16 +422,16 @@ const DiffPane: Component = () => {
     "font-family": MONO,
     color: active ? "var(--fg-default)" : "var(--fg-subtle)",
     padding: "2px 10px",
-    "border-radius": "4px",
-    border: active ? "1px solid #3a3e4a" : "1px solid transparent",
-    background: active ? "#1b1e26" : "transparent",
+    "border-radius": "var(--radius-sm)",
+    border: active ? "1px solid var(--border-strong)" : "1px solid transparent",
+    background: active ? "var(--surface-4)" : "transparent",
     cursor: "pointer",
   } as const);
 
   const closeBtnStyle = {
     display: "flex", "align-items": "center", "justify-content": "center",
-    width: "24px", height: "24px", "border-radius": "6px",
-    background: "transparent", border: "1px solid #2a2e3a",
+    width: "24px", height: "24px", "border-radius": "var(--radius-md)",
+    background: "transparent", border: "1px solid var(--border-default)",
     color: "var(--fg-subtle)", cursor: "pointer", "font-size": "14px", "line-height": "1",
   } as const;
 
@@ -438,12 +439,12 @@ const DiffPane: Component = () => {
     <div style={{
       height: "100%",
       display: "flex", "flex-direction": "column",
-      background: "#0d0e12",
+      background: "var(--surface-2)",
       "min-height": 0,
     }}>
       {/* ── Header ── */}
       <div style={headerStyle}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
           <path d="M14 3v5h5" />
           <path d="M9 15l2 2 4-5" />
@@ -463,7 +464,7 @@ const DiffPane: Component = () => {
           <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "6px" }}>
             <div style={{
               display: "flex", "align-items": "center",
-              border: "1px solid #2a2e3a", "border-radius": "6px", overflow: "hidden",
+              border: "1px solid var(--border-default)", "border-radius": "var(--radius-md)", overflow: "hidden",
             }}>
               <button onclick={() => setMode("unified")} style={segBtnStyle(mode() === "unified")}>
                 Unified
@@ -473,17 +474,12 @@ const DiffPane: Component = () => {
               </button>
             </div>
 
-            <button onclick={() => refetch()} title="Reload diff" style={{
-              display: "flex", "align-items": "center", gap: "5px",
-              "font-size": "11.5px", color: "var(--fg-muted)",
-              padding: "3px 8px", "border-radius": "5px",
-              border: "1px solid #2a2e3a", background: "transparent", cursor: "pointer",
-            }}>
+            <Button variant="ghost" size="sm" onClick={() => refetch()} title="Reload diff" style={{ border: "1px solid var(--border-default)" }}>
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 12a9 9 0 11-2.64-6.36M21 4v6h-6" />
               </svg>
               Reload
-            </button>
+            </Button>
 
             <button onclick={closeReview} title="Close review pane" style={closeBtnStyle}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -504,19 +500,9 @@ const DiffPane: Component = () => {
             color: "var(--fg-subtle)",
           }}>
             <div style={{ "font-size": "14px", color: "var(--fg-body)" }}>No review selected</div>
-            <button
-              onclick={() => openReview(undefined, "Working changes")}
+            <Button
+              onClick={() => openReview(undefined, "Working changes")}
               disabled={!store.currentProject}
-              style={{
-                display: "flex", "align-items": "center", gap: "7px",
-                height: "30px", padding: "0 12px",
-                "border-radius": "7px",
-                border: "1px solid #2a2e3a",
-                background: store.currentProject ? "#1b1e26" : "transparent",
-                color: store.currentProject ? "var(--fg-body)" : "#3a3e4a",
-                "font-size": "12px",
-                cursor: store.currentProject ? "pointer" : "default",
-              }}
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
@@ -524,7 +510,7 @@ const DiffPane: Component = () => {
                 <path d="M9 15l2 2 4-5" />
               </svg>
               Review working changes
-            </button>
+            </Button>
           </div>
         }
       >
@@ -533,8 +519,8 @@ const DiffPane: Component = () => {
 
           {/* Loading */}
           <Show when={diffs.loading}>
-            <div style={{ color: "var(--fg-subtle)", "font-size": "13px", padding: "32px 0", "text-align": "center" }}>
-              Loading diff…
+            <div style={{ padding: "32px 0", display: "flex", "justify-content": "center" }}>
+              <Spinner />
             </div>
           </Show>
 
@@ -542,8 +528,8 @@ const DiffPane: Component = () => {
           <Show when={diffs.error}>
             <div style={{
               background: "#2a1a1a", border: "1px solid #3a2020",
-              "border-radius": "8px", padding: "16px",
-              color: "#f85149", "font-family": MONO, "font-size": "12px",
+              "border-radius": "var(--radius-lg)", padding: "16px",
+              color: "var(--status-del)", "font-family": MONO, "font-size": "12px",
             }}>
               {String(diffs.error)}
             </div>

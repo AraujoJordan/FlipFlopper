@@ -1,12 +1,13 @@
 import { Component, createResource, createSignal, For, Show } from "solid-js";
-import { store, openReview, openEditorFile } from "../lib/store";
-import { getFileTree, getGitStatus, type FileEntry, type FileStatus } from "../lib/ipc";
+import { store, openReview, openEditorFile, toggleFileSelection, clearFileSelection } from "../lib/store";
+import { getFileTree, getGitStatus, injectFileRefs, type FileEntry, type FileStatus } from "../lib/ipc";
+import { Button, Spinner, toast } from "./ui";
 
 const STATUS_STYLE: Record<string, { color: string; bg: string; label: string }> = {
-  A: { color: "#3fb950", bg: "#1a2a1e", label: "A" },
-  M: { color: "#d29922", bg: "#2a2519", label: "M" },
-  D: { color: "#f85149", bg: "#2a1a1a", label: "D" },
-  "??": { color: "#3fb950", bg: "#1a2a1e", label: "A" },
+  A: { color: "var(--status-add)", bg: "#1a2a1e", label: "A" },
+  M: { color: "var(--status-mod)", bg: "var(--status-mod-bg)", label: "M" },
+  D: { color: "var(--status-del)", bg: "#2a1a1a", label: "D" },
+  "??": { color: "var(--status-add)", bg: "#1a2a1e", label: "A" },
 };
 
 function statusKey(s: string): string | null {
@@ -72,7 +73,7 @@ const FileTree: Component = () => {
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
   const [childrenByDir, setChildrenByDir] = createSignal<Map<string, FileEntry[]>>(new Map());
 
-  const [rootEntries] = createResource(
+  const [rootEntries, { refetch: refetchRoot }] = createResource(
     () => store.fileTreePath,
     (path) => (path ? getFileTree(path) : Promise.resolve([]))
   );
@@ -92,8 +93,12 @@ const FileTree: Component = () => {
     });
 
     if (willExpand && !childrenByDir().has(path)) {
-      const kids = await getFileTree(path);
-      setChildrenByDir((prev) => new Map(prev).set(path, kids));
+      try {
+        const kids = await getFileTree(path);
+        setChildrenByDir((prev) => new Map(prev).set(path, kids));
+      } catch (e) {
+        toast(`Failed to list folder: ${String(e)}`, "error");
+      }
     }
   }
 
@@ -114,9 +119,10 @@ const FileTree: Component = () => {
     if (statusFor(entry, statuses)?.status === "D") {
       reviewFile(entry, statuses);
     } else {
-      openEditorFile(relPath(entry), entry.name).catch((e) =>
-        console.error("Failed to open file:", e)
-      );
+      openEditorFile(relPath(entry), entry.name).catch((e) => {
+        console.error("Failed to open file:", e);
+        toast(`Failed to open file: ${String(e)}`, "error");
+      });
     }
   }
 
@@ -134,11 +140,24 @@ const FileTree: Component = () => {
     return statuses.length;
   }
 
+  async function injectSelectionToAgent() {
+    if (!store.activeTabId || store.selectedFiles.length === 0) return;
+    const count = store.selectedFiles.length;
+    try {
+      await injectFileRefs(store.activeTabId, store.selectedFiles);
+      toast(`Inserted ${count} file ref${count === 1 ? "" : "s"}`, "success");
+      clearFileSelection();
+    } catch (e) {
+      toast(`Failed to insert file refs: ${String(e)}`, "error");
+    }
+  }
+
   const FileNode: Component<{ entry: FileEntry; statuses: FileStatus[]; depth: number }> = (props) => {
     const isExpanded = () => expanded().has(props.entry.path);
     const st = () => statusFor(props.entry, props.statuses);
     const stKey = () => (st() ? statusKey(st()!.status) : null);
     const stStyle = () => (stKey() ? STATUS_STYLE[stKey()!] : null);
+    const isSelected = () => store.selectedFiles.includes(relPath(props.entry));
 
     const childEntries = () => {
       if (!props.entry.is_dir || !isExpanded()) return [];
@@ -148,14 +167,21 @@ const FileTree: Component = () => {
     return (
       <>
         <div
-          onclick={() => (props.entry.is_dir ? toggleDir(props.entry.path) : openFile(props.entry, props.statuses))}
-          title={props.entry.is_dir ? undefined : `Open ${relPath(props.entry)}`}
+          onclick={(e: MouseEvent) => {
+            if (!props.entry.is_dir && (e.metaKey || e.ctrlKey)) {
+              toggleFileSelection(relPath(props.entry));
+              return;
+            }
+            props.entry.is_dir ? toggleDir(props.entry.path) : openFile(props.entry, props.statuses);
+          }}
+          title={props.entry.is_dir ? undefined : `${relPath(props.entry)} (⌘-click to select)`}
           style={{
             display: "flex", "align-items": "center", "justify-content": "space-between",
             padding: "4px 8px",
             "padding-left": `${8 + props.depth * 14}px`,
-            "border-radius": "6px",
-            background: stStyle()?.bg ?? "transparent",
+            "border-radius": "var(--radius-md)",
+            background: isSelected() ? "var(--surface-4)" : (stStyle()?.bg ?? "transparent"),
+            "box-shadow": isSelected() ? "inset 2px 0 0 var(--accent)" : "none",
             cursor: "pointer",
           }}
         >
@@ -198,8 +224,8 @@ const FileTree: Component = () => {
               style={{
                 color: stStyle()!.color,
                 "font-weight": "700", "font-size": "11px",
-                "font-family": "'JetBrains Mono', monospace",
-                padding: "1px 5px", "border-radius": "4px",
+                "font-family": "var(--font-mono)",
+                padding: "1px 5px", "border-radius": "var(--radius-sm)",
                 cursor: props.entry.is_dir ? "default" : "pointer",
               }}
             >
@@ -224,8 +250,8 @@ const FileTree: Component = () => {
   return (
     <div style={{
       width: "262px", flex: "0 0 262px",
-      background: "#0e1015",
-      "border-right": "1px solid #1d2028",
+      background: "var(--surface-2)",
+      "border-right": "1px solid var(--border-muted)",
       display: "flex", "flex-direction": "column",
       "min-height": 0,
     }}>
@@ -234,7 +260,7 @@ const FileTree: Component = () => {
         height: "38px", flex: "0 0 38px",
         display: "flex", "align-items": "center", "justify-content": "space-between",
         padding: "0 14px",
-        "border-bottom": "1px solid #1a1d25",
+        "border-bottom": "1px solid var(--border-muted)",
       }}>
         <span style={{
           "font-size": "11px", "letter-spacing": ".5px",
@@ -244,9 +270,9 @@ const FileTree: Component = () => {
         </span>
         <Show when={statuses().length > 0}>
           <span style={{
-            "font-family": "'JetBrains Mono', monospace",
+            "font-family": "var(--font-mono)",
             "font-size": "10px", color: "var(--fg-subtle)",
-            background: "#1a1d25", padding: "2px 7px", "border-radius": "5px",
+            background: "var(--surface-4)", padding: "2px 7px", "border-radius": "var(--radius-md)",
           }}>
             {changedCount(statuses())} changed
           </span>
@@ -257,7 +283,7 @@ const FileTree: Component = () => {
       <div style={{
         flex: "1", overflow: "auto",
         padding: "8px 6px",
-        "font-family": "'JetBrains Mono', monospace",
+        "font-family": "var(--font-mono)",
         "font-size": "12.5px",
       }}>
         <Show when={!store.fileTreePath}>
@@ -265,23 +291,52 @@ const FileTree: Component = () => {
             No project open
           </div>
         </Show>
+
+        <Show when={rootEntries.loading}>
+          <div style={{ padding: "16px 0", display: "flex", "justify-content": "center" }}>
+            <Spinner />
+          </div>
+        </Show>
+
+        <Show when={rootEntries.error}>
+          <div style={{ padding: "16px", "text-align": "center" }}>
+            <div style={{ color: "var(--status-del)", "font-size": "11.5px", "margin-bottom": "8px" }}>
+              {String(rootEntries.error)}
+            </div>
+            <Button size="sm" onClick={() => refetchRoot()}>Retry</Button>
+          </div>
+        </Show>
+
         <For each={rootEntries() ?? []}>
           {(entry) => <FileNode entry={entry} statuses={statuses()} depth={0} />}
         </For>
       </div>
 
-      {/* Legend */}
+      {/* Legend / selection action bar */}
       <div style={{
         flex: "0 0 auto",
-        "border-top": "1px solid #1a1d25",
+        "border-top": "1px solid var(--border-muted)",
         padding: "9px 14px",
-        display: "flex", gap: "14px",
-        "font-family": "'JetBrains Mono', monospace",
+        display: "flex", "align-items": "center", gap: "10px",
+        "font-family": "var(--font-mono)",
         "font-size": "10px", color: "var(--fg-subtle)",
       }}>
-        <span><span style={{ color: "#3fb950" }}>A</span> added</span>
-        <span><span style={{ color: "#d29922" }}>M</span> modified</span>
-        <span><span style={{ color: "#f85149" }}>D</span> deleted</span>
+        <Show
+          when={store.selectedFiles.length > 0}
+          fallback={
+            <>
+              <span><span style={{ color: "var(--status-add)" }}>A</span> added</span>
+              <span><span style={{ color: "var(--status-mod)" }}>M</span> modified</span>
+              <span><span style={{ color: "var(--status-del)" }}>D</span> deleted</span>
+            </>
+          }
+        >
+          <span style={{ "font-size": "11px" }}>{store.selectedFiles.length} selected</span>
+          <Button size="sm" onClick={injectSelectionToAgent} disabled={!store.activeTabId} style={{ "margin-left": "auto" }}>
+            → Agent
+          </Button>
+          <Button size="sm" variant="ghost" onClick={clearFileSelection}>Clear</Button>
+        </Show>
       </div>
     </div>
   );

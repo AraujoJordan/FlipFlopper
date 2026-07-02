@@ -1,0 +1,333 @@
+import {
+  Component, JSX, For, Show, createSignal, onMount, onCleanup,
+} from "solid-js";
+
+// ── Spinner ───────────────────────────────────────────────────────────────────
+
+export const Spinner: Component<{ size?: number; color?: string }> = (props) => {
+  const size = () => props.size ?? 14;
+  return (
+    <span
+      style={{
+        width: `${size()}px`, height: `${size()}px`,
+        border: "2px solid var(--border-default)",
+        "border-top-color": props.color ?? "var(--accent)",
+        "border-radius": "50%",
+        display: "inline-block",
+        animation: "spin 0.7s linear infinite",
+        flex: "0 0 auto",
+      }}
+    />
+  );
+};
+
+// ── Button ────────────────────────────────────────────────────────────────────
+
+export const Button: Component<{
+  variant?: "outline" | "solid" | "ghost";
+  size?: "sm" | "md";
+  title?: string;
+  disabled?: boolean;
+  type?: "button" | "submit";
+  ref?: (el: HTMLButtonElement) => void;
+  onClick?: (e: MouseEvent) => void;
+  style?: JSX.CSSProperties;
+  children: JSX.Element;
+}> = (props) => {
+  const variant = () => props.variant ?? "outline";
+  const size = () => props.size ?? "md";
+
+  const variantStyle = (): JSX.CSSProperties => {
+    switch (variant()) {
+      case "solid":
+        return { background: "var(--accent)", border: "1px solid var(--accent)", color: "#0d1117" };
+      case "ghost":
+        return { background: "transparent", border: "1px solid transparent", color: "var(--fg-muted)" };
+      default:
+        return { background: "var(--surface-4)", border: "1px solid var(--border-default)", color: "var(--fg-body)" };
+    }
+  };
+
+  return (
+    <button
+      ref={props.ref}
+      type={props.type ?? "button"}
+      title={props.title}
+      disabled={props.disabled}
+      onClick={props.onClick}
+      style={{
+        display: "flex", "align-items": "center", "justify-content": "center", gap: "6px",
+        padding: size() === "sm" ? "3px 8px" : "4px 12px",
+        "font-size": size() === "sm" ? "11px" : "11.5px",
+        "border-radius": "var(--radius-md)",
+        cursor: props.disabled ? "default" : "pointer",
+        opacity: props.disabled ? ".55" : "1",
+        "white-space": "nowrap",
+        ...variantStyle(),
+        ...(props.style ?? {}),
+      }}
+    >
+      {props.children}
+    </button>
+  );
+};
+
+// ── Menu / MenuItem ───────────────────────────────────────────────────────────
+// Dropdown card pattern shared by AgentBar's new-session menu and the
+// "Continue on..." handoff menu. `anchorRef` must be the toggle element that
+// opens the menu, so clicking it doesn't get treated as an outside click.
+
+export const Menu: Component<{
+  open: boolean;
+  onClose: () => void;
+  anchorRef?: HTMLElement;
+  align?: "left" | "right";
+  width?: number;
+  style?: JSX.CSSProperties;
+  children: JSX.Element;
+}> = (props) => {
+  let ref: HTMLDivElement | undefined;
+
+  onMount(() => {
+    function handleClick(e: MouseEvent) {
+      if (!props.open) return;
+      const target = e.target as Node;
+      if (ref?.contains(target)) return;
+      if (props.anchorRef?.contains(target)) return;
+      props.onClose();
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (props.open && e.key === "Escape") {
+        e.stopPropagation();
+        props.onClose();
+      }
+    }
+    document.addEventListener("click", handleClick);
+    document.addEventListener("keydown", handleKey, true);
+    onCleanup(() => {
+      document.removeEventListener("click", handleClick);
+      document.removeEventListener("keydown", handleKey, true);
+    });
+  });
+
+  return (
+    <Show when={props.open}>
+      <div
+        ref={ref}
+        role="menu"
+        style={{
+          position: "absolute", top: "38px",
+          ...(props.align === "right" ? { right: "0" } : { left: "0" }),
+          width: `${props.width ?? 288}px`,
+          "max-height": "min(60vh, 420px)",
+          overflow: "auto",
+          background: "var(--surface-3)",
+          border: "1px solid var(--border-default)",
+          "border-radius": "var(--radius-xl)",
+          "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+          padding: "7px", "z-index": "50",
+          ...(props.style ?? {}),
+        }}
+      >
+        {props.children}
+      </div>
+    </Show>
+  );
+};
+
+export const MenuLabel: Component<{ children: JSX.Element }> = (props) => (
+  <div style={{
+    padding: "8px 10px 6px",
+    "font-size": "10.5px", "letter-spacing": ".5px",
+    "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
+  }}>
+    {props.children}
+  </div>
+);
+
+export const MenuItem: Component<{
+  onSelect: () => void;
+  disabled?: boolean;
+  style?: JSX.CSSProperties;
+  children: JSX.Element;
+}> = (props) => (
+  <button
+    role="menuitem"
+    disabled={props.disabled}
+    onclick={props.onSelect}
+    style={{
+      width: "100%", display: "flex", "align-items": "center",
+      gap: "11px", padding: "9px 10px",
+      "border-radius": "var(--radius-lg)",
+      "text-align": "left",
+      opacity: props.disabled ? ".5" : "1",
+      cursor: props.disabled ? "default" : "pointer",
+      ...(props.style ?? {}),
+    }}
+    onMouseEnter={(e) => { if (!props.disabled) e.currentTarget.style.background = "var(--surface-4)"; }}
+    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+  >
+    {props.children}
+  </button>
+);
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+
+export type ToastKind = "info" | "success" | "error";
+
+interface ToastItem {
+  id: number;
+  message: string;
+  kind: ToastKind;
+  actionLabel?: string;
+  onAction?: () => void;
+}
+
+const [toasts, setToasts] = createSignal<ToastItem[]>([]);
+let toastSeq = 0;
+
+export function toast(
+  message: string,
+  kind: ToastKind = "info",
+  opts?: { actionLabel?: string; onAction?: () => void; sticky?: boolean },
+) {
+  const id = ++toastSeq;
+  setToasts((t) => [...t.slice(-3), {
+    id, message, kind, actionLabel: opts?.actionLabel, onAction: opts?.onAction,
+  }]);
+  if (!opts?.sticky) {
+    const timeout = kind === "error" ? 8000 : 4000;
+    setTimeout(() => dismissToast(id), timeout);
+  }
+}
+
+export function dismissToast(id: number) {
+  setToasts((t) => t.filter((x) => x.id !== id));
+}
+
+const TOAST_COLOR: Record<ToastKind, string> = {
+  info: "var(--accent-soft)",
+  success: "var(--status-add)",
+  error: "var(--status-del)",
+};
+
+export const ToastHost: Component = () => (
+  <div style={{
+    position: "fixed", bottom: "84px", right: "16px",
+    display: "flex", "flex-direction": "column", gap: "8px",
+    "z-index": "100", "max-width": "360px",
+  }}>
+    <For each={toasts()}>
+      {(t) => {
+        const color = TOAST_COLOR[t.kind];
+        return (
+          <div style={{
+            display: "flex", "align-items": "flex-start", gap: "10px",
+            background: "var(--surface-3)",
+            border: `1px solid ${color}55`,
+            "border-radius": "var(--radius-lg)",
+            padding: "10px 12px",
+            "box-shadow": "0 12px 32px rgba(0,0,0,.5)",
+            "font-size": "12.5px", color: "var(--fg-body)",
+          }}>
+            <span style={{ flex: "1", "line-height": "1.5", "word-break": "break-word" }}>
+              {t.message}
+            </span>
+            <Show when={t.actionLabel}>
+              <button
+                onclick={() => { t.onAction?.(); dismissToast(t.id); }}
+                style={{
+                  "flex-shrink": "0", color, "font-size": "11.5px", "font-weight": "600",
+                  cursor: "pointer", "white-space": "nowrap",
+                }}
+              >
+                {t.actionLabel}
+              </button>
+            </Show>
+            <button
+              onclick={() => dismissToast(t.id)}
+              title="Dismiss"
+              style={{ "flex-shrink": "0", color: "var(--fg-subtle)", cursor: "pointer" }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        );
+      }}
+    </For>
+  </div>
+);
+
+// ── Confirm dialog ────────────────────────────────────────────────────────────
+
+interface ConfirmState {
+  message: string;
+  confirmLabel: string;
+  resolve: (v: boolean) => void;
+}
+
+const [confirmState, setConfirmState] = createSignal<ConfirmState | null>(null);
+
+export function confirmDialog(message: string, confirmLabel = "Confirm"): Promise<boolean> {
+  return new Promise((resolve) => {
+    setConfirmState({ message, confirmLabel, resolve });
+  });
+}
+
+function resolveConfirm(v: boolean) {
+  confirmState()?.resolve(v);
+  setConfirmState(null);
+}
+
+export const ConfirmHost: Component = () => {
+  onMount(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (confirmState() && e.key === "Escape") {
+        e.stopPropagation();
+        resolveConfirm(false);
+      }
+    }
+    document.addEventListener("keydown", handleKey, true);
+    onCleanup(() => document.removeEventListener("keydown", handleKey, true));
+  });
+
+  return (
+    <Show when={confirmState()}>
+      {(state) => (
+        <div
+          onclick={() => resolveConfirm(false)}
+          style={{
+            position: "fixed", inset: 0, "z-index": "200",
+            display: "flex", "align-items": "center", "justify-content": "center",
+            background: "rgba(0,0,0,.5)",
+          }}
+        >
+          <div
+            onclick={(e) => e.stopPropagation()}
+            style={{
+              width: "340px",
+              background: "var(--surface-3)",
+              border: "1px solid var(--border-default)",
+              "border-radius": "var(--radius-xl)",
+              "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+              padding: "18px",
+            }}
+          >
+            <div style={{
+              "font-size": "13px", color: "var(--fg-default)",
+              "line-height": "1.5", "margin-bottom": "16px",
+            }}>
+              {state().message}
+            </div>
+            <div style={{ display: "flex", "justify-content": "flex-end", gap: "8px" }}>
+              <Button variant="ghost" onClick={() => resolveConfirm(false)}>Cancel</Button>
+              <Button variant="solid" onClick={() => resolveConfirm(true)}>{state().confirmLabel}</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Show>
+  );
+};

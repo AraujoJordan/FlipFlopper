@@ -4,14 +4,14 @@ import {
   store,
   setStore,
   addTab,
-  openReview,
-  setWorkspaceMode,
-  showAgent,
-  showCode,
+  selectWorkspaceMode,
   updateCurrentBranch,
+  rankContinueCandidates,
+  recordContinueAgentUse,
 } from "./lib/store";
 import {
   continueAgent,
+  ensureWorkBranch,
   getAgents,
   getRecentProjects,
   getToolCatalog,
@@ -20,13 +20,15 @@ import {
   spawnAgent,
 } from "./lib/ipc";
 import type { Tab, WorkspaceMode } from "./lib/store";
-import AgentBar from "./components/AgentBar";
+import AgentBar, { NewAgentMenu } from "./components/AgentBar";
 import TerminalPane from "./components/TerminalPane";
 import FileTree from "./components/FileTree";
 import CommitTimeline from "./components/CommitTimeline";
 import DiffPane from "./components/DiffPane";
 import EditorPane from "./components/EditorPane";
 import PromptComposer from "./components/PromptComposer";
+import { Button, Menu, MenuLabel, MenuItem, Spinner, ToastHost, ConfirmHost, toast } from "./components/ui";
+import { installGlobalShortcuts } from "./lib/shortcuts";
 import "./App.css";
 
 const WORKSPACE_KEY = "flipflopper:last-workspace";
@@ -59,6 +61,7 @@ const AGENT_COLORS: Record<string, string> = {
   cline: "#39c5cf",
   goose: "#56d364",
   plandex: "#a5d6ff",
+  droid: "#f778ba",
 };
 
 export function agentColor(agentId: string): string {
@@ -68,7 +71,7 @@ export function agentColor(agentId: string): string {
 export function agentLetter(agentId: string): string {
   const map: Record<string, string> = {
     claude: "C", qwen: "Q", gemini: "G", codex: "X",
-    agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P",
+    agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R",
   };
   return map[agentId] ?? agentId[0]?.toUpperCase() ?? "?";
 }
@@ -126,7 +129,7 @@ const WORKSPACE_MODES: { mode: WorkspaceMode; label: string }[] = [
 ];
 
 const ModeIcon: Component<{ mode: WorkspaceMode; active: boolean }> = (props) => {
-  const color = () => props.active ? "#58a6ff" : "#6e7681";
+  const color = () => props.active ? "var(--accent)" : "var(--fg-subtle)";
 
   return (
     <svg
@@ -157,27 +160,15 @@ const ModeIcon: Component<{ mode: WorkspaceMode; active: boolean }> = (props) =>
   );
 };
 
-const WorkspaceModeSwitch: Component = () => {  
-  function selectMode(mode: WorkspaceMode) {
-    if (mode === "code") {
-      showCode();
-      return;
-    }
-    if (mode === "review") {
-      if (!store.review && store.currentProject) openReview(undefined, "Working changes");
-      else setWorkspaceMode("review");
-      return;
-    }
-    showAgent();
-  }
+const WorkspaceModeSwitch: Component = () => {
 
   return (
     <div style={{
       display: "flex", "align-items": "center", gap: "2px",
       padding: "2px",
-      background: "#0d0e12",
-      border: "1px solid #232731",
-      "border-radius": "6px",
+      background: "var(--surface-2)",
+      border: "1px solid var(--border-muted)",
+      "border-radius": "var(--radius-md)",
       height: "28px",
     }}>
       <For each={WORKSPACE_MODES}>
@@ -186,14 +177,14 @@ const WorkspaceModeSwitch: Component = () => {
           return (
             <button
               class="workspace-mode-button"
-              onclick={() => selectMode(item.mode)}
-              title={item.label}
+              onclick={() => selectWorkspaceMode(item.mode)}
+              title={`${item.label} (${item.mode === "code" ? "⌘1" : item.mode === "review" ? "⌘2" : "⌘3"})`}
               style={{
                 height: "22px",
                 display: "flex", "align-items": "center", gap: "6px",
                 padding: "0 10px",
-                "border-radius": "4px",
-                background: active() ? "#1c1f26" : "transparent",
+                "border-radius": "var(--radius-sm)",
+                background: active() ? "var(--surface-4)" : "transparent",
                 color: active() ? "var(--fg-default)" : "var(--fg-subtle)",
                 "font-size": "11px",
                 "font-weight": "500",
@@ -214,129 +205,118 @@ const WorkspaceModeSwitch: Component = () => {
 const AgentWorkspace: Component = () => {
   const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
   const activeColor = () => agentColor(activeTab()?.agentId ?? "claude");
-  const handoffTargets = () => activeTab()
-    ? store.agents.filter((a) => a.installed && a.id !== activeTab()!.agentId)
-    : [];
+  const handoffTargets = () => {
+    const tab = activeTab();
+    const project = store.currentProject;
+    if (!tab || !project) return [];
+    return rankContinueCandidates(project.path, tab.agentId, store.agents);
+  };
   const [continueOpen, setContinueOpen] = createSignal(false);
-  let continueRef: HTMLDivElement | undefined;
+  const [handoffBusy, setHandoffBusy] = createSignal(false);
+  let continueToggleRef: HTMLButtonElement | undefined;
 
-  onMount(() => {
-    const handleOutsideClick = (e: MouseEvent) => {
-      if (continueOpen() && continueRef && !continueRef.contains(e.target as Node)) {
-        setContinueOpen(false);
-      }
-    };
-    document.addEventListener("click", handleOutsideClick);
-    onCleanup(() => document.removeEventListener("click", handleOutsideClick));
-  });
+  const [emptyMenuOpen, setEmptyMenuOpen] = createSignal(false);
+  let emptyMenuToggleRef: HTMLButtonElement | undefined;
 
   return (
     <div style={{
       height: "100%",
       display: "flex", "flex-direction": "column",
       "min-height": 0,
-      background: "#0b0c10",
+      background: "var(--surface-1)",
     }}>
       <div style={{
         height: "42px", flex: "0 0 42px",
-        background: "#0f1116",
-        "border-bottom": "1px solid #1d2028",
+        background: "var(--surface-2)",
+        "border-bottom": "1px solid var(--border-muted)",
         display: "flex", "align-items": "stretch",
         padding: "0 10px 0 12px", gap: "4px",
       }}>
         <AgentBar />
 
         <Show when={handoffTargets().length > 0}>
-          <div ref={continueRef} style={{ "margin-left": "auto", "align-self": "center", position: "relative" }}>
+          <div style={{ "margin-left": "auto", "align-self": "center", position: "relative" }}>
             <button
+              ref={continueToggleRef}
               onclick={() => setContinueOpen((o) => !o)}
+              disabled={handoffBusy()}
               style={{
                 display: "flex", "align-items": "center", gap: "8px",
                 height: "30px", padding: "0 13px",
-                "border-radius": "8px",
-                background: "#1b1e26",
+                "border-radius": "var(--radius-lg)",
+                background: "var(--surface-4)",
                 border: `1px solid ${activeColor()}99`,
-                color: "#79c0ff",
+                color: "var(--accent-soft)",
                 "font-size": "12.5px", "font-weight": "500",
                 "box-shadow": `0 0 0 1px ${activeColor()}22`,
                 transition: "border-color .16s ease, box-shadow .16s ease, background .16s ease",
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={activeColor()} stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M5 12h13M13 6l6 6-6 6" />
-              </svg>
+              <Show when={handoffBusy()} fallback={
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={activeColor()} stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M5 12h13M13 6l6 6-6 6" />
+                </svg>
+              }>
+                <Spinner size={13} color={activeColor()} />
+              </Show>
               Continue on...
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M6 9l6 6 6-6" />
               </svg>
             </button>
 
-            <Show when={continueOpen()}>
-              <div style={{
-                position: "absolute", top: "38px", right: 0,
-                width: "288px",
-                background: "#14161d",
-                border: "1px solid #2a2e3a",
-                "border-radius": "11px",
-                "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
-                padding: "7px", "z-index": "50",
-              }}>
-                <div style={{
-                  padding: "8px 10px 6px",
-                  "font-size": "10.5px", "letter-spacing": ".5px",
-                  "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
-                }}>
-                  Hand off this session
-                </div>
-                <For each={handoffTargets()}>
-                  {(agent) => (
-                    <button
-                      onclick={async () => {
-                        setContinueOpen(false);
-                        const from = activeTab()?.agentId ?? "";
-                        const project = store.currentProject;
-                        if (!project) return;
-                        try {
-                          const sessionId = await continueAgent(project.path, from, agent.id);
-                          addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
-                        } catch (e) { console.error(e); }
-                      }}
-                      style={{
-                        width: "100%", display: "flex", "align-items": "center",
-                        gap: "11px", padding: "9px 10px",
-                        "border-radius": "8px",
-                        "text-align": "left",
-                      }}
-                    >
-                      <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
-                      <div style={{ flex: "1" }}>
-                        <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
-                          {agent.name}
-                        </div>
-                        <div style={{
-                          "font-size": "10.5px", color: "var(--fg-subtle)",
-                          "font-family": "'JetBrains Mono', monospace",
-                        }}>
-                          {agent.version ?? ""}
-                        </div>
+            <Menu open={continueOpen()} onClose={() => setContinueOpen(false)} anchorRef={continueToggleRef} align="right">
+              <MenuLabel>Hand off this session</MenuLabel>
+              <For each={handoffTargets()}>
+                {(agent) => (
+                  <MenuItem
+                    disabled={handoffBusy()}
+                    onSelect={async () => {
+                      setContinueOpen(false);
+                      const from = activeTab()?.agentId ?? "";
+                      const project = store.currentProject;
+                      if (!project) return;
+                      setHandoffBusy(true);
+                      try {
+                        const sessionId = await continueAgent(project.path, from, agent.id);
+                        recordContinueAgentUse(project.path, agent.id);
+                        addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
+                      } catch (e) {
+                        console.error(e);
+                        toast(`Handoff to ${agent.name} failed: ${String(e)}`, "error");
+                      } finally {
+                        setHandoffBusy(false);
+                      }
+                    }}
+                  >
+                    <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
+                    <div style={{ flex: "1" }}>
+                      <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
+                        {agent.name}
                       </div>
-                    </button>
-                  )}
-                </For>
-                <div style={{ height: "1px", background: "#252834", margin: "7px 8px" }} />
-                <div style={{
-                  display: "flex", "align-items": "flex-start", gap: "9px",
-                  padding: "5px 10px 9px",
-                }}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e7681" stroke-width="2" style={{ "margin-top": "1px", flex: "0 0 auto" }}>
-                    <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" stroke-linecap="round" />
-                  </svg>
-                  <div style={{ "font-size": "11px", color: "var(--fg-muted)", "line-height": "1.5" }}>
-                    Carries full transcript &amp; context into a new tab.
-                  </div>
+                      <div style={{
+                        "font-size": "10.5px", color: "var(--fg-subtle)",
+                        "font-family": "var(--font-mono)",
+                      }}>
+                        {agent.version ?? ""}
+                      </div>
+                    </div>
+                  </MenuItem>
+                )}
+              </For>
+              <div style={{ height: "1px", background: "var(--border-muted)", margin: "7px 8px" }} />
+              <div style={{
+                display: "flex", "align-items": "flex-start", gap: "9px",
+                padding: "5px 10px 9px",
+              }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e7681" stroke-width="2" style={{ "margin-top": "1px", flex: "0 0 auto" }}>
+                  <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" stroke-linecap="round" />
+                </svg>
+                <div style={{ "font-size": "11px", color: "var(--fg-muted)", "line-height": "1.5" }}>
+                  Carries full transcript &amp; context into a new tab.
                 </div>
               </div>
-            </Show>
+            </Menu>
           </div>
           </Show>
       </div>
@@ -350,8 +330,22 @@ const AgentWorkspace: Component = () => {
             color: "var(--fg-subtle)",
           }}>
             <div style={{ "font-size": "14px" }}>No agent running</div>
-            <div style={{ "font-size": "12px", "font-family": "'JetBrains Mono', monospace" }}>
-              Open a project and launch an agent
+            <div style={{ "font-size": "12px", "font-family": "var(--font-mono)" }}>
+              {store.currentProject ? "Launch an agent to get started" : "Open a project and launch an agent"}
+            </div>
+            <div style={{ position: "relative", "pointer-events": "all" }}>
+              <Button
+                ref={(el) => (emptyMenuToggleRef = el)}
+                variant="solid"
+                disabled={!store.currentProject}
+                onClick={() => setEmptyMenuOpen((o) => !o)}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                Start an agent
+              </Button>
+              <NewAgentMenu open={emptyMenuOpen()} onClose={() => setEmptyMenuOpen(false)} anchorRef={emptyMenuToggleRef} align="left" />
             </div>
           </div>
         </Show>
@@ -364,6 +358,78 @@ const AgentWorkspace: Component = () => {
           )}
         </For>
       </div>
+    </div>
+  );
+};
+
+const PROTECTED_BRANCHES = new Set(["main", "master"]);
+
+const BranchIndicator: Component = () => {
+  const [open, setOpen] = createSignal(false);
+  const [switching, setSwitching] = createSignal(false);
+  let toggleRef: HTMLButtonElement | undefined;
+
+  const branch = () => store.currentBranch;
+  const isProtected = () => branch() !== "" && PROTECTED_BRANCHES.has(branch());
+  const dotColor = () => !branch() ? "var(--fg-faint)" : isProtected() ? "var(--status-mod)" : "var(--status-add)";
+
+  async function switchToWorkBranch() {
+    const project = store.currentProject;
+    if (!project) return;
+    setSwitching(true);
+    try {
+      await ensureWorkBranch(project.path, "flipflopper/work");
+      await updateCurrentBranch();
+      toast("Switched to flipflopper/work", "success");
+    } catch (e) {
+      toast(`Failed to switch branch: ${String(e)}`, "error");
+    } finally {
+      setSwitching(false);
+      setOpen(false);
+    }
+  }
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button
+        ref={toggleRef}
+        onclick={() => store.currentProject && setOpen((o) => !o)}
+        title={
+          !branch() ? "No branch detected" :
+          isProtected() ? "Protected branch — auto-commit/rollback disabled" :
+          `On branch ${branch()}`
+        }
+        style={{
+          display: "flex", "align-items": "center", gap: "6px",
+          "font-family": "var(--font-mono)", "font-size": "11px",
+          color: "var(--fg-subtle)",
+          cursor: store.currentProject ? "pointer" : "default",
+          padding: "2px 4px",
+          "border-radius": "var(--radius-sm)",
+        }}
+      >
+        <span style={{
+          width: "7px", height: "7px", "border-radius": "50%",
+          background: dotColor(), "box-shadow": `0 0 7px ${dotColor()}`,
+        }} />
+        {branch() || "no branch"}
+      </button>
+
+      <Menu open={open()} onClose={() => setOpen(false)} anchorRef={toggleRef} align="right" width={240}>
+        <Show
+          when={isProtected()}
+          fallback={
+            <div style={{ padding: "9px 10px", "font-size": "11.5px", color: "var(--fg-muted)" }}>
+              On a work branch.
+            </div>
+          }
+        >
+          <MenuItem disabled={switching()} onSelect={switchToWorkBranch}>
+            <span style={{ flex: "1", "font-size": "12.5px" }}>Switch to work branch</span>
+            <Show when={switching()}><Spinner size={12} /></Show>
+          </MenuItem>
+        </Show>
+      </Menu>
     </div>
   );
 };
@@ -413,9 +479,11 @@ const App: Component = () => {
     }
 
     const branchInterval = setInterval(updateCurrentBranch, 15_000);
+    const uninstallShortcuts = installGlobalShortcuts();
 
     onCleanup(() => {
       clearInterval(branchInterval);
+      uninstallShortcuts();
     });
   });
 
@@ -440,13 +508,14 @@ const App: Component = () => {
       updateCurrentBranch();
     } catch (e) {
       console.error("Failed to open project:", e);
+      toast(`Failed to open project: ${String(e)}`, "error");
     }
   }
 
   return (
     <div style={{
       width: "100%", height: "100%",
-      background: "#0d0e12",
+      background: "var(--surface-2)",
       display: "flex", "flex-direction": "column",
       overflow: "hidden",
     }}>
@@ -456,36 +525,39 @@ const App: Component = () => {
         data-tauri-drag-region
         style={{
           height: "42px", flex: "0 0 42px",
-          background: "linear-gradient(#16181f, #121419)",
-          "border-bottom": "1px solid #20232d",
+          background: "linear-gradient(var(--surface-3), var(--surface-2))",
+          "border-bottom": "1px solid var(--border-default)",
           display: "flex", "align-items": "center",
           padding: "0 16px", position: "relative",
         }}
       >
         {/* Traffic-light window controls */}
         <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-          <div
+          <button
             onClick={() => win.close()}
             title="Close"
+            aria-label="Close window"
             style={{
               width: "12px", height: "12px", "border-radius": "50%",
-              background: "#ff5f57", cursor: "pointer",
+              background: "#ff5f57", cursor: "pointer", padding: 0,
             }}
           />
-          <div
+          <button
             onClick={() => win.minimize()}
             title="Minimize"
+            aria-label="Minimize window"
             style={{
               width: "12px", height: "12px", "border-radius": "50%",
-              background: "#febc2e", cursor: "pointer",
+              background: "#febc2e", cursor: "pointer", padding: 0,
             }}
           />
-          <div
+          <button
             onClick={() => win.toggleMaximize()}
             title="Maximize"
+            aria-label="Maximize window"
             style={{
               width: "12px", height: "12px", "border-radius": "50%",
-              background: "#28c840", cursor: "pointer",
+              background: "#28c840", cursor: "pointer", padding: 0,
             }}
           />
         </div>
@@ -499,8 +571,8 @@ const App: Component = () => {
               "font-size": "12px", "font-weight": "500",
               cursor: "pointer",
               display: "flex", "align-items": "center", gap: "6px",
-              padding: "4px 8px", "border-radius": "6px",
-              background: "#16181f", border: "1px solid #20232d",
+              padding: "4px 8px", "border-radius": "var(--radius-md)",
+              background: "var(--surface-3)", border: "1px solid var(--border-default)",
               "pointer-events": "all"
             }}
           >
@@ -521,16 +593,7 @@ const App: Component = () => {
         </div>
 
         <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "14px", color: "var(--fg-subtle)" }}>
-          <span style={{
-            "font-family": "'JetBrains Mono', monospace",
-            "font-size": "11px", display: "flex", "align-items": "center", gap: "6px",
-          }}>
-            <span style={{
-              width: "7px", height: "7px", "border-radius": "50%",
-              background: "#3fb950", "box-shadow": "0 0 7px #3fb950",
-            }} />
-            {store.currentBranch}
-          </span>
+          <BranchIndicator />
         </div>
       </div>
 
@@ -543,7 +606,7 @@ const App: Component = () => {
         {/* Workspace area */}
         <div style={{
           flex: "1", display: "flex", "flex-direction": "column",
-          "min-width": 0, background: "#0b0c10",
+          "min-width": 0, background: "var(--surface-1)",
         }}>
           <div style={{
             flex: "1",
@@ -584,6 +647,9 @@ const App: Component = () => {
 
       {/* ── FOOTER PROMPT ── */}
       <PromptComposer />
+
+      <ToastHost />
+      <ConfirmHost />
     </div>
   );
 };

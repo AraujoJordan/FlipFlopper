@@ -1,17 +1,15 @@
 import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
 import { getAgents, getToolCatalog, installTool, onPtyExit, readFileText, getCurrentBranch } from "./ipc";
+import { confirmDialog } from "../components/ui";
 
 export interface Tab {
   sessionId: string;
   label: string;
   agentId: string;
   agentIcon: string;
-  isInstaller?: boolean;
-  sessionGroupId?: string;
 }
 
-export type SidebarView = "files" | "recents";
 export type WorkspaceMode = "code" | "review" | "agent";
 
 export interface ReviewState {
@@ -45,7 +43,6 @@ export interface AppStore {
   selectedFiles: string[];
   fileTreePath: string | null;
   tools: ToolInfo[];
-  sidebarView: SidebarView;
   workspaceMode: WorkspaceMode;
   review: ReviewState | null;
   editorFiles: EditorFile[];
@@ -66,14 +63,13 @@ const initial: AppStore = {
   selectedFiles: [],
   fileTreePath: null,
   tools: [],
-  sidebarView: "recents",
   workspaceMode: "agent",
   review: null,
   editorFiles: [],
   activeEditorPath: null,
   editorOpen: false,
   gitStatusVersion: 0,
-  currentBranch: "main",
+  currentBranch: "",
   pendingLineFocus: null,
 };
 
@@ -97,6 +93,20 @@ export function showReview() {
 export function showAgent() {
   setStore("workspaceMode", "agent");
   setStore("editorOpen", false);
+}
+
+/** Shared by the mode switch UI and the Mod+1/2/3 global shortcuts. */
+export function selectWorkspaceMode(mode: WorkspaceMode) {
+  if (mode === "code") {
+    showCode();
+    return;
+  }
+  if (mode === "review") {
+    if (!store.review && store.currentProject) openReview(undefined, "Working changes");
+    else setWorkspaceMode("review");
+    return;
+  }
+  showAgent();
 }
 
 // ── Agent helpers ─────────────────────────────────────────────────────────────
@@ -213,18 +223,6 @@ export function clearAllTabs() {
   setStore("activeTabId", null);
 }
 
-export function createSessionGroupId() {
-  return `group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-export function ensureTabSessionGroup(sessionId: string) {
-  const existing = store.tabs.find((tab) => tab.sessionId === sessionId)?.sessionGroupId;
-  if (existing) return existing;
-  const sessionGroupId = createSessionGroupId();
-  setStore("tabs", (tab) => tab.sessionId === sessionId, "sessionGroupId", sessionGroupId);
-  return sessionGroupId;
-}
-
 // ── PTY / install helpers ─────────────────────────────────────────────────────
 
 export function waitForPtyExit(sessionId: string, timeoutMs = 10 * 60 * 1000): Promise<void> {
@@ -328,10 +326,13 @@ export async function openEditorFile(relPath: string, name: string, lineNo?: num
 }
 
 /** Close an editor tab; prompts if there are unsaved changes. */
-export function closeEditorFile(path: string) {
+export async function closeEditorFile(path: string) {
   const file = store.editorFiles.find((f) => f.path === path);
   if (!file) return;
-  if (file.dirty && !window.confirm(`Discard unsaved changes to ${file.name}?`)) return;
+  if (file.dirty) {
+    const confirmed = await confirmDialog(`Discard unsaved changes to ${file.name}?`, "Discard");
+    if (!confirmed) return;
+  }
 
   const remaining = store.editorFiles.filter((f) => f.path !== path);
   setStore("editorFiles", remaining);
@@ -376,17 +377,18 @@ export function bumpGitStatus() {
 
 // ── Git branch helpers ─────────────────────────────────────────────────────────
 
-/** Fetch current git branch and update the store. */
+/** Fetch current git branch and update the store. Empty string means
+ *  "no project" or "couldn't determine" — never a lie about being on main. */
 export async function updateCurrentBranch() {
   const projectPath = store.currentProject?.path;
   if (!projectPath) {
-    setStore("currentBranch", "main");
+    setStore("currentBranch", "");
     return;
   }
   try {
     const branchName = await getCurrentBranch(projectPath);
-    setStore("currentBranch", branchName || "main");
-  } catch (e) {
-    setStore("currentBranch", "main");
+    setStore("currentBranch", branchName || "");
+  } catch {
+    setStore("currentBranch", "");
   }
 }

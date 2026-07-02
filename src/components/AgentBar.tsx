@@ -2,30 +2,72 @@ import { Component, createSignal, For, Show, onMount, onCleanup } from "solid-js
 import { store, addTab, removeTab, setActiveTab } from "../lib/store";
 import { spawnAgent, type AgentInfo } from "../lib/ipc";
 import { agentColor, AgentLogo } from "../App";
+import { Menu, MenuLabel, MenuItem, Spinner, toast } from "./ui";
+import { registerShortcutHandler } from "../lib/shortcuts";
 
-const AgentBar: Component = () => {
-  const [menuOpen, setMenuOpen] = createSignal(false);
-  let containerRef: HTMLDivElement | undefined;
-
-  onMount(() => {
-    const handleOutsideClick = (e: MouseEvent) => {
-      if (menuOpen() && containerRef && !containerRef.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener("click", handleOutsideClick);
-    onCleanup(() => document.removeEventListener("click", handleOutsideClick));
-  });
+/** The "pick an agent to start" dropdown. Shared by AgentBar's "+" tab
+ *  button, the empty agent-workspace CTA, and the prompt composer's
+ *  leading icon when no agent is running. */
+export const NewAgentMenu: Component<{
+  open: boolean;
+  onClose: () => void;
+  anchorRef?: HTMLElement;
+  align?: "left" | "right";
+}> = (props) => {
+  const [spawningId, setSpawningId] = createSignal<string | null>(null);
 
   async function handlePick(agent: AgentInfo) {
-    setMenuOpen(false);
+    props.onClose();
     const project = store.currentProject;
     if (!project) return;
+    setSpawningId(agent.id);
     try {
       const sessionId = await spawnAgent(agent.id, project.path);
       addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error(e);
+      toast(`Failed to start ${agent.name}: ${String(e)}`, "error");
+    } finally {
+      setSpawningId(null);
+    }
   }
+
+  return (
+    <Menu open={props.open} onClose={props.onClose} anchorRef={props.anchorRef} align={props.align ?? "left"}>
+      <MenuLabel>New session</MenuLabel>
+      <For each={store.agents.filter((a) => a.installed)}>
+        {(agent) => (
+          <MenuItem onSelect={() => handlePick(agent)} disabled={spawningId() !== null}>
+            <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
+            <div style={{ flex: "1" }}>
+              <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
+                {agent.name}
+              </div>
+              <div style={{
+                "font-size": "10.5px", color: "var(--fg-subtle)",
+                "font-family": "var(--font-mono)",
+              }}>
+                {agent.version ?? ""}
+              </div>
+            </div>
+            <Show when={spawningId() === agent.id}>
+              <Spinner size={13} />
+            </Show>
+          </MenuItem>
+        )}
+      </For>
+    </Menu>
+  );
+};
+
+const AgentBar: Component = () => {
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  let toggleRef: HTMLButtonElement | undefined;
+
+  onMount(() => {
+    const unregister = registerShortcutHandler("new-agent-menu", () => setMenuOpen(true));
+    onCleanup(unregister);
+  });
 
   return (
     <>
@@ -36,14 +78,18 @@ const AgentBar: Component = () => {
 
           return (
             <div
+              role="tab"
+              tabIndex={0}
+              aria-selected={isActive()}
               onclick={() => setActiveTab(tab.sessionId)}
+              onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setActiveTab(tab.sessionId); } }}
               style={{
                 display: "flex", "align-items": "center", gap: "9px",
                 padding: "0 15px",
-                "border-radius": "9px 9px 0 0",
-                background: isActive() ? "#16181f" : "transparent",
-                border: isActive() ? "1px solid #262a35" : "1px solid transparent",
-                "border-bottom": isActive() ? "1px solid #16181f" : "1px solid transparent",
+                "border-radius": "var(--radius-lg) var(--radius-lg) 0 0",
+                background: isActive() ? "var(--surface-3)" : "transparent",
+                border: isActive() ? "1px solid var(--border-default)" : "1px solid transparent",
+                "border-bottom": isActive() ? "1px solid var(--surface-3)" : "1px solid transparent",
                 "margin-bottom": "-1px",
                 position: "relative",
                 cursor: "default",
@@ -83,10 +129,10 @@ const AgentBar: Component = () => {
                 title="Close session"
                 style={{
                   "margin-left": "4px",
-                  color: isActive() ? "var(--fg-subtle)" : "#3a3d47",
+  color: isActive() ? "var(--fg-subtle)" : "#3a3d47",
                   width: "18px", height: "18px",
                   display: "flex", "align-items": "center", "justify-content": "center",
-                  "border-radius": "4px",
+                  "border-radius": "var(--radius-sm)",
                 }}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
@@ -99,15 +145,16 @@ const AgentBar: Component = () => {
       </For>
 
       {/* New tab button */}
-      <div ref={containerRef} style={{ position: "relative", "align-self": "center" }}>
+      <div style={{ position: "relative", "align-self": "center" }}>
         <button
+          ref={toggleRef}
           onclick={() => setMenuOpen((o) => !o)}
-          title="New agent session"
+          title="New agent session (⌘T)"
           style={{
             display: "flex", "align-items": "center", "justify-content": "center",
             width: "30px", height: "30px",
             color: "var(--fg-subtle)", "align-self": "center",
-            "border-radius": "6px",
+            "border-radius": "var(--radius-md)",
           }}
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -115,51 +162,7 @@ const AgentBar: Component = () => {
           </svg>
         </button>
 
-        <Show when={menuOpen()}>
-          <div style={{
-            position: "absolute", top: "38px", left: 0,
-            width: "288px",
-            background: "#14161d",
-            border: "1px solid #2a2e3a",
-            "border-radius": "11px",
-            "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
-            padding: "7px", "z-index": "50",
-          }}>
-            <div style={{
-              padding: "8px 10px 6px",
-              "font-size": "10.5px", "letter-spacing": ".5px",
-              "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
-            }}>
-              New session
-            </div>
-            <For each={store.agents.filter((a) => a.installed)}>
-              {(agent) => (
-                <button
-                  onclick={() => handlePick(agent)}
-                  style={{
-                    width: "100%", display: "flex", "align-items": "center",
-                    gap: "11px", padding: "9px 10px",
-                    "border-radius": "8px",
-                    "text-align": "left",
-                  }}
-                >
-                  <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
-                  <div style={{ flex: "1" }}>
-                    <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
-                      {agent.name}
-                    </div>
-                    <div style={{
-                      "font-size": "10.5px", color: "var(--fg-subtle)",
-                      "font-family": "'JetBrains Mono', monospace",
-                    }}>
-                      {agent.version ?? ""}
-                    </div>
-                  </div>
-                </button>
-              )}
-            </For>
-          </div>
-        </Show>
+        <NewAgentMenu open={menuOpen()} onClose={() => setMenuOpen(false)} anchorRef={toggleRef} align="left" />
       </div>
     </>
   );
