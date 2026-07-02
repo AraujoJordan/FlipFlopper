@@ -1,6 +1,15 @@
 import { Component, createEffect, createSignal, For, onMount, Show, onCleanup } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { store, setStore, addTab, updateCurrentBranch } from "./lib/store";
+import {
+  store,
+  setStore,
+  addTab,
+  openReview,
+  setWorkspaceMode,
+  showAgent,
+  showCode,
+  updateCurrentBranch,
+} from "./lib/store";
 import {
   getAgents,
   getRecentProjects,
@@ -9,7 +18,7 @@ import {
   pickProjectFolder,
   spawnAgent,
 } from "./lib/ipc";
-import type { Tab } from "./lib/store";
+import type { Tab, WorkspaceMode } from "./lib/store";
 import AgentBar from "./components/AgentBar";
 import TerminalPane from "./components/TerminalPane";
 import FileTree from "./components/FileTree";
@@ -109,6 +118,195 @@ export const AgentLogo: Component<{
   );
 };
 
+const WORKSPACE_MODES: { mode: WorkspaceMode; label: string }[] = [
+  { mode: "code", label: "Code" },
+  { mode: "review", label: "Code Review" },
+  { mode: "agent", label: "AI Agent" },
+];
+
+const ModeIcon: Component<{ mode: WorkspaceMode; active: boolean }> = (props) => {
+  const color = () => props.active ? "#58a6ff" : "#6e7681";
+
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color()}
+      stroke-width="2.1"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      style={{ flex: "0 0 auto" }}
+    >
+      <Show when={props.mode === "code"}>
+        <path d="M16 18l6-6-6-6" />
+        <path d="M8 6l-6 6 6 6" />
+      </Show>
+      <Show when={props.mode === "review"}>
+        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+        <path d="M14 3v5h5" />
+        <path d="M9 15l2 2 4-5" />
+      </Show>
+      <Show when={props.mode === "agent"}>
+        <path d="M4 17l6-6-6-6" />
+        <path d="M12 19h8" />
+      </Show>
+    </svg>
+  );
+};
+
+const WorkspaceModeSwitch: Component = () => {
+  const activeFile = () => store.editorFiles.find((f) => f.path === store.activeEditorPath);
+  const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
+
+  function detailFor(mode: WorkspaceMode): string {
+    if (mode === "code") return activeFile()?.name ?? "No file";
+    if (mode === "review") return store.review?.title ?? "Working changes";
+    return activeTab()?.label ?? "No agent";
+  }
+
+  function selectMode(mode: WorkspaceMode) {
+    if (mode === "code") {
+      showCode();
+      return;
+    }
+    if (mode === "review") {
+      if (!store.review && store.currentProject) openReview(undefined, "Working changes");
+      else setWorkspaceMode("review");
+      return;
+    }
+    showAgent();
+  }
+
+  return (
+    <div style={{
+      display: "flex", "align-items": "center", gap: "6px",
+      padding: "4px",
+      background: "#0b0d12",
+      border: "1px solid #242833",
+      "border-radius": "8px",
+      "min-width": 0,
+    }}>
+      <For each={WORKSPACE_MODES}>
+        {(item) => {
+          const active = () => store.workspaceMode === item.mode;
+          return (
+            <button
+              onclick={() => selectMode(item.mode)}
+              title={item.label}
+              style={{
+                height: "34px",
+                display: "flex", "align-items": "center", gap: "8px",
+                padding: "0 12px",
+                "border-radius": "6px",
+                border: active() ? "1px solid #3a3e4a" : "1px solid transparent",
+                background: active() ? "#1a1d25" : "transparent",
+                color: active() ? "var(--fg-default)" : "var(--fg-muted)",
+                "box-shadow": active() ? "0 0 0 1px rgba(88,166,255,.14)" : "none",
+                cursor: "pointer",
+              }}
+            >
+              <ModeIcon mode={item.mode} active={active()} />
+              <span style={{ display: "flex", "flex-direction": "column", "align-items": "flex-start", "line-height": "1.05" }}>
+                <span style={{ "font-size": "12px", "font-weight": "600", "white-space": "nowrap" }}>
+                  {item.label}
+                </span>
+                <span style={{
+                  "font-size": "10px",
+                  color: active() ? "#8b949e" : "#6e7681",
+                  "max-width": "110px",
+                  overflow: "hidden",
+                  "text-overflow": "ellipsis",
+                  "white-space": "nowrap",
+                }}>
+                  {detailFor(item.mode)}
+                </span>
+              </span>
+            </button>
+          );
+        }}
+      </For>
+    </div>
+  );
+};
+
+const AgentWorkspace: Component = () => {
+  const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
+  const activeColor = () => agentColor(activeTab()?.agentId ?? "claude");
+
+  return (
+    <div style={{
+      height: "100%",
+      display: "flex", "flex-direction": "column",
+      "min-height": 0,
+      background: "#0b0c10",
+    }}>
+      <div style={{
+        height: "42px", flex: "0 0 42px",
+        background: "#0f1116",
+        "border-bottom": "1px solid #1d2028",
+        display: "flex", "align-items": "stretch",
+        padding: "0 10px 0 12px", gap: "4px",
+      }}>
+        <AgentBar />
+        <div style={{
+          "margin-left": "auto",
+          display: "flex", "align-items": "center", gap: "8px",
+          "min-width": 0,
+          color: "var(--fg-subtle)",
+          "font-family": "'JetBrains Mono', monospace",
+          "font-size": "11.5px",
+        }}>
+          <Show when={activeTab()} fallback={<span>no agent running</span>}>
+            <span style={{
+              width: "16px", height: "16px", "border-radius": "4px",
+              background: activeColor(), color: "#0d1117",
+              "font-weight": "700", "font-size": "9.5px",
+              display: "flex", "align-items": "center", "justify-content": "center",
+              flex: "0 0 auto",
+            }}>
+              {agentLetter(activeTab()!.agentId)}
+            </span>
+            <span style={{
+              overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
+            }}>
+              {activeTab()!.label}
+              <span style={{ color: activeColor() }}>
+                {store.currentProject ? ` · ~/${store.currentProject.name}` : ""}
+              </span>
+            </span>
+          </Show>
+        </div>
+      </div>
+
+      <div style={{ flex: "1", position: "relative", overflow: "hidden", "min-height": 0 }}>
+        <Show when={store.tabs.length === 0}>
+          <div style={{
+            position: "absolute", inset: 0,
+            display: "flex", "align-items": "center", "justify-content": "center",
+            "flex-direction": "column", gap: "12px",
+            color: "var(--fg-subtle)",
+          }}>
+            <div style={{ "font-size": "14px" }}>No agent running</div>
+            <div style={{ "font-size": "12px", "font-family": "'JetBrains Mono', monospace" }}>
+              Open a project and launch an agent
+            </div>
+          </div>
+        </Show>
+        <For each={store.tabs}>
+          {(tab) => (
+            <TerminalPane
+              sessionId={tab.sessionId}
+              active={tab.sessionId === store.activeTabId && store.workspaceMode === "agent"}
+            />
+          )}
+        </For>
+      </div>
+    </div>
+  );
+};
+
 const App: Component = () => {
   const win = getCurrentWindow();
   const [continueOpen, setContinueOpen] = createSignal(false);
@@ -196,6 +394,9 @@ const App: Component = () => {
 
   const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
   const activeColor = () => agentColor(activeTab()?.agentId ?? "claude");
+  const handoffTargets = () => activeTab()
+    ? store.agents.filter((a) => a.installed && a.id !== activeTab()!.agentId)
+    : [];
 
   return (
     <div style={{
@@ -277,18 +478,18 @@ const App: Component = () => {
         </div>
       </div>
 
-      {/* ── TAB STRIP ── */}
+      {/* ── WORKSPACE SWITCH ── */}
       <div style={{
         height: "46px", flex: "0 0 46px",
         background: "#0f1116",
         "border-bottom": "1px solid #1d2028",
-        display: "flex", "align-items": "stretch",
-        padding: "0 10px 0 12px", gap: "4px",
+        display: "flex", "align-items": "center",
+        padding: "0 10px 0 12px", gap: "12px",
       }}>
-        <AgentBar />
+        <WorkspaceModeSwitch />
 
         {/* Continue on… button */}
-        <Show when={store.agents.filter((a) => a.installed && a.id !== (activeTab()?.agentId ?? "")).length > 0}>
+        <Show when={handoffTargets().length > 0}>
           <div ref={continueRef} style={{ "margin-left": "auto", "align-self": "center", position: "relative" }}>
             <button
               onclick={() => setContinueOpen((o) => !o)}
@@ -329,7 +530,7 @@ const App: Component = () => {
                 }}>
                   Hand off this session
                 </div>
-                <For each={store.agents.filter((a) => a.installed && a.id !== (activeTab()?.agentId ?? ""))}>
+                <For each={handoffTargets()}>
                   {(agent) => (
                     <button
                       onclick={async () => {
@@ -390,71 +591,40 @@ const App: Component = () => {
         {/* File tree */}
         <FileTree />
 
-        {/* Terminal area */}
+        {/* Workspace area */}
         <div style={{
           flex: "1", display: "flex", "flex-direction": "column",
           "min-width": 0, background: "#0b0c10",
         }}>
-          {/* Agent header bar */}
           <div style={{
-            height: "38px", flex: "0 0 38px",
-            display: "flex", "align-items": "center", gap: "10px",
-            padding: "0 16px",
-            "border-bottom": "1px solid #1a1d25",
+            flex: "1",
+            overflow: "hidden",
+            "min-height": 0,
           }}>
-            <Show when={activeTab()} fallback={
-              <span style={{ "font-family": "'JetBrains Mono', monospace", "font-size": "11.5px", color: "var(--fg-subtle)" }}>
-                no agent running
-              </span>
-            }>
-              <span style={{
-                width: "16px", height: "16px", "border-radius": "4px",
-                background: activeColor(), color: "#0d1117",
-                "font-family": "'JetBrains Mono', monospace",
-                "font-weight": "700", "font-size": "9.5px",
-                display: "flex", "align-items": "center", "justify-content": "center",
-              }}>
-                {agentLetter(activeTab()!.agentId)}
-              </span>
-              <span style={{
-                "font-family": "'JetBrains Mono', monospace",
-                "font-size": "11.5px", color: "var(--fg-muted)",
-              }}>
-                {activeTab()!.label}
-                <span style={{ color: activeColor() }}>
-                  {store.currentProject ? ` · ~/${store.currentProject.name}` : ""}
-                </span>
-              </span>
-            </Show>
-          </div>
-
-          {/* Terminal panes (stacked, only active is visible) */}
-          <div style={{ flex: "1", position: "relative", overflow: "hidden" }}>
-            <Show when={store.tabs.length === 0}>
-              <div style={{
-                position: "absolute", inset: 0,
-                display: "flex", "align-items": "center", "justify-content": "center",
-                "flex-direction": "column", gap: "12px",
-                color: "var(--fg-subtle)",
-              }}>
-                <div style={{ "font-size": "14px" }}>No agent running</div>
-                <div style={{ "font-size": "12px", "font-family": "'JetBrains Mono', monospace" }}>
-                  Open a project and launch an agent
-                </div>
-              </div>
-            </Show>
-            <For each={store.tabs}>
-              {(tab) => (
-                <TerminalPane
-                  sessionId={tab.sessionId}
-                  active={tab.sessionId === store.activeTabId}
-                />
-              )}
-            </For>
-            {/* file editor — overlays terminals when a file is open */}
-            <EditorPane />
-            {/* native diff review pane — overlays terminals and editor when open */}
-            <DiffPane />
+            <div style={{
+              height: "100%",
+              display: store.workspaceMode === "code" ? "flex" : "none",
+              "flex-direction": "column",
+            }}>
+              {/* code editor */}
+              <EditorPane />
+            </div>
+            <div style={{
+              height: "100%",
+              display: store.workspaceMode === "review" ? "flex" : "none",
+              "flex-direction": "column",
+            }}>
+              {/* native diff review */}
+              <DiffPane />
+            </div>
+            <div style={{
+              height: "100%",
+              display: store.workspaceMode === "agent" ? "flex" : "none",
+              "flex-direction": "column",
+            }}>
+              {/* AI agent terminals */}
+              <AgentWorkspace />
+            </div>
           </div>
         </div>
 

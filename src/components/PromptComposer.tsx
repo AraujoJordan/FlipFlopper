@@ -8,7 +8,13 @@ const PromptComposer: Component = () => {
   const [sending, setSending] = createSignal(false);
 
   const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
-  const activeColor = () => agentColor(activeTab()?.agentId ?? "claude");
+  const activeColor = () => activeTab() ? agentColor(activeTab()!.agentId) : "#8b949e";
+  const placeholder = () => {
+    const tab = activeTab();
+    if (tab) return `Prompt ${tab.label}`;
+    if (store.currentProject) return "No agent running - enter commit message";
+    return "Open a project or start an agent";
+  };
 
   async function send() {
     const text = value().trim();
@@ -64,13 +70,20 @@ const PromptComposer: Component = () => {
           display: "flex", "align-items": "center", "justify-content": "center",
           flex: "0 0 auto",
         }}>
-          {agentLetter(activeTab()?.agentId ?? "claude")}
+          <Show when={activeTab()} fallback={
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0d1117" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14" />
+              <path d="M12 5v14" />
+            </svg>
+          }>
+            {agentLetter(activeTab()!.agentId)}
+          </Show>
         </span>
 
         {/* Input */}
         <textarea
           rows={1}
-          placeholder="Describe the next change — each prompt becomes a commit"
+          placeholder={placeholder()}
           value={value()}
           onInput={(e) => setValue(e.currentTarget.value)}
           onKeyDown={handleKeyDown}

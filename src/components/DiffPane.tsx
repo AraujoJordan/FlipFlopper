@@ -3,7 +3,7 @@ import {
 } from "solid-js";
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
-import { store, closeReview } from "../lib/store";
+import { store, closeReview, openReview } from "../lib/store";
 import { getReviewDiff, type FileDiff, type DiffLine } from "../lib/ipc";
 
 // ── Layout toggle ────────────────────────────────────────────────────────────
@@ -382,32 +382,32 @@ const DiffPane: Component = () => {
   } as const;
 
   return (
-    <Show when={store.review}>
-      <div style={{
-        position: "absolute", inset: "0",
-        display: "flex", "flex-direction": "column",
-        background: "#0d0e12",
-        "z-index": "20",
-      }}>
-        {/* ── Header ── */}
-        <div style={headerStyle}>
-          {/* Icon + title */}
-          <span style={{ "font-size": "14px", "line-height": "1" }}>🔍</span>
-          <span style={{ "font-size": "12px", color: "var(--fg-body)", "font-weight": "500" }}>
-            Review
-          </span>
-          <span style={{
-            "font-family": MONO, "font-size": "11px", color: "var(--fg-subtle)",
-            overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
-            "max-width": "240px",
-          }}>
-            {store.review?.title ?? ""}
-          </span>
+    <div style={{
+      height: "100%",
+      display: "flex", "flex-direction": "column",
+      background: "#0d0e12",
+      "min-height": 0,
+    }}>
+      {/* ── Header ── */}
+      <div style={headerStyle}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+          <path d="M14 3v5h5" />
+          <path d="M9 15l2 2 4-5" />
+        </svg>
+        <span style={{ "font-size": "12px", color: "var(--fg-body)", "font-weight": "500" }}>
+          Code Review
+        </span>
+        <span style={{
+          "font-family": MONO, "font-size": "11px", color: "var(--fg-subtle)",
+          overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
+          "max-width": "240px",
+        }}>
+          {store.review?.title ?? "Working changes"}
+        </span>
 
-          {/* Spacer */}
+        <Show when={store.review}>
           <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "6px" }}>
-
-            {/* Unified / Split toggle */}
             <div style={{
               display: "flex", "align-items": "center",
               border: "1px solid #2a2e3a", "border-radius": "6px", overflow: "hidden",
@@ -420,7 +420,6 @@ const DiffPane: Component = () => {
               </button>
             </div>
 
-            {/* Reload */}
             <button onclick={() => refetch()} title="Reload diff" style={{
               display: "flex", "align-items": "center", gap: "5px",
               "font-size": "11.5px", color: "var(--fg-muted)",
@@ -433,15 +432,51 @@ const DiffPane: Component = () => {
               Reload
             </button>
 
-            {/* Close */}
             <button onclick={closeReview} title="Close review pane" style={closeBtnStyle}>
-              ×
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
             </button>
           </div>
-        </div>
+        </Show>
+      </div>
 
+      <Show
+        when={store.review}
+        fallback={
+          <div style={{
+            flex: "1",
+            display: "flex", "align-items": "center", "justify-content": "center",
+            "flex-direction": "column", gap: "12px",
+            color: "var(--fg-subtle)",
+          }}>
+            <div style={{ "font-size": "14px", color: "var(--fg-body)" }}>No review selected</div>
+            <button
+              onclick={() => openReview(undefined, "Working changes")}
+              disabled={!store.currentProject}
+              style={{
+                display: "flex", "align-items": "center", gap: "7px",
+                height: "30px", padding: "0 12px",
+                "border-radius": "7px",
+                border: "1px solid #2a2e3a",
+                background: store.currentProject ? "#1b1e26" : "transparent",
+                color: store.currentProject ? "var(--fg-body)" : "#3a3e4a",
+                "font-size": "12px",
+                cursor: store.currentProject ? "pointer" : "default",
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+                <path d="M14 3v5h5" />
+                <path d="M9 15l2 2 4-5" />
+              </svg>
+              Review working changes
+            </button>
+          </div>
+        }
+      >
         {/* ── Body ── */}
-        <div style={{ flex: "1", overflow: "auto", padding: "16px 20px" }}>
+        <div style={{ flex: "1", overflow: "auto", padding: "16px 20px", "min-height": 0 }}>
 
           {/* Loading */}
           <Show when={diffs.loading}>
@@ -496,8 +531,8 @@ const DiffPane: Component = () => {
             </For>
           </Show>
         </div>
-      </div>
-    </Show>
+      </Show>
+    </div>
   );
 };
 

@@ -84,15 +84,18 @@ const AgentBar: Component = () => {
               {/* Close button */}
               <button
                 onclick={(e) => { e.stopPropagation(); removeTab(tab.sessionId); }}
+                title="Close session"
                 style={{
                   "margin-left": "4px",
                   color: isActive() ? "var(--fg-subtle)" : "#3a3d47",
-                  "font-size": "14px",
-                  "line-height": "1",
-                  padding: "0 2px",
+                  width: "18px", height: "18px",
+                  display: "flex", "align-items": "center", "justify-content": "center",
+                  "border-radius": "4px",
                 }}
               >
-                ×
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
               </button>
             </div>
           );
@@ -103,12 +106,17 @@ const AgentBar: Component = () => {
       <div ref={containerRef} style={{ position: "relative", "align-self": "center" }}>
         <button
           onclick={() => setMenuOpen((o) => !o)}
+          title="New agent session"
           style={{
             display: "flex", "align-items": "center", "justify-content": "center",
-            width: "30px", color: "var(--fg-subtle)", "font-size": "18px", "align-self": "center",
+            width: "30px", height: "30px",
+            color: "var(--fg-subtle)", "align-self": "center",
+            "border-radius": "6px",
           }}
         >
-          +
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
         </button>
 
         <Show when={menuOpen()}>

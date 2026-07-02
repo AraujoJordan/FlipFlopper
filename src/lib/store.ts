@@ -12,6 +12,7 @@ export interface Tab {
 }
 
 export type SidebarView = "files" | "recents";
+export type WorkspaceMode = "code" | "review" | "agent";
 
 export interface ReviewState {
   /** git revision range (e.g. "sha~1..sha") or undefined for working-tree */
@@ -45,6 +46,7 @@ export interface AppStore {
   fileTreePath: string | null;
   tools: ToolInfo[];
   sidebarView: SidebarView;
+  workspaceMode: WorkspaceMode;
   review: ReviewState | null;
   editorFiles: EditorFile[];
   activeEditorPath: string | null;
@@ -64,6 +66,7 @@ const initial: AppStore = {
   fileTreePath: null,
   tools: [],
   sidebarView: "recents",
+  workspaceMode: "agent",
   review: null,
   editorFiles: [],
   activeEditorPath: null,
@@ -73,6 +76,26 @@ const initial: AppStore = {
 };
 
 export const [store, setStore] = createStore<AppStore>(initial);
+
+// ── Workspace mode helpers ───────────────────────────────────────────────────
+
+export function setWorkspaceMode(mode: WorkspaceMode) {
+  setStore("workspaceMode", mode);
+}
+
+export function showCode() {
+  setStore("workspaceMode", "code");
+  setStore("editorOpen", true);
+}
+
+export function showReview() {
+  setStore("workspaceMode", "review");
+}
+
+export function showAgent() {
+  setStore("workspaceMode", "agent");
+  setStore("editorOpen", false);
+}
 
 // ── Agent helpers ─────────────────────────────────────────────────────────────
 
@@ -156,6 +179,7 @@ export function rankContinueCandidates(
 export function addTab(tab: Tab) {
   setStore("tabs", (t) => [...t, tab]);
   setStore("activeTabId", tab.sessionId);
+  showAgent();
 }
 
 export function removeTab(sessionId: string) {
@@ -169,9 +193,7 @@ export function removeTab(sessionId: string) {
 
 export function setActiveTab(sessionId: string) {
   setStore("activeTabId", sessionId);
-  // Clicking an agent tab flips the center back to the terminal; open editor
-  // files persist underneath and return when a file is clicked.
-  setStore("editorOpen", false);
+  showAgent();
 }
 
 export function toggleFileSelection(path: string) {
@@ -235,11 +257,14 @@ export async function hiddenInstallTool(
 export function openReview(rev: string | undefined, title: string, path?: string) {
   if (!store.currentProject) return;
   setStore("review", { rev, path, title });
+  showReview();
 }
 
 /** Close the native review pane. */
 export function closeReview() {
   setStore("review", null);
+  setStore("workspaceMode", store.editorFiles.length > 0 ? "code" : "agent");
+  setStore("editorOpen", store.editorFiles.length > 0);
 }
 
 // ── File editor ───────────────────────────────────────────────────────────────
@@ -252,7 +277,7 @@ export async function openEditorFile(relPath: string, name: string) {
   const existing = store.editorFiles.find((f) => f.path === relPath);
   if (existing) {
     setStore("activeEditorPath", relPath);
-    setStore("editorOpen", true);
+    showCode();
     return;
   }
 
@@ -269,7 +294,7 @@ export async function openEditorFile(relPath: string, name: string) {
     },
   ]);
   setStore("activeEditorPath", relPath);
-  setStore("editorOpen", true);
+  showCode();
 }
 
 /** Close an editor tab; prompts if there are unsaved changes. */
@@ -289,6 +314,7 @@ export function closeEditorFile(path: string) {
 
 export function setActiveEditorFile(path: string) {
   setStore("activeEditorPath", path);
+  showCode();
 }
 
 export function setEditorDirty(path: string, dirty: boolean) {
@@ -334,4 +360,3 @@ export async function updateCurrentBranch() {
     setStore("currentBranch", "main");
   }
 }
-

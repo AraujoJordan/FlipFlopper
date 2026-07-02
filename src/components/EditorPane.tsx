@@ -8,7 +8,6 @@ import { languages } from "@codemirror/language-data";
 import { LanguageDescription } from "@codemirror/language";
 import {
   store,
-  setStore,
   openReview,
   closeEditorFile,
   setActiveEditorFile,
@@ -130,7 +129,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
 
     saveCallbacks.set(props.file.path, save);
     const poll = window.setInterval(() => {
-      if (props.active && store.editorOpen) checkStale();
+      if (props.active && store.workspaceMode === "code") checkStale();
     }, POLL_MS);
 
     onCleanup(() => {
@@ -226,12 +225,29 @@ const EditorPane: Component = () => {
   const activeFile = () => store.editorFiles.find((f) => f.path === store.activeEditorPath);
 
   return (
-    <Show when={store.editorOpen && store.editorFiles.length > 0}>
-      <div style={{
-        position: "absolute", inset: "0",
-        display: "flex", "flex-direction": "column",
-        background: "#0b0c10", "z-index": "10",
-      }}>
+    <div style={{
+      height: "100%",
+      display: "flex", "flex-direction": "column",
+      background: "#0b0c10",
+      "min-height": 0,
+    }}>
+      <Show
+        when={store.editorFiles.length > 0}
+        fallback={
+          <div style={{
+            flex: "1",
+            display: "flex", "align-items": "center", "justify-content": "center",
+            "flex-direction": "column", gap: "10px",
+            color: "var(--fg-subtle)",
+            "min-height": 0,
+          }}>
+            <div style={{ "font-size": "14px", color: "var(--fg-body)" }}>No file open</div>
+            <div style={{ "font-size": "12px", "font-family": "'JetBrains Mono', monospace" }}>
+              {store.currentProject ? "Select a file from Explorer" : "Open a project"}
+            </div>
+          </div>
+        }
+      >
         {/* ── editor tab strip ── */}
         <div style={{
           height: "34px", flex: "0 0 34px",
@@ -266,32 +282,25 @@ const EditorPane: Component = () => {
                       background: "#d29922", flex: "0 0 auto",
                     }} />
                   </Show>
-                  <span
+                  <button
                     onclick={(e) => { e.stopPropagation(); closeEditorFile(file.path); }}
                     title="Close"
                     style={{
-                      color: "var(--fg-subtle)", "font-size": "13px",
-                      padding: "0 2px", "border-radius": "4px",
+                      width: "18px", height: "18px",
+                      display: "flex", "align-items": "center", "justify-content": "center",
+                      color: "var(--fg-subtle)",
+                      "border-radius": "4px",
+                      flex: "0 0 auto",
                     }}
                   >
-                    ×
-                  </span>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
+                  </button>
                 </div>
               );
             }}
           </For>
-          <button
-            onclick={() => setStore("editorOpen", false)}
-            title="Back to terminal"
-            style={{
-              "margin-left": "auto", padding: "0 14px",
-              "font-family": "'JetBrains Mono', monospace",
-              "font-size": "12px", color: "var(--fg-subtle)",
-              cursor: "pointer",
-            }}
-          >
-            &gt;_
-          </button>
         </div>
 
         {/* ── header row ── */}
@@ -351,12 +360,15 @@ const EditorPane: Component = () => {
         <div style={{ flex: "1", position: "relative", "min-height": 0 }}>
           <For each={store.editorFiles}>
             {(file) => (
-              <EditorBuffer file={file} active={file.path === store.activeEditorPath} />
+              <EditorBuffer
+                file={file}
+                active={file.path === store.activeEditorPath && store.workspaceMode === "code"}
+              />
             )}
           </For>
         </div>
-      </div>
-    </Show>
+      </Show>
+    </div>
   );
 };
 
