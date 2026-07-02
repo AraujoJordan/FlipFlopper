@@ -32,6 +32,14 @@ export interface FileEntry {
   is_dir: boolean;
 }
 
+export interface TextMatch {
+  rel_path: string;
+  line: number;
+  text: string;
+  col: number;
+  len: number;
+}
+
 export interface PromptSkill {
   name: string;
   path: string;
@@ -120,6 +128,15 @@ export const searchPromptFiles = (
   limit: number,
 ): Promise<FileEntry[]> =>
   invoke("search_prompt_files", { projectPath, query, limit });
+
+export const searchProjectText = (
+  projectPath: string,
+  query: string,
+  useRegex: boolean,
+  caseSensitive: boolean,
+  limit: number,
+): Promise<TextMatch[]> =>
+  invoke("search_project_text", { projectPath, query, useRegex, caseSensitive, limit });
 
 export const listPromptSkills = (projectPath: string | null): Promise<PromptSkill[]> =>
   invoke("list_prompt_skills", { projectPath });

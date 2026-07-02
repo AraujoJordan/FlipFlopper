@@ -2,14 +2,23 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
+      - "*.*.*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish artifacts to, for example 0.0.1 or v0.1.0"
+        required: true
+        type: string
 
 jobs:
   release:
     name: Release (${{ matrix.platform }}${{ matrix.target && format(' / {0}', matrix.target) || '' }})
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -89,8 +98,8 @@ jobs:
           # ── Windows signing (add secrets later) ──
           # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "FlipFlopper ${{ github.ref_name }}"
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
             Download the installer or binary archive for your platform below.
 
@@ -111,4 +120,4 @@ jobs:
       - name: Upload binary to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" "artifacts/${{ matrix.archive }}" --clobber
+        run: gh release upload "${{ env.RELEASE_TAG }}" "artifacts/${{ matrix.archive }}" --clobber

@@ -298,10 +298,7 @@ pub fn get_review_diff(
     path: Option<String>,
 ) -> Result<Vec<FileDiff>, String> {
     let rev_arg = rev.as_deref().unwrap_or("HEAD");
-    let mut args: Vec<&str> = vec![
-        "-c", "core.quotepath=false",
-        "diff", "--unified=3", rev_arg,
-    ];
+    let mut args: Vec<&str> = vec!["-c", "core.quotepath=false", "diff", "--unified=3", rev_arg];
     if let Some(ref p) = path {
         args.push("--");
         args.push(p.as_str());
@@ -312,9 +309,11 @@ pub fn get_review_diff(
 
     // Augment with untracked files when showing working-tree view
     if rev.is_none() {
-        let untracked_raw =
-            git_err(project_path, &["ls-files", "--others", "--exclude-standard"])
-                .unwrap_or_default();
+        let untracked_raw = git_err(
+            project_path,
+            &["ls-files", "--others", "--exclude-standard"],
+        )
+        .unwrap_or_default();
         if let Some(ref p) = path {
             // Single untracked file
             if diffs.is_empty() && untracked_raw.lines().any(|l| l.trim() == p.as_str()) {

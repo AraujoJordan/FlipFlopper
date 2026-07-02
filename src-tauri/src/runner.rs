@@ -448,8 +448,7 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
 
     if tools::current_os() == "macos" {
         if let Some(xcode_file) = first_xcode_bundle(&facts) {
-            if let Some((xcode_flag, file_name, scheme)) =
-                xcode_project_parts(&facts, &xcode_file)
+            if let Some((xcode_flag, file_name, scheme)) = xcode_project_parts(&facts, &xcode_file)
             {
                 let command = format!(
                     "xcodebuild {xcode_flag} {} -scheme {} -destination 'platform=iOS Simulator' build",
@@ -1550,7 +1549,10 @@ mod tests {
     fn detects_kmp_android_and_desktop_modules() {
         let project = TempProject::new("kmp");
         project.write("gradlew", "#!/bin/sh\n");
-        project.write("settings.gradle.kts", "include(\":androidApp\")\ninclude(\":desktopApp\")\n");
+        project.write(
+            "settings.gradle.kts",
+            "include(\":androidApp\")\ninclude(\":desktopApp\")\n",
+        );
         project.write("androidApp/src/main/AndroidManifest.xml", "<manifest />\n");
         project.write(
             "androidApp/build.gradle.kts",

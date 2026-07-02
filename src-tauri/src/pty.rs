@@ -221,8 +221,16 @@ pub fn spawn_shell_command(
     let session_id = Uuid::new_v4().to_string();
     let (tx, rx) = mpsc::channel::<PtyEvent>();
 
-    let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
-    let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
+    let shell = if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "sh"
+    };
+    let flag = if cfg!(target_os = "windows") {
+        "/C"
+    } else {
+        "-c"
+    };
 
     let pty_system = native_pty_system();
     let pair = pty_system

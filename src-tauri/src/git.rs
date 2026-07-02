@@ -181,7 +181,10 @@ pub fn rename_commit(project_path: &str, sha: &str, message: &str) -> Result<(),
 
     let full_sha = git(project_path, &["rev-parse", &format!("{sha}^{{commit}}")])?;
     let head_sha = git(project_path, &["rev-parse", "HEAD"])?;
-    let ancestor = git_output(project_path, &["merge-base", "--is-ancestor", &full_sha, "HEAD"])?;
+    let ancestor = git_output(
+        project_path,
+        &["merge-base", "--is-ancestor", &full_sha, "HEAD"],
+    )?;
     if !ancestor.status.success() {
         return Err("Rename refused: commit is not on the current branch.".to_string());
     }
@@ -213,9 +216,7 @@ pub fn rename_commit(project_path: &str, sha: &str, message: &str) -> Result<(),
 pub fn rollback(project_path: &str, sha: &str) -> Result<(), String> {
     let branch = git(project_path, &["branch", "--show-current"])?;
     if branch == "main" || branch == "master" {
-        return Err(
-            "Rollback refused: on main/master. Checkout a work branch first.".to_string(),
-        );
+        return Err("Rollback refused: on main/master. Checkout a work branch first.".to_string());
     }
     git(project_path, &["reset", "--hard", sha])?;
     Ok(())
@@ -225,4 +226,3 @@ pub fn rollback(project_path: &str, sha: &str) -> Result<(), String> {
 pub fn get_current_branch(project_path: &str) -> Result<String, String> {
     git(project_path, &["branch", "--show-current"])
 }
-

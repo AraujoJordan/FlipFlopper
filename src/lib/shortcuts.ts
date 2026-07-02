@@ -6,7 +6,7 @@ import { store, setActiveTab, removeTab, closeEditorFile, closeReview, selectWor
 // capture-phase stopPropagation() intercepts before the event gets there.
 // We deliberately never bind Mod-S: CodeMirror owns that for save.
 
-type ShortcutAction = "new-agent-menu" | "focus-prompt";
+type ShortcutAction = "new-agent-menu" | "focus-prompt" | "omni-search";
 
 const actionHandlers = new Map<ShortcutAction, () => void>();
 
@@ -23,6 +23,9 @@ function runAction(action: ShortcutAction) {
 }
 
 const isMac = navigator.platform.toLowerCase().includes("mac");
+let lastShiftUp = 0;
+let sawOtherKey = false;
+let shiftPressWasSolo = false;
 
 function isMod(e: KeyboardEvent): boolean {
   return isMac ? e.metaKey : e.ctrlKey;
@@ -59,9 +62,39 @@ export function installGlobalShortcuts(): () => void {
     const { inTerminal, inEditor, inInput } = classifyTarget(e.target);
     const mod = isMod(e);
 
+    if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") {
+      e.preventDefault(); e.stopPropagation();
+      runAction("omni-search");
+      return;
+    }
+
+    if (e.key === "Shift") {
+      const soloShift = !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey;
+      if (!soloShift) {
+        lastShiftUp = 0;
+        sawOtherKey = true;
+        shiftPressWasSolo = false;
+      } else {
+        const now = Date.now();
+        if (!sawOtherKey && lastShiftUp > 0 && now - lastShiftUp <= 300) {
+          e.preventDefault(); e.stopPropagation();
+          runAction("omni-search");
+          lastShiftUp = 0;
+          shiftPressWasSolo = false;
+          return;
+        }
+        shiftPressWasSolo = true;
+        sawOtherKey = false;
+      }
+    } else {
+      lastShiftUp = 0;
+      sawOtherKey = true;
+      shiftPressWasSolo = false;
+    }
+
     if (mod && !e.altKey && (e.key === "1" || e.key === "2" || e.key === "3")) {
       e.preventDefault(); e.stopPropagation();
-      selectWorkspaceMode(e.key === "1" ? "code" : e.key === "2" ? "review" : "agent");
+      selectWorkspaceMode(e.key === "1" ? "code" : e.key === "2" ? "agent" : "review");
       return;
     }
 
@@ -105,6 +138,20 @@ export function installGlobalShortcuts(): () => void {
     }
   }
 
+  function handleKeyup(e: KeyboardEvent) {
+    if (e.key !== "Shift") return;
+    if (shiftPressWasSolo && !sawOtherKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      lastShiftUp = Date.now();
+    } else {
+      lastShiftUp = 0;
+    }
+    shiftPressWasSolo = false;
+  }
+
   window.addEventListener("keydown", handleKeydown, true);
-  return () => window.removeEventListener("keydown", handleKeydown, true);
+  window.addEventListener("keyup", handleKeyup, true);
+  return () => {
+    window.removeEventListener("keydown", handleKeydown, true);
+    window.removeEventListener("keyup", handleKeyup, true);
+  };
 }

@@ -26,6 +26,7 @@ import FileTree from "./components/FileTree";
 import CommitTimeline from "./components/CommitTimeline";
 import DiffPane from "./components/DiffPane";
 import EditorPane from "./components/EditorPane";
+import OmniSearch from "./components/OmniSearch";
 import PromptComposer from "./components/PromptComposer";
 import RunButton from "./components/RunButton";
 import { Button, Menu, MenuLabel, MenuItem, Spinner, ToastHost, ConfirmHost, toast } from "./components/ui";
@@ -56,6 +57,7 @@ const AGENT_COLORS: Record<string, string> = {
   qwen: "#a371f7",
   gemini: "#2f81f7",
   codex: "#3fb950",
+  cursor: "#f0f6fc",
   agy: "#2f81f7",
   aider: "#f0883e",
   opencode: "#bc8cff",
@@ -72,7 +74,7 @@ export function agentColor(agentId: string): string {
 
 export function agentLetter(agentId: string): string {
   const map: Record<string, string> = {
-    claude: "C", qwen: "Q", gemini: "G", codex: "X",
+    claude: "C", qwen: "Q", gemini: "G", codex: "X", cursor: "C",
     agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R",
     run: "▶",
   };
@@ -127,8 +129,8 @@ export const AgentLogo: Component<{
 
 const WORKSPACE_MODES: { mode: WorkspaceMode; label: string }[] = [
   { mode: "code", label: "Code" },
-  { mode: "review", label: "Code Review" },
   { mode: "agent", label: "AI Agent" },
+  { mode: "review", label: "Code Review" },
 ];
 
 const ModeIcon: Component<{ mode: WorkspaceMode; active: boolean }> = (props) => {
@@ -181,7 +183,7 @@ const WorkspaceModeSwitch: Component = () => {
             <button
               class="workspace-mode-button"
               onclick={() => selectWorkspaceMode(item.mode)}
-              title={`${item.label} (${item.mode === "code" ? "⌘1" : item.mode === "review" ? "⌘2" : "⌘3"})`}
+              title={`${item.label} (${item.mode === "code" ? "⌘1" : item.mode === "agent" ? "⌘2" : "⌘3"})`}
               style={{
                 height: "22px",
                 display: "flex", "align-items": "center", gap: "6px",
@@ -653,6 +655,7 @@ const App: Component = () => {
       <PromptComposer />
 
       <ToastHost />
+      <OmniSearch />
       <ConfirmHost />
     </div>
   );

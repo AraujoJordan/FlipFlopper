@@ -171,7 +171,11 @@ fn truncate(s: &str, max: usize) -> String {
 fn build_tool_activity(counts: HashMap<String, (usize, Vec<String>)>) -> Vec<ToolStat> {
     let mut stats: Vec<ToolStat> = counts
         .into_iter()
-        .map(|(name, (count, samples))| ToolStat { name, count, samples })
+        .map(|(name, (count, samples))| ToolStat {
+            name,
+            count,
+            samples,
+        })
         .collect();
     stats.sort_by(|a, b| b.count.cmp(&a.count));
     stats
@@ -187,11 +191,9 @@ fn extract_text_from_content(content: Option<&Value>) -> String {
         Value::Array(parts) => {
             let pieces: Vec<&str> = parts
                 .iter()
-                .filter_map(|p| {
-                    match p.get("type").and_then(Value::as_str)? {
-                        "text" | "input_text" => p.get("text").and_then(Value::as_str),
-                        _ => None,
-                    }
+                .filter_map(|p| match p.get("type").and_then(Value::as_str)? {
+                    "text" | "input_text" => p.get("text").and_then(Value::as_str),
+                    _ => None,
                 })
                 .collect();
             pieces.join("\n").trim().to_string()
@@ -278,7 +280,10 @@ fn claude_parse_jsonl(path: &Path) -> Option<HandoffContext> {
         match t {
             "ai-title" => {
                 if summary.is_none() {
-                    summary = line.get("aiTitle").and_then(Value::as_str).map(str::to_owned);
+                    summary = line
+                        .get("aiTitle")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
                 }
             }
             "last-prompt" => {
@@ -299,7 +304,10 @@ fn claude_parse_jsonl(path: &Path) -> Option<HandoffContext> {
                     if !sent_prompts.contains(&text) {
                         sent_prompts.push(text.clone());
                     }
-                    conversation.push(ConvTurn { role: "User".into(), text });
+                    conversation.push(ConvTurn {
+                        role: "User".into(),
+                        text,
+                    });
                 }
             }
             "assistant" => {
@@ -321,15 +329,16 @@ fn claude_parse_jsonl(path: &Path) -> Option<HandoffContext> {
                 let content = msg.get("content");
                 let text = extract_text_from_content(content);
                 if !text.is_empty() {
-                    conversation.push(ConvTurn { role: "Assistant".into(), text });
+                    conversation.push(ConvTurn {
+                        role: "Assistant".into(),
+                        text,
+                    });
                 }
                 // Accumulate tool_use activity
                 if let Some(arr) = content.and_then(Value::as_array) {
                     for part in arr {
                         if str_field(part, "type") == Some("tool_use") {
-                            let name = str_field(part, "name")
-                                .unwrap_or("unknown")
-                                .to_string();
+                            let name = str_field(part, "name").unwrap_or("unknown").to_string();
                             let sample = part
                                 .get("input")
                                 .map(|v| truncate(&v.to_string(), 60))
@@ -404,7 +413,11 @@ fn codex_latest(project_path: &str) -> Option<HandoffContext> {
                     .and_then(Value::as_str)
                     == Some(project_path)
         });
-        if matches { Some(p) } else { None }
+        if matches {
+            Some(p)
+        } else {
+            None
+        }
     });
 
     let file = newest_file(matching)?;
@@ -433,7 +446,9 @@ fn codex_parse_jsonl(path: &Path) -> Option<HandoffContext> {
         if let Some(ts) = str_field(line, "timestamp") {
             last_active = Some(ts.to_string());
         }
-        let Some(payload) = line.get("payload") else { continue };
+        let Some(payload) = line.get("payload") else {
+            continue;
+        };
 
         match str_field(line, "type") {
             Some("session_meta") => {
@@ -490,16 +505,21 @@ fn codex_parse_jsonl(path: &Path) -> Option<HandoffContext> {
                         if skip_prefixes.iter().any(|pfx| text.starts_with(pfx)) {
                             continue;
                         }
-                        let conv_role = if role == "assistant" { "Assistant" } else { "User" };
+                        let conv_role = if role == "assistant" {
+                            "Assistant"
+                        } else {
+                            "User"
+                        };
                         if conv_role == "User" && !sent_prompts.contains(&text) {
                             sent_prompts.push(text.clone());
                         }
-                        conversation.push(ConvTurn { role: conv_role.into(), text });
+                        conversation.push(ConvTurn {
+                            role: conv_role.into(),
+                            text,
+                        });
                     }
                     Some("function_call" | "local_shell_call" | "custom_tool_call") => {
-                        let name = str_field(payload, "name")
-                            .unwrap_or("tool")
-                            .to_string();
+                        let name = str_field(payload, "name").unwrap_or("tool").to_string();
                         let sample = match payload.get("arguments") {
                             Some(Value::String(s)) => truncate(s, 60),
                             Some(v) => truncate(&v.to_string(), 60),
@@ -608,7 +628,10 @@ fn gemini_parse_json(path: &Path) -> Option<HandoffContext> {
                     if conv_role == "User" {
                         sent_prompts.push(text.clone());
                     }
-                    conversation.push(ConvTurn { role: conv_role.into(), text });
+                    conversation.push(ConvTurn {
+                        role: conv_role.into(),
+                        text,
+                    });
                 }
                 // Function calls in parts
                 for part in parts {
@@ -685,7 +708,10 @@ fn qwen_latest(project_path: &str) -> Option<HandoffContext> {
 fn opencode_latest(project_path: &str) -> Option<HandoffContext> {
     let home = home()?;
     let candidates = [
-        home.join(".local").join("share").join("opencode").join("storage"),
+        home.join(".local")
+            .join("share")
+            .join("opencode")
+            .join("storage"),
         #[cfg(target_os = "macos")]
         home.join("Library")
             .join("Application Support")
@@ -761,7 +787,11 @@ fn opencode_parse_sqlite(db_path: &Path, project_path: &str) -> Option<HandoffCo
         .ok()?;
 
     for (role, content) in rows.flatten() {
-        let conv_role = if role == "assistant" { "Assistant" } else { "User" };
+        let conv_role = if role == "assistant" {
+            "Assistant"
+        } else {
+            "User"
+        };
         if conv_role == "User" {
             sent_prompts.push(content.clone());
         }
@@ -869,7 +899,11 @@ fn cline_parse_json(path: &Path) -> Option<HandoffContext> {
         if text.is_empty() {
             continue;
         }
-        let conv_role = if msg_type == "ask" { "User" } else { "Assistant" };
+        let conv_role = if msg_type == "ask" {
+            "User"
+        } else {
+            "Assistant"
+        };
         if conv_role == "User" {
             sent_prompts.push(text.clone());
         }
@@ -932,7 +966,11 @@ fn gather_git(project_path: &str) -> GitContext {
 
     let branch = {
         let b = run(&["rev-parse", "--abbrev-ref", "HEAD"]);
-        if b.is_empty() { "unknown".into() } else { b }
+        if b.is_empty() {
+            "unknown".into()
+        } else {
+            b
+        }
     };
     let commits_raw = run(&["log", "--oneline", "-20"]);
     let commits: Vec<String> = commits_raw.lines().map(str::to_owned).collect();
@@ -940,15 +978,16 @@ fn gather_git(project_path: &str) -> GitContext {
     let file_log = run(&["log", "--name-status", "--pretty=format:%h %s", "-10"]);
     let changed_files: Vec<String> = file_log
         .lines()
-        .filter(|l| {
-            l.starts_with(|c: char| {
-                matches!(c, 'M' | 'A' | 'D' | 'R' | 'C' | 'U')
-            })
-        })
+        .filter(|l| l.starts_with(|c: char| matches!(c, 'M' | 'A' | 'D' | 'R' | 'C' | 'U')))
         .map(str::to_owned)
         .collect();
 
-    GitContext { branch, commits, changed_files, status }
+    GitContext {
+        branch,
+        commits,
+        changed_files,
+        status,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1080,7 +1119,9 @@ fn compose_markdown(ctx: Option<&HandoffContext>, git: &GitContext, from_agent: 
         md.push('\n');
     }
 
-    md.push_str("---\n**Continue this session. The context above summarizes the previous work.**\n");
+    md.push_str(
+        "---\n**Continue this session. The context above summarizes the previous work.**\n",
+    );
     md
 }
 

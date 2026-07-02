@@ -24,6 +24,15 @@ pub struct FileEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextMatch {
+    pub rel_path: String,
+    pub line: u64,
+    pub text: String,
+    pub col: usize,
+    pub len: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillEntry {
     pub name: String,
     pub path: String,
@@ -291,6 +300,167 @@ pub fn search_files(
         .take(limit.max(1))
         .map(|(_, entry)| entry)
         .collect())
+}
+
+/// Search project text with .gitignore-aware walking.
+/// Returned paths are project-relative using `/`.
+pub fn search_text(
+    project_path: &str,
+    query: &str,
+    use_regex: bool,
+    case_sensitive: bool,
+    limit: usize,
+) -> Result<Vec<TextMatch>, String> {
+    let root = PathBuf::from(project_path);
+    if !root.is_dir() {
+        return Err(format!("Not a directory: {project_path}"));
+    }
+
+    let query = query.trim();
+    if query.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let pattern = if use_regex {
+        query.to_string()
+    } else {
+        regex::escape(query)
+    };
+    let matcher = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|err| err.to_string())?;
+
+    let walker = WalkBuilder::new(&root)
+        .hidden(false)
+        .git_ignore(true)
+        .build();
+
+    let mut matches = Vec::new();
+
+    for result in walker {
+        if matches.len() >= limit {
+            break;
+        }
+
+        let Ok(entry) = result else {
+            continue;
+        };
+        let path = entry.path();
+        if path == root || !path.is_file() {
+            continue;
+        }
+
+        let Ok(metadata) = fs::metadata(path) else {
+            continue;
+        };
+        if metadata.len() > 1024 * 1024 {
+            continue;
+        }
+
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        if bytes.iter().take(8192).any(|b| *b == 0) {
+            continue;
+        }
+        let Ok(contents) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+
+        let Ok(rel_path) = path.strip_prefix(&root) else {
+            continue;
+        };
+        let rel = rel_path.to_string_lossy().replace('\\', "/");
+        if rel.is_empty() {
+            continue;
+        }
+
+        let mut file_matches = 0;
+        for (line_index, line) in contents.lines().enumerate() {
+            if file_matches >= 20 || matches.len() >= limit {
+                break;
+            }
+            let line = line.strip_suffix('\r').unwrap_or(line);
+
+            for matched in matcher.find_iter(line) {
+                if file_matches >= 20 || matches.len() >= limit {
+                    break;
+                }
+                let (text, col, len) = line_snippet(line, matched.start(), matched.end());
+                matches.push(TextMatch {
+                    rel_path: rel.clone(),
+                    line: line_index as u64 + 1,
+                    text,
+                    col,
+                    len,
+                });
+                file_matches += 1;
+            }
+        }
+    }
+
+    Ok(matches)
+}
+
+fn line_snippet(line: &str, match_start: usize, match_end: usize) -> (String, usize, usize) {
+    const MAX_SNIPPET_BYTES: usize = 200;
+
+    let trimmed_start = line.len() - line.trim_start().len();
+    let trimmed_end = line.trim_end().len();
+    let start = match_start.saturating_sub(trimmed_start);
+    let end = match_end.saturating_sub(trimmed_start);
+    let trimmed = &line[trimmed_start..trimmed_end];
+
+    if trimmed.len() <= MAX_SNIPPET_BYTES {
+        return (trimmed.to_string(), start, end.saturating_sub(start));
+    }
+
+    let wanted_start = start.saturating_sub(80);
+    let mut slice_start = previous_char_boundary(trimmed, wanted_start);
+    let min_end = end.min(trimmed.len());
+    let wanted_end = (slice_start + MAX_SNIPPET_BYTES)
+        .max(min_end)
+        .min(trimmed.len());
+    let slice_end = next_char_boundary(trimmed, wanted_end);
+
+    if slice_end.saturating_sub(slice_start) > MAX_SNIPPET_BYTES + 16 {
+        slice_start = previous_char_boundary(trimmed, min_end.saturating_sub(MAX_SNIPPET_BYTES));
+    }
+
+    let mut text = String::new();
+    let prefix_len = if slice_start > 0 {
+        text.push_str("...");
+        3
+    } else {
+        0
+    };
+    text.push_str(&trimmed[slice_start..slice_end]);
+    if slice_end < trimmed.len() {
+        text.push_str("...");
+    }
+
+    (
+        text,
+        prefix_len + start.saturating_sub(slice_start),
+        end.saturating_sub(start),
+    )
+}
+
+fn previous_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn next_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 fn file_match_score(path: &str, query: &str, is_dir: bool) -> Option<i64> {

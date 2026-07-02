@@ -16,7 +16,7 @@ use tauri_plugin_dialog::DialogExt;
 use agents::AgentInfo;
 use editor::FileContent;
 use git::{CommitEntry, CommitResult, FileStatus};
-use project::{FileEntry, ProjectInfo, SkillEntry};
+use project::{FileEntry, ProjectInfo, SkillEntry, TextMatch};
 use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
 use runner::RunTarget;
@@ -318,6 +318,17 @@ fn search_prompt_files(
 }
 
 #[tauri::command]
+fn search_project_text(
+    project_path: String,
+    query: String,
+    use_regex: bool,
+    case_sensitive: bool,
+    limit: usize,
+) -> Result<Vec<TextMatch>, String> {
+    project::search_text(&project_path, &query, use_regex, case_sensitive, limit)
+}
+
+#[tauri::command]
 fn list_prompt_skills(project_path: Option<String>) -> Vec<SkillEntry> {
     project::list_skills(project_path.as_deref())
 }
@@ -548,6 +559,7 @@ pub fn run() {
             get_recent_projects,
             get_file_tree,
             search_prompt_files,
+            search_project_text,
             list_prompt_skills,
             inject_file_refs,
             // Editor

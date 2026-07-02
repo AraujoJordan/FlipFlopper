@@ -137,6 +137,19 @@ pub static CATALOG: &[ToolEntry] = &[
         ],
     },
     ToolEntry {
+        id: "cursor",
+        name: "Cursor CLI",
+        description: "Cursor's terminal coding agent",
+        binary: "agent",
+        icon: "",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl https://cursor.com/install -fsS | bash" },
+            InstallSpec::Shell { os: "linux", command: "curl https://cursor.com/install -fsS | bash" },
+            InstallSpec::Shell { os: "windows", command: "powershell -ExecutionPolicy ByPass -c \"irm 'https://cursor.com/install?win32=true' | iex\"" },
+        ],
+    },
+    ToolEntry {
         id: "opencode",
         name: "OpenCode",
         description: "Open source AI coding agent for the terminal",

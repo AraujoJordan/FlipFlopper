@@ -49,6 +49,15 @@ pub static AGENTS: &[AgentDef] = &[
         icon: "/agents/codex.png",
     },
     AgentDef {
+        id: "cursor",
+        name: "Cursor CLI",
+        binary: "agent",
+        aliases: &["cursor-agent"],
+        description: "Cursor's terminal coding agent",
+        launch_args: &[],
+        icon: "/agents/cursor.png",
+    },
+    AgentDef {
         id: "opencode",
         name: "OpenCode",
         binary: "opencode",

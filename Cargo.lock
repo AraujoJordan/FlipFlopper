@@ -1074,6 +1074,7 @@ dependencies = [
  "dirs 5.0.1",
  "ignore",
  "portable-pty",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

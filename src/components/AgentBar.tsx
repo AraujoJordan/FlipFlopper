@@ -15,6 +15,8 @@ export const NewAgentMenu: Component<{
   align?: "left" | "right";
 }> = (props) => {
   const [spawningId, setSpawningId] = createSignal<string | null>(null);
+  const installedAgents = () => store.agents.filter((a) => a.installed);
+  const uninstalledAgents = () => store.agents.filter((a) => !a.installed);
 
   async function handlePick(agent: AgentInfo) {
     props.onClose();
@@ -35,7 +37,7 @@ export const NewAgentMenu: Component<{
   return (
     <Menu open={props.open} onClose={props.onClose} anchorRef={props.anchorRef} align={props.align ?? "left"}>
       <MenuLabel>New session</MenuLabel>
-      <For each={store.agents.filter((a) => a.installed)}>
+      <For each={installedAgents()}>
         {(agent) => (
           <MenuItem onSelect={() => handlePick(agent)} disabled={spawningId() !== null}>
             <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
@@ -56,6 +58,27 @@ export const NewAgentMenu: Component<{
           </MenuItem>
         )}
       </For>
+      <Show when={uninstalledAgents().length > 0}>
+        <MenuLabel>Not installed</MenuLabel>
+        <For each={uninstalledAgents()}>
+          {(agent) => (
+            <MenuItem onSelect={() => undefined} disabled>
+              <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
+              <div style={{ flex: "1" }}>
+                <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
+                  {agent.name}
+                </div>
+                <div style={{
+                  "font-size": "10.5px", color: "var(--fg-subtle)",
+                  "font-family": "var(--font-mono)",
+                }}>
+                  Not installed
+                </div>
+              </div>
+            </MenuItem>
+          )}
+        </For>
+      </Show>
     </Menu>
   );
 };

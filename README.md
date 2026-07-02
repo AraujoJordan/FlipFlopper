@@ -65,8 +65,9 @@ may the best (and cheapest) agent win.
 
 ## Supported agents
 
-Claude Code, Codex, agy, Aider, Goose, Cline, OpenCode, Qwen, Plandex,
-and Droid. If your agent speaks "terminal", it'll probably feel right at home.
+Claude Code, Codex, Cursor CLI, agy, Aider, Goose, Cline, OpenCode, Qwen,
+Plandex, and Droid. If your agent speaks "terminal", it'll probably feel right
+at home.
 
 ## Stack
 

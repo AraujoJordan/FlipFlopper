@@ -25,8 +25,8 @@ fn resolve_in_project(project_path: &str, rel_path: &str) -> Result<PathBuf, Str
     if Path::new(rel_path).is_absolute() {
         return Err("Path must be relative to the project root".into());
     }
-    let root = fs::canonicalize(project_path)
-        .map_err(|e| format!("Cannot resolve project root: {e}"))?;
+    let root =
+        fs::canonicalize(project_path).map_err(|e| format!("Cannot resolve project root: {e}"))?;
     let joined = root.join(rel_path);
 
     // Canonicalize the deepest existing ancestor so new files still validate.
@@ -44,7 +44,9 @@ fn resolve_in_project(project_path: &str, rel_path: &str) -> Result<PathBuf, Str
 
 fn modified_ms_of(path: &Path) -> Result<u64, String> {
     let meta = fs::metadata(path).map_err(|e| format!("Cannot stat file: {e}"))?;
-    let mtime = meta.modified().map_err(|e| format!("Cannot read mtime: {e}"))?;
+    let mtime = meta
+        .modified()
+        .map_err(|e| format!("Cannot read mtime: {e}"))?;
     Ok(mtime
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
