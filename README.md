@@ -47,6 +47,9 @@ may the best (and cheapest) agent win.
 - **File tree with checkboxes** - tick some files, and FlipFlopper injects them
   as `@file` references straight into the agent. No more copy-pasting paths like
   it's 2009.
+- **Native code review & diffs** - inspect working-tree changes and commit history
+  natively. Features unified and split layout toggles, change statistics, and
+  syntax highlighting.
 - **Git auto-commit** - everything lands on the `ai-work` branch, so `main`
   stays pristine and your future self stays calm.
 - **Agent handoff** - hot-swap Claude for Codex (or agy, or Aider) in the
@@ -71,8 +74,8 @@ src/
   App.tsx              three-pane layout (sidebar | terminals | right panel)
   lib/ipc.ts           typed Tauri invoke() wrappers
   lib/store.ts         global UI state (SolidJS store)
-  components/          AgentBar, TerminalPane, Sidebar, FileTree,
-                       PreviewPane, PromptComposer, IconMark
+  components/          AgentBar, TerminalPane, FileTree, CommitTimeline,
+                       DiffPane, PromptComposer
 
 src-tauri/src/
   pty.rs               PTY session manager (spawn/read/write/resize/kill)
@@ -81,6 +84,7 @@ src-tauri/src/
   git.rs               git status + auto-commit
   tools.rs             tool catalog + per-OS install commands
   handoff.rs           cli-continues wrapper for agent switching
+  review.rs            unified and split diff parser for native review pane
   lib.rs               Tauri builder + command handlers
 ```
 
