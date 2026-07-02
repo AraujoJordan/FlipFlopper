@@ -108,6 +108,25 @@ export const pickProjectFolder = (): Promise<string | null> =>
 export const pickPromptFile = (projectPath: string | null, imageOnly = false): Promise<string | null> =>
   invoke("pick_prompt_file", { projectPath, imageOnly });
 
+// ── Editor ───────────────────────────────────────────────────────────────────
+
+export interface FileContent {
+  content: string;
+  is_binary: boolean;
+  too_large: boolean;
+  size: number;
+  modified_ms: number;
+}
+
+export const readFileText = (projectPath: string, relPath: string): Promise<FileContent> =>
+  invoke("read_file_text", { projectPath, relPath });
+
+export const writeFileText = (projectPath: string, relPath: string, content: string): Promise<number> =>
+  invoke("write_file_text", { projectPath, relPath, content });
+
+export const statFile = (projectPath: string, relPath: string): Promise<number> =>
+  invoke("stat_file", { projectPath, relPath });
+
 // ── Git ──────────────────────────────────────────────────────────────────────
 
 export const getGitStatus = (projectPath: string): Promise<FileStatus[]> =>

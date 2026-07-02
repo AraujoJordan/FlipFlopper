@@ -1,4 +1,5 @@
 mod agents;
+mod editor;
 mod git;
 mod handoff;
 mod project;
@@ -10,6 +11,7 @@ use tauri::{Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 
 use agents::AgentInfo;
+use editor::FileContent;
 use git::{CommitEntry, CommitResult, FileStatus};
 use project::{FileEntry, ProjectInfo};
 use pty::{PtyEvent, PtyManager, SessionInfo};
@@ -118,6 +120,25 @@ fn inject_file_refs(
     paths: Vec<String>,
 ) -> Result<(), String> {
     pty::inject_refs(&state, &session_id, &paths)
+}
+
+// ════════════════════════════════════════════════
+// Editor commands
+// ════════════════════════════════════════════════
+
+#[tauri::command]
+fn read_file_text(project_path: String, rel_path: String) -> Result<FileContent, String> {
+    editor::read_file_text(&project_path, &rel_path)
+}
+
+#[tauri::command]
+fn write_file_text(project_path: String, rel_path: String, content: String) -> Result<u64, String> {
+    editor::write_file_text(&project_path, &rel_path, &content)
+}
+
+#[tauri::command]
+fn stat_file(project_path: String, rel_path: String) -> Result<u64, String> {
+    editor::stat_file(&project_path, &rel_path)
 }
 
 // ════════════════════════════════════════════════
@@ -281,6 +302,10 @@ pub fn run() {
             get_recent_projects,
             get_file_tree,
             inject_file_refs,
+            // Editor
+            read_file_text,
+            write_file_text,
+            stat_file,
             // Git
             get_git_status,
             auto_commit,

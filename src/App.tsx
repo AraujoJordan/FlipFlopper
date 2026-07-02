@@ -15,6 +15,7 @@ import TerminalPane from "./components/TerminalPane";
 import FileTree from "./components/FileTree";
 import CommitTimeline from "./components/CommitTimeline";
 import DiffPane from "./components/DiffPane";
+import EditorPane from "./components/EditorPane";
 import PromptComposer from "./components/PromptComposer";
 import "./App.css";
 
@@ -398,7 +399,9 @@ const App: Component = () => {
                 />
               )}
             </For>
-            {/* native diff review pane — overlays terminals when open */}
+            {/* file editor — overlays terminals when a file is open */}
+            <EditorPane />
+            {/* native diff review pane — overlays terminals and editor when open */}
             <DiffPane />
           </div>
         </div>

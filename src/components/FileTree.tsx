@@ -1,5 +1,5 @@
 import { Component, createResource, createSignal, For, Show } from "solid-js";
-import { store, openReview } from "../lib/store";
+import { store, openReview, openEditorFile } from "../lib/store";
 import { getFileTree, getGitStatus, type FileEntry, type FileStatus } from "../lib/ipc";
 
 const STATUS_STYLE: Record<string, { color: string; bg: string; label: string }> = {
@@ -28,8 +28,8 @@ const FileTree: Component = () => {
   );
 
   const [gitStatus] = createResource(
-    () => store.currentProject?.path,
-    (path) => (path ? getGitStatus(path) : Promise.resolve([]))
+    () => (store.currentProject ? { path: store.currentProject.path, v: store.gitStatusVersion } : null),
+    (key) => (key ? getGitStatus(key.path) : Promise.resolve([]))
   );
 
   async function toggleDir(path: string) {
@@ -60,6 +60,17 @@ const FileTree: Component = () => {
   }
 
   function openFile(entry: FileEntry, statuses: FileStatus[]) {
+    // Deleted files have nothing on disk to edit — show the diff instead.
+    if (statusFor(entry, statuses)?.status === "D") {
+      reviewFile(entry, statuses);
+    } else {
+      openEditorFile(relPath(entry), entry.name).catch((e) =>
+        console.error("Failed to open file:", e)
+      );
+    }
+  }
+
+  function reviewFile(entry: FileEntry, statuses: FileStatus[]) {
     // Untracked files: show as all-additions using the full working-tree view.
     // Tracked files: diff against HEAD so staged and unstaged changes show up.
     if (statusFor(entry, statuses)?.status === "??") {
@@ -88,7 +99,7 @@ const FileTree: Component = () => {
       <>
         <div
           onclick={() => (props.entry.is_dir ? toggleDir(props.entry.path) : openFile(props.entry, props.statuses))}
-          title={props.entry.is_dir ? undefined : `Review ${relPath(props.entry)}`}
+          title={props.entry.is_dir ? undefined : `Open ${relPath(props.entry)}`}
           style={{
             display: "flex", "align-items": "center", "justify-content": "space-between",
             padding: "4px 8px",
@@ -109,11 +120,20 @@ const FileTree: Component = () => {
             </span>
           </span>
           <Show when={stKey()}>
-            <span style={{
-              color: stStyle()!.color,
-              "font-weight": "700", "font-size": "11px",
-              "font-family": "'JetBrains Mono', monospace",
-            }}>
+            <span
+              onclick={(e) => {
+                e.stopPropagation();
+                if (!props.entry.is_dir) reviewFile(props.entry, props.statuses);
+              }}
+              title={props.entry.is_dir ? undefined : "Review changes"}
+              style={{
+                color: stStyle()!.color,
+                "font-weight": "700", "font-size": "11px",
+                "font-family": "'JetBrains Mono', monospace",
+                padding: "1px 5px", "border-radius": "4px",
+                cursor: props.entry.is_dir ? "default" : "pointer",
+              }}
+            >
               {stStyle()!.label}
             </span>
           </Show>

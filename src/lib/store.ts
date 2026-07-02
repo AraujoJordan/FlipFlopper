@@ -1,6 +1,6 @@
 import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
-import { getAgents, getToolCatalog, installTool, onPtyExit } from "./ipc";
+import { getAgents, getToolCatalog, installTool, onPtyExit, readFileText } from "./ipc";
 
 export interface Tab {
   sessionId: string;
@@ -21,6 +21,20 @@ export interface ReviewState {
   title: string;
 }
 
+export interface EditorFile {
+  /** project-relative path — the tab identity */
+  path: string;
+  /** basename for the tab label */
+  name: string;
+  /** content as last loaded from / saved to disk */
+  baseline: string;
+  dirty: boolean;
+  /** disk mtime (epoch ms) at last load/save */
+  modifiedMs: number;
+  /** binary or too-large → placeholder buffer, not editable */
+  binary: boolean;
+}
+
 export interface AppStore {
   currentProject: ProjectInfo | null;
   recentProjects: ProjectInfo[];
@@ -32,6 +46,11 @@ export interface AppStore {
   tools: ToolInfo[];
   sidebarView: SidebarView;
   review: ReviewState | null;
+  editorFiles: EditorFile[];
+  activeEditorPath: string | null;
+  editorOpen: boolean;
+  /** bumped after saves so git-status consumers refetch */
+  gitStatusVersion: number;
 }
 
 const initial: AppStore = {
@@ -45,6 +64,10 @@ const initial: AppStore = {
   tools: [],
   sidebarView: "recents",
   review: null,
+  editorFiles: [],
+  activeEditorPath: null,
+  editorOpen: false,
+  gitStatusVersion: 0,
 };
 
 export const [store, setStore] = createStore<AppStore>(initial);
@@ -144,6 +167,9 @@ export function removeTab(sessionId: string) {
 
 export function setActiveTab(sessionId: string) {
   setStore("activeTabId", sessionId);
+  // Clicking an agent tab flips the center back to the terminal; open editor
+  // files persist underneath and return when a file is clicked.
+  setStore("editorOpen", false);
 }
 
 export function toggleFileSelection(path: string) {
@@ -212,4 +238,80 @@ export function openReview(rev: string | undefined, title: string, path?: string
 /** Close the native review pane. */
 export function closeReview() {
   setStore("review", null);
+}
+
+// ── File editor ───────────────────────────────────────────────────────────────
+
+/** Open a file in the editor (or focus its tab if already open). */
+export async function openEditorFile(relPath: string, name: string) {
+  const project = store.currentProject;
+  if (!project) return;
+
+  const existing = store.editorFiles.find((f) => f.path === relPath);
+  if (existing) {
+    setStore("activeEditorPath", relPath);
+    setStore("editorOpen", true);
+    return;
+  }
+
+  const file = await readFileText(project.path, relPath);
+  setStore("editorFiles", (files) => [
+    ...files,
+    {
+      path: relPath,
+      name,
+      baseline: file.content,
+      dirty: false,
+      modifiedMs: file.modified_ms,
+      binary: file.is_binary || file.too_large,
+    },
+  ]);
+  setStore("activeEditorPath", relPath);
+  setStore("editorOpen", true);
+}
+
+/** Close an editor tab; prompts if there are unsaved changes. */
+export function closeEditorFile(path: string) {
+  const file = store.editorFiles.find((f) => f.path === path);
+  if (!file) return;
+  if (file.dirty && !window.confirm(`Discard unsaved changes to ${file.name}?`)) return;
+
+  const remaining = store.editorFiles.filter((f) => f.path !== path);
+  setStore("editorFiles", remaining);
+  setStore("activeEditorPath", (cur) => {
+    if (cur !== path) return cur;
+    return remaining.length > 0 ? remaining[remaining.length - 1].path : null;
+  });
+  if (remaining.length === 0) setStore("editorOpen", false);
+}
+
+export function setActiveEditorFile(path: string) {
+  setStore("activeEditorPath", path);
+}
+
+export function setEditorDirty(path: string, dirty: boolean) {
+  setStore("editorFiles", (f) => f.path === path, "dirty", dirty);
+}
+
+/** Record a successful save: new baseline + disk mtime, clears dirty. */
+export function markEditorSaved(path: string, baseline: string, modifiedMs: number) {
+  setStore("editorFiles", (f) => f.path === path, {
+    baseline,
+    dirty: false,
+    modifiedMs,
+  });
+}
+
+/** Replace baseline after an external (on-disk) change was loaded. */
+export function refreshEditorBaseline(path: string, content: string, modifiedMs: number) {
+  setStore("editorFiles", (f) => f.path === path, {
+    baseline: content,
+    dirty: false,
+    modifiedMs,
+  });
+}
+
+/** Nudge git-status consumers (file tree badges) to refetch. */
+export function bumpGitStatus() {
+  setStore("gitStatusVersion", (v) => v + 1);
 }
