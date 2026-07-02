@@ -101,17 +101,6 @@ Sanity checks before you commit:
 cd src-tauri && cargo check    # Rust must be happy
 npx tsc --noEmit               # TypeScript must also be happy
 ```
-
-## Contributing
-
-PRs welcome. A few house rules so the bots and humans stay friends:
-
-- Commits are imperative and scope-prefixed: `feat(pty): add resize support`.
-- `cargo check` and `npx tsc --noEmit` both have to pass.
-- No new crates or npm packages without a quick chat first.
-
-See [AGENTS.md](AGENTS.md) for the full agent-and-human contributor guide.
-
 ## Trademarks and notices
 
 FlipFlopper itself is MIT licensed (see below). The agent logos bundled in
