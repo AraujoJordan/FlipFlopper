@@ -100,11 +100,11 @@ const FileTree: Component = () => {
         >
           <span style={{ display: "flex", gap: "7px", "align-items": "center" }}>
             <Show when={props.entry.is_dir}>
-              <span style={{ color: "#6b6f7c", "font-size": "11px" }}>
+              <span style={{ color: "var(--fg-subtle)", "font-size": "11px" }}>
                 {isExpanded() ? "▾" : "▸"}
               </span>
             </Show>
-            <span style={{ color: stStyle()?.color ?? "#9a9eaa" }}>
+            <span style={{ color: stStyle()?.color ?? "var(--fg-muted)" }}>
               {props.entry.is_dir ? "📁 " : "📄 "}{props.entry.name}
             </span>
           </span>
@@ -149,14 +149,14 @@ const FileTree: Component = () => {
       }}>
         <span style={{
           "font-size": "11px", "letter-spacing": ".5px",
-          "text-transform": "uppercase", color: "#6b6f7c", "font-weight": "600",
+          "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
         }}>
           Explorer
         </span>
         <Show when={statuses().length > 0}>
           <span style={{
             "font-family": "'JetBrains Mono', monospace",
-            "font-size": "10px", color: "#6b6f7c",
+            "font-size": "10px", color: "var(--fg-subtle)",
             background: "#1a1d25", padding: "2px 7px", "border-radius": "5px",
           }}>
             {changedCount(statuses())} changed
@@ -172,7 +172,7 @@ const FileTree: Component = () => {
         "font-size": "12.5px",
       }}>
         <Show when={!store.fileTreePath}>
-          <div style={{ padding: "16px", color: "#5b5f6c", "font-size": "12px" }}>
+          <div style={{ padding: "16px", color: "var(--fg-subtle)", "font-size": "12px" }}>
             No project open
           </div>
         </Show>
@@ -188,7 +188,7 @@ const FileTree: Component = () => {
         padding: "9px 14px",
         display: "flex", gap: "14px",
         "font-family": "'JetBrains Mono', monospace",
-        "font-size": "10px", color: "#6b6f7c",
+        "font-size": "10px", color: "var(--fg-subtle)",
       }}>
         <span><span style={{ color: "#3fb950" }}>A</span> added</span>
         <span><span style={{ color: "#d29922" }}>M</span> modified</span>

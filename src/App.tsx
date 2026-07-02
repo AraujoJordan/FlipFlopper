@@ -38,11 +38,11 @@ function writeWorkspace(ws: PersistedWorkspace) {
 }
 
 const AGENT_COLORS: Record<string, string> = {
-  claude: "#d97757",
-  qwen: "#7c5cff",
-  gemini: "#4d8dff",
-  codex: "#2ec27e",
-  agy: "#4d8dff",
+  claude: "#58a6ff",
+  qwen: "#a371f7",
+  gemini: "#2f81f7",
+  codex: "#3fb950",
+  agy: "#2f81f7",
   aider: "#f0883e",
   opencode: "#bc8cff",
   cline: "#39c5cf",
@@ -51,7 +51,7 @@ const AGENT_COLORS: Record<string, string> = {
 };
 
 export function agentColor(agentId: string): string {
-  return AGENT_COLORS[agentId] ?? "#8b8f9c";
+  return AGENT_COLORS[agentId] ?? "#8b949e";
 }
 
 export function agentLetter(agentId: string): string {
@@ -184,30 +184,30 @@ const App: Component = () => {
         <div style={{
           position: "absolute", left: 0, right: 0,
           "text-align": "center", "pointer-events": "none",
-          "font-size": "12.5px", color: "#8b8f9c",
+          "font-size": "12.5px", color: "var(--fg-muted)",
           "font-weight": "500", "letter-spacing": ".2px",
         }}>
           <button
             onclick={handlePickProject}
             style={{
-              "pointer-events": "all", color: "#c4c8d2",
+              "pointer-events": "all", color: "var(--fg-body)",
               "font-size": "12.5px", "font-weight": "500",
               cursor: "pointer",
             }}
           >
             {store.currentProject?.name ?? "no project"}
           </button>
-          <span style={{ color: "#5b5f6c" }}> &nbsp;·&nbsp; flipflopper</span>
+          <span style={{ color: "var(--fg-subtle)" }}> &nbsp;·&nbsp; flipflopper</span>
         </div>
 
-        <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "14px", color: "#5b5f6c" }}>
+        <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "14px", color: "var(--fg-subtle)" }}>
           <span style={{
             "font-family": "'JetBrains Mono', monospace",
             "font-size": "11px", display: "flex", "align-items": "center", gap: "6px",
           }}>
             <span style={{
               width: "7px", height: "7px", "border-radius": "50%",
-              background: "#2ec27e", "box-shadow": "0 0 7px #2ec27e",
+              background: "#3fb950", "box-shadow": "0 0 7px #3fb950",
             }} />
             {branch()}
           </span>
@@ -235,7 +235,7 @@ const App: Component = () => {
                 "border-radius": "8px",
                 background: "#1b1e26",
                 border: `1px solid ${activeColor()}99`,
-                color: "#f0d5c9",
+                color: "#79c0ff",
                 "font-size": "12.5px", "font-weight": "500",
                 "box-shadow": `0 0 0 1px ${activeColor()}22`,
               }}
@@ -244,7 +244,7 @@ const App: Component = () => {
                 <path d="M5 12h13M13 6l6 6-6 6" />
               </svg>
               Continue on…
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#9a9eaa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M6 9l6 6 6-6" />
               </svg>
             </button>
@@ -262,7 +262,7 @@ const App: Component = () => {
                 <div style={{
                   padding: "8px 10px 6px",
                   "font-size": "10.5px", "letter-spacing": ".5px",
-                  "text-transform": "uppercase", color: "#6b6f7c", "font-weight": "600",
+                  "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
                 }}>
                   Hand off this session
                 </div>
@@ -300,11 +300,11 @@ const App: Component = () => {
                         {agentLetter(agent.id)}
                       </span>
                       <div style={{ flex: "1" }}>
-                        <div style={{ "font-size": "13px", color: "#e8eaf0", "font-weight": "500" }}>
+                        <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
                           {agent.name}
                         </div>
                         <div style={{
-                          "font-size": "10.5px", color: "#6b6f7c",
+                          "font-size": "10.5px", color: "var(--fg-subtle)",
                           "font-family": "'JetBrains Mono', monospace",
                         }}>
                           {agent.version ?? ""}
@@ -318,10 +318,10 @@ const App: Component = () => {
                   display: "flex", "align-items": "flex-start", gap: "9px",
                   padding: "5px 10px 9px",
                 }}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#5b5f6c" stroke-width="2" style={{ "margin-top": "1px", flex: "0 0 auto" }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e7681" stroke-width="2" style={{ "margin-top": "1px", flex: "0 0 auto" }}>
                     <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" stroke-linecap="round" />
                   </svg>
-                  <div style={{ "font-size": "11px", color: "#7a7e8b", "line-height": "1.5" }}>
+                  <div style={{ "font-size": "11px", color: "var(--fg-muted)", "line-height": "1.5" }}>
                     Carries full transcript &amp; context into a new tab.
                   </div>
                 </div>
@@ -350,13 +350,13 @@ const App: Component = () => {
             "border-bottom": "1px solid #1a1d25",
           }}>
             <Show when={activeTab()} fallback={
-              <span style={{ "font-family": "'JetBrains Mono', monospace", "font-size": "11.5px", color: "#5b5f6c" }}>
+              <span style={{ "font-family": "'JetBrains Mono', monospace", "font-size": "11.5px", color: "var(--fg-subtle)" }}>
                 no agent running
               </span>
             }>
               <span style={{
                 width: "16px", height: "16px", "border-radius": "4px",
-                background: activeColor(), color: "#1a0f0a",
+                background: activeColor(), color: "#0d1117",
                 "font-family": "'JetBrains Mono', monospace",
                 "font-weight": "700", "font-size": "9.5px",
                 display: "flex", "align-items": "center", "justify-content": "center",
@@ -365,7 +365,7 @@ const App: Component = () => {
               </span>
               <span style={{
                 "font-family": "'JetBrains Mono', monospace",
-                "font-size": "11.5px", color: "#8b8f9c",
+                "font-size": "11.5px", color: "var(--fg-muted)",
               }}>
                 {activeTab()!.label}
                 <span style={{ color: activeColor() }}>
@@ -382,7 +382,7 @@ const App: Component = () => {
                 position: "absolute", inset: 0,
                 display: "flex", "align-items": "center", "justify-content": "center",
                 "flex-direction": "column", gap: "12px",
-                color: "#5b5f6c",
+                color: "var(--fg-subtle)",
               }}>
                 <div style={{ "font-size": "14px" }}>No agent running</div>
                 <div style={{ "font-size": "12px", "font-family": "'JetBrains Mono', monospace" }}>

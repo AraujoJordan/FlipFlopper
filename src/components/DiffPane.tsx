@@ -76,7 +76,7 @@ const LINENO_STYLE = {
   "text-align": "right",
   "padding-right": "12px",
   "padding-left": "6px",
-  color: "#4b5263",
+  color: "var(--fg-faint)",
   "user-select": "none" as const,
   "flex-shrink": "0",
 } as const;
@@ -236,7 +236,7 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         }}
       >
         {/* Collapse chevron */}
-        <span style={{ color: "#4b5263", "font-size": "12px", "flex-shrink": "0" }}>
+        <span style={{ color: "var(--fg-faint)", "font-size": "12px", "flex-shrink": "0" }}>
           {collapsed() ? "▸" : "▾"}
         </span>
 
@@ -254,7 +254,7 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         {/* Path */}
         <span style={{
           "font-family": MONO, "font-size": "12px",
-          color: "#c4c8d2", flex: "1", "min-width": "0",
+          color: "var(--fg-body)", flex: "1", "min-width": "0",
           overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
         }}>
           {displayPath()}
@@ -270,19 +270,19 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
           </span>
         </Show>
         <Show when={props.file.is_binary}>
-          <span style={{ "font-family": MONO, "font-size": "11px", color: "#4b5263" }}>binary</span>
+          <span style={{ "font-family": MONO, "font-size": "11px", color: "var(--fg-faint)" }}>binary</span>
         </Show>
       </div>
 
       {/* Diff body */}
       <Show when={!collapsed()}>
         <Show when={props.file.is_binary}>
-          <div style={{ padding: "24px", color: "#4b5263", "font-size": "12px", "text-align": "center" }}>
+          <div style={{ padding: "24px", color: "var(--fg-faint)", "font-size": "12px", "text-align": "center" }}>
             Binary file — no diff available
           </div>
         </Show>
         <Show when={!props.file.is_binary && props.file.hunks.length === 0}>
-          <div style={{ padding: "24px", color: "#4b5263", "font-size": "12px", "text-align": "center" }}>
+          <div style={{ padding: "24px", color: "var(--fg-faint)", "font-size": "12px", "text-align": "center" }}>
             No changes
           </div>
         </Show>
@@ -295,7 +295,7 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
                   <div style={{
                     padding: "4px 12px",
                     background: "#0a0d16",
-                    color: "#4b5263",
+                    color: "var(--fg-faint)",
                     "font-family": MONO, "font-size": "11px",
                     "border-top": "1px solid #1d2028",
                     "border-bottom": "1px solid #1d2028",
@@ -366,7 +366,7 @@ const DiffPane: Component = () => {
   const segBtnStyle = (active: boolean) => ({
     "font-size": "11.5px",
     "font-family": MONO,
-    color: active ? "#e8eaf0" : "#6b6f7c",
+    color: active ? "var(--fg-default)" : "var(--fg-subtle)",
     padding: "2px 10px",
     "border-radius": "4px",
     border: active ? "1px solid #3a3e4a" : "1px solid transparent",
@@ -378,7 +378,7 @@ const DiffPane: Component = () => {
     display: "flex", "align-items": "center", "justify-content": "center",
     width: "24px", height: "24px", "border-radius": "6px",
     background: "transparent", border: "1px solid #2a2e3a",
-    color: "#6b6f7c", cursor: "pointer", "font-size": "14px", "line-height": "1",
+    color: "var(--fg-subtle)", cursor: "pointer", "font-size": "14px", "line-height": "1",
   } as const;
 
   return (
@@ -393,11 +393,11 @@ const DiffPane: Component = () => {
         <div style={headerStyle}>
           {/* Icon + title */}
           <span style={{ "font-size": "14px", "line-height": "1" }}>🔍</span>
-          <span style={{ "font-size": "12px", color: "#c4c8d2", "font-weight": "500" }}>
+          <span style={{ "font-size": "12px", color: "var(--fg-body)", "font-weight": "500" }}>
             Review
           </span>
           <span style={{
-            "font-family": MONO, "font-size": "11px", color: "#6b6f7c",
+            "font-family": MONO, "font-size": "11px", color: "var(--fg-subtle)",
             overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
             "max-width": "240px",
           }}>
@@ -423,7 +423,7 @@ const DiffPane: Component = () => {
             {/* Reload */}
             <button onclick={() => refetch()} title="Reload diff" style={{
               display: "flex", "align-items": "center", gap: "5px",
-              "font-size": "11.5px", color: "#8b8f9c",
+              "font-size": "11.5px", color: "var(--fg-muted)",
               padding: "3px 8px", "border-radius": "5px",
               border: "1px solid #2a2e3a", background: "transparent", cursor: "pointer",
             }}>
@@ -445,7 +445,7 @@ const DiffPane: Component = () => {
 
           {/* Loading */}
           <Show when={diffs.loading}>
-            <div style={{ color: "#6b6f7c", "font-size": "13px", padding: "32px 0", "text-align": "center" }}>
+            <div style={{ color: "var(--fg-subtle)", "font-size": "13px", padding: "32px 0", "text-align": "center" }}>
               Loading diff…
             </div>
           </Show>
@@ -464,7 +464,7 @@ const DiffPane: Component = () => {
           {/* No changes */}
           <Show when={!diffs.loading && !diffs.error && (diffs() ?? []).length === 0}>
             <div style={{
-              color: "#6b6f7c", "font-size": "13px",
+              color: "var(--fg-subtle)", "font-size": "13px",
               padding: "48px 0", "text-align": "center",
             }}>
               No changes
@@ -477,7 +477,7 @@ const DiffPane: Component = () => {
             <div style={{
               display: "flex", "align-items": "center", gap: "14px",
               "margin-bottom": "16px",
-              "font-family": MONO, "font-size": "11.5px", color: "#6b6f7c",
+              "font-family": MONO, "font-size": "11.5px", color: "var(--fg-subtle)",
             }}>
               <span>{diffs()!.length} {diffs()!.length === 1 ? "file" : "files"} changed</span>
               <span style={{ color: ADD_SIGN }}>

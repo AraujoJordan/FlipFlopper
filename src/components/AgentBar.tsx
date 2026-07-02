@@ -52,7 +52,7 @@ const AgentBar: Component = () => {
               <span style={{
                 width: "18px", height: "18px", "border-radius": "5px",
                 background: color(),
-                color: "#1a0f0a",
+                color: "#0d1117",
                 "font-family": "'JetBrains Mono', monospace",
                 "font-weight": "700", "font-size": "11px",
                 display: "flex", "align-items": "center", "justify-content": "center",
@@ -63,7 +63,7 @@ const AgentBar: Component = () => {
 
               <span style={{
                 "font-size": "13px",
-                color: isActive() ? "#e8eaf0" : "#9a9eaa",
+                color: isActive() ? "var(--fg-default)" : "var(--fg-muted)",
                 "font-weight": "500",
               }}>
                 {tab.label}
@@ -74,7 +74,7 @@ const AgentBar: Component = () => {
                 onclick={(e) => { e.stopPropagation(); removeTab(tab.sessionId); }}
                 style={{
                   "margin-left": "4px",
-                  color: isActive() ? "#5b5f6c" : "#3a3d47",
+                  color: isActive() ? "var(--fg-subtle)" : "#3a3d47",
                   "font-size": "14px",
                   "line-height": "1",
                   padding: "0 2px",
@@ -92,7 +92,7 @@ const AgentBar: Component = () => {
         onclick={handleNewTab}
         style={{
           display: "flex", "align-items": "center", "justify-content": "center",
-          width: "30px", color: "#5b5f6c", "font-size": "18px", "align-self": "center",
+          width: "30px", color: "var(--fg-subtle)", "font-size": "18px", "align-self": "center",
         }}
       >
         +

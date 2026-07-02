@@ -58,7 +58,7 @@ const PromptComposer: Component = () => {
         {/* Agent badge */}
         <span style={{
           width: "20px", height: "20px", "border-radius": "6px",
-          background: activeColor(), color: "#1a0f0a",
+          background: activeColor(), color: "#0d1117",
           "font-family": "'JetBrains Mono', monospace",
           "font-weight": "700", "font-size": "11px",
           display: "flex", "align-items": "center", "justify-content": "center",
@@ -78,7 +78,7 @@ const PromptComposer: Component = () => {
             flex: "1",
             "font-family": "'JetBrains Mono', monospace",
             "font-size": "13px",
-            color: value() ? "#e8eaf0" : "#6b6f7c",
+            color: value() ? "var(--fg-default)" : "var(--fg-subtle)",
             background: "none",
             border: "none",
             outline: "none",
@@ -93,7 +93,7 @@ const PromptComposer: Component = () => {
         <Show when={!activeTab()}>
           <span style={{
             "font-family": "'JetBrains Mono', monospace",
-            "font-size": "10.5px", color: "#5b5f6c",
+            "font-size": "10.5px", color: "var(--fg-subtle)",
             border: "1px solid #262a35", "border-radius": "6px",
             padding: "3px 8px", flex: "0 0 auto",
           }}>
@@ -116,7 +116,7 @@ const PromptComposer: Component = () => {
           }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-            stroke={value().trim() ? "#1a0f0a" : "#5b5f6c"}
+            stroke={value().trim() ? "#0d1117" : "#6e7681"}
             stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
             <path d="M7 11l5-5 5 5M12 6v13" />
           </svg>

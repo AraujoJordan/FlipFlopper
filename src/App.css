@@ -2,12 +2,22 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Text palette: GitHub Primer dark (primer/github-vscode-theme) */
+:root {
+  --fg-default: #e6edf3;   /* fg.default */
+  --fg-body:    #c9d1d9;   /* scale.gray[1] */
+  --fg-muted:   #8b949e;   /* fg.muted */
+  --fg-subtle:  #6e7681;   /* fg.subtle */
+  --fg-faint:   #484f58;   /* scale.gray[5] */
+  --accent:     #58a6ff;   /* accent blue */
+}
+
 html, body, #root {
   width: 100%;
   height: 100%;
   background: #08090c;
   font-family: 'IBM Plex Sans', sans-serif;
-  color: #e8eaf0;
+  color: var(--fg-default);
   overflow: hidden;
 }
 
