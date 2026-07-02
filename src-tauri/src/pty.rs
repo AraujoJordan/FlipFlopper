@@ -68,8 +68,12 @@ pub fn spawn_session(
     manager: &PtyManager,
     agent_id: &str,
     project_path: &str,
+    yolo: bool,
 ) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
     let def = find_agent(agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
+    if yolo && def.yolo_launch_args.is_empty() {
+        return Err(format!("Agent '{}' does not support YOLO mode.", def.name));
+    }
     let binary = launch_binary(def).ok_or_else(|| {
         format!(
             "Agent '{}' binary not found on PATH. Install it first.",
@@ -93,6 +97,11 @@ pub fn spawn_session(
     let mut cmd = CommandBuilder::new(&binary);
     for arg in def.launch_args {
         cmd.arg(arg);
+    }
+    if yolo {
+        for arg in def.yolo_launch_args {
+            cmd.arg(arg);
+        }
     }
     cmd.cwd(project_path);
 

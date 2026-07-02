@@ -394,7 +394,7 @@ const DiffPane: Component = () => {
     (r) => {
       const project = store.currentProject;
       if (!project || !r) return Promise.resolve([]);
-      return getReviewDiff(project.path, r.rev, r.path);
+      return getReviewDiff(project.path, r.rev, r.path, r.mode);
     }
   );
 

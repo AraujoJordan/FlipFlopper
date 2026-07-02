@@ -1,7 +1,6 @@
 import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
-import { getAgents, getToolCatalog, installTool, onPtyExit, readFileText, getCurrentBranch } from "./ipc";
-import { confirmDialog } from "../components/ui";
+import { getAgents, getToolCatalog, installTool, onPtyExit, ptyKill, readFileText, getCurrentBranch } from "./ipc";
 
 export interface Tab {
   sessionId: string;
@@ -18,6 +17,9 @@ export interface ReviewState {
   /** file path relative to project root, or undefined for whole-tree */
   path: string | undefined;
   title: string;
+  /** "staged" | "unstaged" scopes the diff to the index or worktree only;
+   *  omitted means the default working-tree-vs-HEAD (or commit range) view */
+  mode?: "staged" | "unstaged";
 }
 
 export interface EditorFile {
@@ -53,6 +55,18 @@ export interface AppStore {
   gitStatusVersion: number;
   currentBranch: string;
   pendingLineFocus: { path: string; line: number } | null;
+  gitPanelTab: "changes" | "history";
+  /** project-relative path to scope the History tab log to, or null for repo-wide */
+  historyFilterPath: string | null;
+  yoloMode: boolean;
+}
+
+const YOLO_MODE_KEY = "flipflopper:yolo-mode";
+
+function readYoloMode(): boolean {
+  try {
+    return localStorage.getItem(YOLO_MODE_KEY) === "true";
+  } catch { return false; }
 }
 
 const initial: AppStore = {
@@ -73,6 +87,9 @@ const initial: AppStore = {
   gitStatusVersion: 0,
   currentBranch: "",
   pendingLineFocus: null,
+  gitPanelTab: "changes",
+  historyFilterPath: null,
+  yoloMode: readYoloMode(),
 };
 
 export const [store, setStore] = createStore<AppStore>(initial);
@@ -241,6 +258,17 @@ export function clearAllTabs() {
   setStore("activeTabId", null);
 }
 
+export async function killAndClearAllTabs() {
+  const sessionIds = store.tabs.map((tab) => tab.sessionId);
+  await Promise.allSettled(sessionIds.map((sessionId) => ptyKill(sessionId)));
+  clearAllTabs();
+}
+
+export function setYoloMode(enabled: boolean) {
+  setStore("yoloMode", enabled);
+  try { localStorage.setItem(YOLO_MODE_KEY, String(enabled)); } catch { /* ignore */ }
+}
+
 // ── PTY / install helpers ─────────────────────────────────────────────────────
 
 export function waitForPtyExit(sessionId: string, timeoutMs = 10 * 60 * 1000): Promise<void> {
@@ -272,9 +300,14 @@ export async function hiddenInstallTool(
 /** Open the native review pane for the given revision range (or working tree
  *  if `rev` is undefined), optionally scoped to a single file.
  *  No external process — the diff is computed on demand by the backend. */
-export function openReview(rev: string | undefined, title: string, path?: string) {
+export function openReview(
+  rev: string | undefined,
+  title: string,
+  path?: string,
+  mode?: "staged" | "unstaged",
+) {
   if (!store.currentProject) return;
-  setStore("review", { rev, path, title });
+  setStore("review", { rev, path, title, mode });
   showReview();
 }
 
@@ -285,7 +318,37 @@ export function closeReview() {
   setStore("editorOpen", store.editorFiles.length > 0);
 }
 
+// ── Git panel tab state ──────────────────────────────────────────────────────
+
+export function setGitPanelTab(tab: "changes" | "history") {
+  setStore("gitPanelTab", tab);
+}
+
+/** Switch the git panel to History, filtered to a single file's log. */
+export function openFileHistory(relPath: string) {
+  setStore("historyFilterPath", relPath);
+  setStore("gitPanelTab", "history");
+}
+
+export function clearHistoryFilter() {
+  setStore("historyFilterPath", null);
+}
+
 // ── File editor ───────────────────────────────────────────────────────────────
+
+const editorSaveFlush = new Map<string, () => Promise<void>>();
+
+export function registerEditorSaveFlush(path: string, flush: () => Promise<void>) {
+  editorSaveFlush.set(path, flush);
+}
+
+export function unregisterEditorSaveFlush(path: string) {
+  editorSaveFlush.delete(path);
+}
+
+export async function flushEditorSave(path: string) {
+  await editorSaveFlush.get(path)?.();
+}
 
 const inFlightOpens = new Set<string>();
 
@@ -343,11 +406,13 @@ export async function openEditorFile(relPath: string, name: string, lineNo?: num
   }
 }
 
-/** Close an editor tab; prompts if there are unsaved changes. */
+/** Close an editor tab; flushes auto-save first, prompts only if save failed. */
 export async function closeEditorFile(path: string) {
   const file = store.editorFiles.find((f) => f.path === path);
   if (!file) return;
-  if (file.dirty) {
+  await flushEditorSave(path);
+  const stillDirty = store.editorFiles.find((f) => f.path === path)?.dirty;
+  if (stillDirty) {
     const confirmed = await confirmDialog(`Discard unsaved changes to ${file.name}?`, "Discard");
     if (!confirmed) return;
   }

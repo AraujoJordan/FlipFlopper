@@ -11,6 +11,7 @@ export interface AgentInfo {
   installed: boolean;
   version: string | null;
   binary_path: string | null;
+  yolo_supported: boolean;
 }
 
 export interface SessionInfo {
@@ -52,6 +53,31 @@ export interface FileStatus {
   status: string;
 }
 
+export interface StatusEntry {
+  path: string;
+  orig_path: string | null;
+  index_status: string;
+  worktree_status: string;
+}
+
+export interface SyncStatus {
+  branch: string;
+  detached: boolean;
+  head_short_sha: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  has_remote: boolean;
+  stash_count: number;
+}
+
+export interface PullOutcome {
+  merged: boolean;
+  conflicted: boolean;
+  conflicted_paths: string[];
+  message: string;
+}
+
 export interface CommitResult {
   sha: string;
   message: string;
@@ -62,6 +88,8 @@ export interface CommitEntry {
   short_sha: string;
   message: string;
   time: string;
+  author: string;
+  date_iso: string;
 }
 
 export interface ToolInfo {
@@ -85,8 +113,8 @@ export interface RunTarget {
 
 // ── PTY ──────────────────────────────────────────────────────────────────────
 
-export const spawnAgent = (agentId: string, projectPath: string): Promise<string> =>
-  invoke("spawn_agent", { agentId, projectPath });
+export const spawnAgent = (agentId: string, projectPath: string, yolo = false): Promise<string> =>
+  invoke("spawn_agent", { agentId, projectPath, yolo });
 
 export const ptyInput = (sessionId: string, data: string): Promise<void> =>
   invoke("pty_input", { sessionId, data });
@@ -174,6 +202,12 @@ export const statFile = (projectPath: string, relPath: string): Promise<number> 
 export const getGitStatus = (projectPath: string): Promise<FileStatus[]> =>
   invoke("get_git_status", { projectPath });
 
+export const getGitStatusV2 = (projectPath: string): Promise<StatusEntry[]> =>
+  invoke("get_git_status_v2", { projectPath });
+
+export const getSyncStatus = (projectPath: string): Promise<SyncStatus> =>
+  invoke("get_sync_status", { projectPath });
+
 export const autoCommit = (projectPath: string, message: string): Promise<CommitResult> =>
   invoke("auto_commit", { projectPath, message });
 
@@ -183,14 +217,52 @@ export const ensureWorkBranch = (projectPath: string, branch: string): Promise<s
 export const getCurrentBranch = (projectPath: string): Promise<string> =>
   invoke("get_current_branch", { projectPath });
 
-export const getGitLog = (projectPath: string, limit: number): Promise<CommitEntry[]> =>
-  invoke("get_git_log", { projectPath, limit });
+export const getGitLog = (projectPath: string, limit: number, path?: string): Promise<CommitEntry[]> =>
+  invoke("get_git_log", { projectPath, limit, path: path ?? null });
 
 export const gitRollback = (projectPath: string, sha: string): Promise<void> =>
   invoke("git_rollback", { projectPath, sha });
 
 export const renameCommit = (projectPath: string, sha: string, message: string): Promise<void> =>
   invoke("rename_commit", { projectPath, sha, message });
+
+export const gitStage = (projectPath: string, paths: string[]): Promise<void> =>
+  invoke("git_stage", { projectPath, paths });
+
+export const gitUnstage = (projectPath: string, paths: string[]): Promise<void> =>
+  invoke("git_unstage", { projectPath, paths });
+
+export const gitDiscard = (projectPath: string, tracked: string[], untracked: string[]): Promise<void> =>
+  invoke("git_discard", { projectPath, tracked, untracked });
+
+export const gitCommit = (
+  projectPath: string,
+  message: string,
+  all: boolean,
+  amend: boolean,
+): Promise<CommitResult> =>
+  invoke("git_commit", { projectPath, message, all, amend });
+
+export const gitStashPush = (projectPath: string, message?: string): Promise<void> =>
+  invoke("git_stash_push", { projectPath, message: message ?? null });
+
+export const gitStashPop = (projectPath: string): Promise<void> =>
+  invoke("git_stash_pop", { projectPath });
+
+export const gitFetch = (projectPath: string): Promise<void> =>
+  invoke("git_fetch", { projectPath });
+
+export const gitPull = (projectPath: string): Promise<PullOutcome> =>
+  invoke("git_pull", { projectPath });
+
+export const gitPush = (projectPath: string): Promise<string> =>
+  invoke("git_push", { projectPath });
+
+export const gitCheckoutCommit = (projectPath: string, sha: string): Promise<void> =>
+  invoke("git_checkout_commit", { projectPath, sha });
+
+export const gitCheckoutPrevious = (projectPath: string): Promise<void> =>
+  invoke("git_checkout_previous", { projectPath });
 
 // ── Native diff review ───────────────────────────────────────────────────────
 
@@ -221,13 +293,15 @@ export interface FileDiff {
 
 /** Return structured diffs for the native review pane.
  *  `rev=undefined` → working-tree vs HEAD; `rev="sha~1..sha"` → commit diff.
- *  `path` optionally scopes to one file (relative to project root). */
+ *  `path` optionally scopes to one file (relative to project root).
+ *  `mode="staged"|"unstaged"` scopes to the index or worktree only, ignoring `rev`. */
 export const getReviewDiff = (
   projectPath: string,
   rev?: string,
   path?: string,
+  mode?: "staged" | "unstaged",
 ): Promise<FileDiff[]> =>
-  invoke("get_review_diff", { projectPath, rev: rev ?? null, path: path ?? null });
+  invoke("get_review_diff", { projectPath, rev: rev ?? null, path: path ?? null, mode: mode ?? null });
 
 // ── Tools ────────────────────────────────────────────────────────────────────
 
@@ -247,5 +321,5 @@ export const runProject = (projectPath: string, targetId?: string): Promise<stri
 
 // ── Handoff ──────────────────────────────────────────────────────────────────
 
-export const continueAgent = (projectPath: string, fromAgent: string, toAgent: string): Promise<string> =>
-  invoke("continue_agent", { projectPath, fromAgent, toAgent });
+export const continueAgent = (projectPath: string, fromAgent: string, toAgent: string, yolo = false): Promise<string> =>
+  invoke("continue_agent", { projectPath, fromAgent, toAgent, yolo });

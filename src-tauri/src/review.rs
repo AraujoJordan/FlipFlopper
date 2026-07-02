@@ -286,29 +286,73 @@ fn synthesize_untracked(rel_path: &str, project_path: &str) -> Option<FileDiff> 
 // Public entry point
 // ────────────────────────────────────────────────────────────────────────────
 
+/// SHA of git's canonical empty tree — used as the "before" side of a
+/// `--cached` diff when the repo has no commits yet (no HEAD to diff against).
+const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+fn has_head(project_path: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(project_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Return structured diffs for the frontend to render.
 ///
-/// - `rev=None`  → uncommitted working-tree vs HEAD
-/// - `rev=Some("sha~1..sha")` → commit range
-/// - `rev=Some("HEAD")` + `path` → single file vs HEAD
+/// - `mode=None`/`"head"`, `rev=None`  → uncommitted working-tree vs HEAD
+///   (staged + unstaged combined, plus synthesized untracked files)
+/// - `mode=None`/`"head"`, `rev=Some("sha~1..sha")` → commit range
+/// - `mode=Some("staged")` → index vs HEAD (`git diff --cached`), ignores `rev`
+/// - `mode=Some("unstaged")` → worktree vs index (`git diff`), plus untracked
 /// - `path=Some(…)` → scope to one file
 pub fn get_review_diff(
     project_path: &str,
     rev: Option<String>,
     path: Option<String>,
+    mode: Option<String>,
 ) -> Result<Vec<FileDiff>, String> {
-    let rev_arg = rev.as_deref().unwrap_or("HEAD");
-    let mut args: Vec<&str> = vec!["-c", "core.quotepath=false", "diff", "--unified=3", rev_arg];
-    if let Some(ref p) = path {
-        args.push("--");
-        args.push(p.as_str());
-    }
+    let mode = mode.as_deref().unwrap_or("head");
 
-    let raw = git(project_path, &args)?;
-    let mut diffs = parse_unified_diff(&raw);
+    let mut diffs = match mode {
+        "staged" => {
+            let before = if has_head(project_path) {
+                "HEAD".to_string()
+            } else {
+                EMPTY_TREE_SHA.to_string()
+            };
+            let mut args: Vec<&str> =
+                vec!["-c", "core.quotepath=false", "diff", "--unified=3", "--cached", &before];
+            if let Some(ref p) = path {
+                args.push("--");
+                args.push(p.as_str());
+            }
+            parse_unified_diff(&git(project_path, &args)?)
+        }
+        "unstaged" => {
+            let mut args: Vec<&str> = vec!["-c", "core.quotepath=false", "diff", "--unified=3"];
+            if let Some(ref p) = path {
+                args.push("--");
+                args.push(p.as_str());
+            }
+            parse_unified_diff(&git(project_path, &args)?)
+        }
+        _ => {
+            let rev_arg = rev.as_deref().unwrap_or("HEAD");
+            let mut args: Vec<&str> =
+                vec!["-c", "core.quotepath=false", "diff", "--unified=3", rev_arg];
+            if let Some(ref p) = path {
+                args.push("--");
+                args.push(p.as_str());
+            }
+            parse_unified_diff(&git(project_path, &args)?)
+        }
+    };
 
-    // Augment with untracked files when showing working-tree view
-    if rev.is_none() {
+    // Augment with untracked files for working-tree-relative views.
+    let include_untracked = mode == "unstaged" || (mode == "head" && rev.is_none());
+    if include_untracked {
         let untracked_raw = git_err(
             project_path,
             &["ls-files", "--others", "--exclude-standard"],

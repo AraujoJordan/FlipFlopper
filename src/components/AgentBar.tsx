@@ -15,7 +15,8 @@ export const NewAgentMenu: Component<{
   align?: "left" | "right";
 }> = (props) => {
   const [spawningId, setSpawningId] = createSignal<string | null>(null);
-  const installedAgents = () => store.agents.filter((a) => a.installed);
+  const installedAgents = () => store.agents.filter((a) => a.installed && (!store.yoloMode || a.yolo_supported));
+  const yoloUnsupportedAgents = () => store.agents.filter((a) => a.installed && store.yoloMode && !a.yolo_supported);
   const uninstalledAgents = () => store.agents.filter((a) => !a.installed);
 
   async function handlePick(agent: AgentInfo) {
@@ -24,7 +25,7 @@ export const NewAgentMenu: Component<{
     if (!project) return;
     setSpawningId(agent.id);
     try {
-      const sessionId = await spawnAgent(agent.id, project.path);
+      const sessionId = await spawnAgent(agent.id, project.path, store.yoloMode);
       addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
     } catch (e) {
       console.error(e);
@@ -58,6 +59,27 @@ export const NewAgentMenu: Component<{
           </MenuItem>
         )}
       </For>
+      <Show when={yoloUnsupportedAgents().length > 0}>
+        <MenuLabel>YOLO unsupported</MenuLabel>
+        <For each={yoloUnsupportedAgents()}>
+          {(agent) => (
+            <MenuItem onSelect={() => undefined} disabled>
+              <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} />
+              <div style={{ flex: "1" }}>
+                <div style={{ "font-size": "13px", color: "var(--fg-default)", "font-weight": "500" }}>
+                  {agent.name}
+                </div>
+                <div style={{
+                  "font-size": "10.5px", color: "var(--fg-subtle)",
+                  "font-family": "var(--font-mono)",
+                }}>
+                  Starts normally only
+                </div>
+              </div>
+            </MenuItem>
+          )}
+        </For>
+      </Show>
       <Show when={uninstalledAgents().length > 0}>
         <MenuLabel>Not installed</MenuLabel>
         <For each={uninstalledAgents()}>

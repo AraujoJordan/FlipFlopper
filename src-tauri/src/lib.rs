@@ -15,7 +15,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use agents::AgentInfo;
 use editor::FileContent;
-use git::{CommitEntry, CommitResult, FileStatus};
+use git::{CommitEntry, CommitResult, FileStatus, PullOutcome, StatusEntry, SyncStatus};
 use project::{FileEntry, ProjectInfo, SkillEntry, TextMatch};
 use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
@@ -247,8 +247,9 @@ fn spawn_agent(
     state: State<'_, PtyManager>,
     agent_id: String,
     project_path: String,
+    yolo: bool,
 ) -> Result<String, String> {
-    let (session_id, rx) = pty::spawn_session(&state, &agent_id, &project_path)?;
+    let (session_id, rx) = pty::spawn_session(&state, &agent_id, &project_path, yolo)?;
     bridge_pty(app, session_id.clone(), rx);
     Ok(session_id)
 }
@@ -371,6 +372,16 @@ fn get_git_status(project_path: String) -> Result<Vec<FileStatus>, String> {
 }
 
 #[tauri::command]
+fn get_git_status_v2(project_path: String) -> Result<Vec<StatusEntry>, String> {
+    git::get_status_v2(&project_path)
+}
+
+#[tauri::command]
+fn get_sync_status(project_path: String) -> Result<SyncStatus, String> {
+    git::get_sync_status(&project_path)
+}
+
+#[tauri::command]
 fn auto_commit(project_path: String, message: String) -> Result<CommitResult, String> {
     git::auto_commit(&project_path, &message)
 }
@@ -386,8 +397,12 @@ fn get_current_branch(project_path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn get_git_log(project_path: String, limit: u32) -> Result<Vec<CommitEntry>, String> {
-    git::get_log(&project_path, limit)
+fn get_git_log(
+    project_path: String,
+    limit: u32,
+    path: Option<String>,
+) -> Result<Vec<CommitEntry>, String> {
+    git::get_log(&project_path, limit, path.as_deref())
 }
 
 #[tauri::command]
@@ -398,6 +413,70 @@ fn git_rollback(project_path: String, sha: String) -> Result<(), String> {
 #[tauri::command]
 fn rename_commit(project_path: String, sha: String, message: String) -> Result<(), String> {
     git::rename_commit(&project_path, &sha, &message)
+}
+
+#[tauri::command]
+fn git_stage(project_path: String, paths: Vec<String>) -> Result<(), String> {
+    git::stage_paths(&project_path, &paths)
+}
+
+#[tauri::command]
+fn git_unstage(project_path: String, paths: Vec<String>) -> Result<(), String> {
+    git::unstage_paths(&project_path, &paths)
+}
+
+#[tauri::command]
+fn git_discard(
+    project_path: String,
+    tracked: Vec<String>,
+    untracked: Vec<String>,
+) -> Result<(), String> {
+    git::discard_paths(&project_path, &tracked, &untracked)
+}
+
+#[tauri::command]
+fn git_commit(
+    project_path: String,
+    message: String,
+    all: bool,
+    amend: bool,
+) -> Result<CommitResult, String> {
+    git::commit(&project_path, &message, all, amend)
+}
+
+#[tauri::command]
+fn git_stash_push(project_path: String, message: Option<String>) -> Result<(), String> {
+    git::stash_push(&project_path, message.as_deref())
+}
+
+#[tauri::command]
+fn git_stash_pop(project_path: String) -> Result<(), String> {
+    git::stash_pop(&project_path)
+}
+
+#[tauri::command]
+fn git_fetch(project_path: String) -> Result<(), String> {
+    git::fetch(&project_path)
+}
+
+#[tauri::command]
+fn git_pull(project_path: String) -> Result<PullOutcome, String> {
+    git::pull(&project_path)
+}
+
+#[tauri::command]
+fn git_push(project_path: String) -> Result<String, String> {
+    git::push(&project_path)
+}
+
+#[tauri::command]
+fn git_checkout_commit(project_path: String, sha: String) -> Result<(), String> {
+    git::checkout_commit(&project_path, &sha)
+}
+
+#[tauri::command]
+fn git_checkout_previous(project_path: String) -> Result<(), String> {
+    git::checkout_previous(&project_path)
 }
 
 // ════════════════════════════════════════════════
@@ -461,8 +540,9 @@ fn get_review_diff(
     project_path: String,
     rev: Option<String>,
     path: Option<String>,
+    mode: Option<String>,
 ) -> Result<Vec<FileDiff>, String> {
-    review::get_review_diff(&project_path, rev, path)
+    review::get_review_diff(&project_path, rev, path, mode)
 }
 
 // ════════════════════════════════════════════════
@@ -476,8 +556,9 @@ fn continue_agent(
     project_path: String,
     from_agent: String,
     to_agent: String,
+    yolo: bool,
 ) -> Result<String, String> {
-    let launch = handoff::continue_launch(&project_path, &from_agent, &to_agent)?;
+    let launch = handoff::continue_launch(&project_path, &from_agent, &to_agent, yolo)?;
     let (session_id, rx) =
         pty::spawn_shell_command(&state, &launch.label, &launch.command, &project_path)?;
     bridge_pty(app, session_id.clone(), rx);
@@ -568,12 +649,25 @@ pub fn run() {
             stat_file,
             // Git
             get_git_status,
+            get_git_status_v2,
+            get_sync_status,
             auto_commit,
             ensure_work_branch,
             get_current_branch,
             get_git_log,
             git_rollback,
             rename_commit,
+            git_stage,
+            git_unstage,
+            git_discard,
+            git_commit,
+            git_stash_push,
+            git_stash_pop,
+            git_fetch,
+            git_pull,
+            git_push,
+            git_checkout_commit,
+            git_checkout_previous,
             // Tools
             get_tool_catalog,
             install_tool,

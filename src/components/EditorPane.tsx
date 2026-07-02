@@ -16,6 +16,8 @@ import {
   markEditorSaved,
   refreshEditorBaseline,
   bumpGitStatus,
+  registerEditorSaveFlush,
+  unregisterEditorSaveFlush,
   type EditorFile,
 } from "../lib/store";
 import { readFileText, writeFileText, statFile } from "../lib/ipc";
@@ -23,9 +25,7 @@ import { getFileIcon } from "./FileTree";
 import { flipflopperTheme } from "../lib/cmTheme";
 
 const POLL_MS = 3000;
-
-// Buffers register their save() here so the header button can trigger it.
-const saveCallbacks = new Map<string, () => void>();
+const AUTO_SAVE_MS = 500;
 
 // ── Per-file buffer ───────────────────────────────────────────────────────────
 
@@ -33,15 +33,20 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
   let host!: HTMLDivElement;
   let view: EditorView | undefined;
   let applyingExternal = false;
+  let saveTimer: number | undefined;
 
   const [saveError, setSaveError] = createSignal<string | null>(null);
   const [conflict, setConflict] = createSignal(false);
 
   async function save() {
-    if (!view || props.file.binary) return;
+    if (!view || props.file.binary || conflict()) return;
     const project = store.currentProject;
     if (!project) return;
     const content = view.state.doc.toString();
+    if (content === props.file.baseline) {
+      setEditorDirty(props.file.path, false);
+      return;
+    }
     try {
       const modifiedMs = await writeFileText(project.path, props.file.path, content);
       markEditorSaved(props.file.path, content, modifiedMs);
@@ -51,6 +56,22 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     } catch (e) {
       setSaveError(String(e));
     }
+  }
+
+  function scheduleAutoSave() {
+    if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => {
+      saveTimer = undefined;
+      void save();
+    }, AUTO_SAVE_MS);
+  }
+
+  async function flushAutoSave() {
+    if (saveTimer !== undefined) {
+      window.clearTimeout(saveTimer);
+      saveTimer = undefined;
+    }
+    await save();
   }
 
   /** Load disk content into the view, replacing the whole doc. */
@@ -99,7 +120,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
         extensions: [
           history(),
           keymap.of([
-            { key: "Mod-s", run: () => { save(); return true; } },
+            { key: "Mod-s", run: () => { void flushAutoSave(); return true; } },
             ...defaultKeymap,
             ...historyKeymap,
             ...searchKeymap,
@@ -115,7 +136,10 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
           ...flipflopperTheme,
           langCompartment.of([]),
           EditorView.updateListener.of((u) => {
-            if (u.docChanged && !applyingExternal) setEditorDirty(props.file.path, true);
+            if (u.docChanged && !applyingExternal) {
+              setEditorDirty(props.file.path, true);
+              scheduleAutoSave();
+            }
           }),
         ],
       }),
@@ -129,14 +153,16 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       }).catch(() => { /* plain text fallback */ });
     }
 
-    saveCallbacks.set(props.file.path, save);
+    registerEditorSaveFlush(props.file.path, flushAutoSave);
     const poll = window.setInterval(() => {
       if (props.active && store.workspaceMode === "code") checkStale();
     }, POLL_MS);
 
     onCleanup(() => {
       window.clearInterval(poll);
-      saveCallbacks.delete(props.file.path);
+      if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+      void flushAutoSave();
+      unregisterEditorSaveFlush(props.file.path);
       view?.destroy();
     });
   });
@@ -363,21 +389,6 @@ const EditorPane: Component = () => {
                   }}
                 >
                   Review diff
-                </button>
-                <button
-                  onclick={() => saveCallbacks.get(file().path)?.()}
-                  disabled={!file().dirty || file().binary}
-                  title="Save (⌘S)"
-                  style={{
-                    padding: "4px 14px", "border-radius": "7px",
-                    border: `1px solid ${file().dirty ? "var(--accent)" : "var(--border-strong)"}`,
-                    color: file().dirty ? "var(--accent)" : "var(--fg-subtle)",
-                    "font-size": "11.5px", "font-weight": "500",
-                    cursor: file().dirty ? "pointer" : "default",
-                    opacity: file().dirty ? "1" : ".55",
-                  }}
-                >
-                  Save
                 </button>
               </div>
             </div>

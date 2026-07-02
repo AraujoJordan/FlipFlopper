@@ -1154,21 +1154,37 @@ recent conversation, tool activity, and git history \u{2014} then continue the w
     )
 }
 
-fn launch_command(to_id: &str, from_name: &str) -> String {
-    let bin = find_agent(to_id)
-        .and_then(launch_binary)
-        .unwrap_or_else(|| to_id.to_string());
+fn launch_command(to_id: &str, from_name: &str, yolo: bool) -> Result<String, String> {
+    let def = find_agent(to_id).ok_or_else(|| format!("Unknown agent: {to_id}"))?;
+    if yolo && def.yolo_launch_args.is_empty() {
+        return Err(format!("Agent '{}' does not support YOLO mode.", def.name));
+    }
+    let bin = launch_binary(def).unwrap_or_else(|| to_id.to_string());
     let bin_q = shell_quote(&bin);
     let prompt_q = shell_quote(&handoff_prompt(from_name));
+    let yolo_args = if yolo {
+        def.yolo_launch_args
+            .iter()
+            .map(|arg| shell_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        String::new()
+    };
+    let yolo_prefix = if yolo_args.is_empty() {
+        String::new()
+    } else {
+        format!(" {yolo_args}")
+    };
 
-    match to_id {
+    Ok(match to_id {
         // Positional prompt — agent stays interactive by default
-        "claude" | "codex" | "gemini" | "droid" => format!("{bin_q} {prompt_q}"),
+        "claude" | "codex" | "gemini" | "droid" => format!("{bin_q}{yolo_prefix} {prompt_q}"),
         // -i flag needed; positional alone is one-shot for these agents
-        "qwen" | "agy" => format!("{bin_q} -i {prompt_q}"),
+        "qwen" | "agy" => format!("{bin_q}{yolo_prefix} -i {prompt_q}"),
         // No reliable interactive-seed flag; handoff.md is still written
-        _ => bin_q,
-    }
+        _ => format!("{bin_q}{yolo_prefix}"),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1179,6 +1195,7 @@ pub fn continue_launch(
     project_path: &str,
     from_agent: &str,
     to_agent: &str,
+    yolo: bool,
 ) -> Result<ContinueLaunch, String> {
     // 1. Read source session (best-effort — None means git-only handoff)
     let session_ctx = find_latest_session(from_agent, project_path);
@@ -1206,7 +1223,7 @@ pub fn continue_launch(
     );
 
     // 6. Build interactive-seed command for target agent
-    let command = launch_command(to_agent, &from_name);
+    let command = launch_command(to_agent, &from_name, yolo)?;
     let label = format!("continue:{from_agent}->{to_agent}");
 
     Ok(ContinueLaunch { label, command })

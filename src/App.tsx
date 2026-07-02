@@ -4,7 +4,9 @@ import {
   store,
   setStore,
   addTab,
+  killAndClearAllTabs,
   selectWorkspaceMode,
+  setYoloMode,
   updateCurrentBranch,
   rankContinueCandidates,
   recordContinueAgentUse,
@@ -23,13 +25,14 @@ import type { Tab, WorkspaceMode } from "./lib/store";
 import AgentBar, { NewAgentMenu } from "./components/AgentBar";
 import TerminalPane from "./components/TerminalPane";
 import FileTree from "./components/FileTree";
-import CommitTimeline from "./components/CommitTimeline";
+import GitPanel from "./components/git/GitPanel";
+import { ConflictFixDialogHost } from "./components/git/ConflictFixDialog";
 import DiffPane from "./components/DiffPane";
 import EditorPane from "./components/EditorPane";
 import OmniSearch from "./components/OmniSearch";
 import PromptComposer from "./components/PromptComposer";
 import RunButton from "./components/RunButton";
-import { Button, Menu, MenuLabel, MenuItem, Spinner, ToastHost, ConfirmHost, toast } from "./components/ui";
+import { Button, Menu, MenuLabel, MenuItem, Spinner, ToastHost, ConfirmHost, confirmDialog, toast } from "./components/ui";
 import { installGlobalShortcuts } from "./lib/shortcuts";
 import "./App.css";
 
@@ -207,6 +210,61 @@ const WorkspaceModeSwitch: Component = () => {
   );
 };
 
+const YoloButton: Component = () => {
+  const [busy, setBusy] = createSignal(false);
+
+  async function toggleYolo() {
+    if (busy()) return;
+    if (store.yoloMode) {
+      setYoloMode(false);
+      toast("YOLO mode disabled", "info");
+      return;
+    }
+
+    if (store.tabs.length > 0) {
+      const confirmed = await confirmDialog(
+        "YOLO mode will close all current agent tabs. New tabs will launch with dangerous permission bypass mode for supported agents.",
+        "Enable YOLO"
+      );
+      if (!confirmed) return;
+    }
+
+    setBusy(true);
+    try {
+      if (store.tabs.length > 0) await killAndClearAllTabs();
+      setYoloMode(true);
+      toast("YOLO mode enabled", "info");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      class="yolo-toggle"
+      classList={{ "yolo-toggle-active": store.yoloMode }}
+      onclick={toggleYolo}
+      disabled={busy()}
+      title={store.yoloMode ? "YOLO mode is active for new agent sessions" : "Enable YOLO mode for new agent sessions"}
+      style={{
+        height: "30px",
+        padding: "0 12px",
+        "border-radius": "var(--radius-lg)",
+        display: "flex", "align-items": "center", "justify-content": "center", gap: "7px",
+        "font-size": "12px",
+        "font-weight": "700",
+        "letter-spacing": "0",
+        opacity: busy() ? ".75" : "1",
+        cursor: busy() ? "default" : "pointer",
+      }}
+    >
+      <Show when={busy()} fallback={<span>YOLO</span>}>
+        <Spinner size={12} color="#ffffff" />
+      </Show>
+    </button>
+  );
+};
+
 const AgentWorkspace: Component = () => {
   const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
   const activeColor = () => agentColor(activeTab()?.agentId ?? "claude");
@@ -214,7 +272,8 @@ const AgentWorkspace: Component = () => {
     const tab = activeTab();
     const project = store.currentProject;
     if (!tab || !project) return [];
-    return rankContinueCandidates(project.path, tab.agentId, store.agents);
+    return rankContinueCandidates(project.path, tab.agentId, store.agents)
+      .filter((agent) => !store.yoloMode || agent.yolo_supported);
   };
   const [continueOpen, setContinueOpen] = createSignal(false);
   const [handoffBusy, setHandoffBusy] = createSignal(false);
@@ -239,8 +298,11 @@ const AgentWorkspace: Component = () => {
       }}>
         <AgentBar />
 
-        <Show when={handoffTargets().length > 0}>
-          <div style={{ "margin-left": "auto", "align-self": "center", position: "relative" }}>
+        <div style={{ "margin-left": "auto", "align-self": "center", display: "flex", "align-items": "center", gap: "8px" }}>
+          <YoloButton />
+
+          <Show when={handoffTargets().length > 0}>
+          <div style={{ "align-self": "center", position: "relative" }}>
             <button
               ref={continueToggleRef}
               onclick={() => setContinueOpen((o) => !o)}
@@ -283,7 +345,7 @@ const AgentWorkspace: Component = () => {
                       if (!project) return;
                       setHandoffBusy(true);
                       try {
-                        const sessionId = await continueAgent(project.path, from, agent.id);
+                        const sessionId = await continueAgent(project.path, from, agent.id, store.yoloMode);
                         recordContinueAgentUse(project.path, agent.id);
                         addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
                       } catch (e) {
@@ -324,6 +386,7 @@ const AgentWorkspace: Component = () => {
             </Menu>
           </div>
           </Show>
+        </div>
       </div>
 
       <div style={{ flex: "1", position: "relative", overflow: "hidden", "min-height": 0 }}>
@@ -468,7 +531,7 @@ const App: Component = () => {
           const agent = agents.find((a) => a.id === saved.agentId);
           if (!agent?.installed) continue;
           try {
-            const sessionId = await spawnAgent(agent.id, project.path);
+            const sessionId = await spawnAgent(agent.id, project.path, store.yoloMode);
             const tab: Tab = {
               sessionId,
               label: agent.name,
@@ -518,7 +581,9 @@ const App: Component = () => {
   }
 
   return (
-    <div style={{
+    <div
+      classList={{ "app-yolo-mode": store.yoloMode }}
+      style={{
       width: "100%", height: "100%",
       background: "var(--surface-2)",
       display: "flex", "flex-direction": "column",
@@ -647,8 +712,8 @@ const App: Component = () => {
           </div>
         </div>
 
-        {/* Commit timeline */}
-        <CommitTimeline />
+        {/* Git panel */}
+        <GitPanel />
       </div>
 
       {/* ── FOOTER PROMPT ── */}
@@ -657,6 +722,7 @@ const App: Component = () => {
       <ToastHost />
       <OmniSearch />
       <ConfirmHost />
+      <ConflictFixDialogHost />
     </div>
   );
 };

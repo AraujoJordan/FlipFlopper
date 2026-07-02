@@ -1,5 +1,5 @@
 import { Component, createResource, createSignal, For, Show } from "solid-js";
-import { store, openReview, openEditorFile, toggleFileSelection, clearFileSelection } from "../lib/store";
+import { store, openReview, openEditorFile, openFileHistory, toggleFileSelection, clearFileSelection } from "../lib/store";
 import { getFileTree, getGitStatus, injectFileRefs, type FileEntry, type FileStatus } from "../lib/ipc";
 import { Button, Spinner, toast } from "./ui";
 
@@ -158,6 +158,7 @@ const FileTree: Component = () => {
     const stKey = () => (st() ? statusKey(st()!.status) : null);
     const stStyle = () => (stKey() ? STATUS_STYLE[stKey()!] : null);
     const isSelected = () => store.selectedFiles.includes(relPath(props.entry));
+    const [rowHovered, setRowHovered] = createSignal(false);
 
     const childEntries = () => {
       if (!props.entry.is_dir || !isExpanded()) return [];
@@ -174,6 +175,8 @@ const FileTree: Component = () => {
             }
             props.entry.is_dir ? toggleDir(props.entry.path) : openFile(props.entry, props.statuses);
           }}
+          onmouseenter={() => setRowHovered(true)}
+          onmouseleave={() => setRowHovered(false)}
           title={props.entry.is_dir ? undefined : `${relPath(props.entry)} (⌘-click to select)`}
           style={{
             display: "flex", "align-items": "center", "justify-content": "space-between",
@@ -214,7 +217,23 @@ const FileTree: Component = () => {
               {props.entry.name}
             </span>
           </span>
-          <Show when={stKey()}>
+          <span style={{ display: "flex", "align-items": "center", gap: "4px" }}>
+            <Show when={!props.entry.is_dir && rowHovered()}>
+              <button
+                onclick={(e) => { e.stopPropagation(); openFileHistory(relPath(props.entry)); }}
+                title="File history"
+                style={{
+                  color: "var(--fg-subtle)", display: "flex", "align-items": "center",
+                  padding: "2px", "border-radius": "var(--radius-sm)",
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 7v5l3 3" />
+                </svg>
+              </button>
+            </Show>
+            <Show when={stKey()}>
             <span
               onclick={(e) => {
                 e.stopPropagation();
@@ -231,7 +250,8 @@ const FileTree: Component = () => {
             >
               {stStyle()!.label}
             </span>
-          </Show>
+            </Show>
+          </span>
         </div>
 
         <Show when={props.entry.is_dir && isExpanded()}>

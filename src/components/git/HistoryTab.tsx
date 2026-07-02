@@ -1,8 +1,9 @@
-import { Component, createResource, createSignal, For, Show, onCleanup } from "solid-js";
-import { store, openReview, bumpGitStatus } from "../lib/store";
-import { getGitLog, gitRollback, renameCommit } from "../lib/ipc";
-import { agentColor, agentLetter } from "../App";
-import { Button, Spinner, confirmDialog, toast } from "./ui";
+import { Component, createResource, createSignal, For, Show } from "solid-js";
+import type { Accessor } from "solid-js";
+import { store, openReview, bumpGitStatus, clearHistoryFilter, updateCurrentBranch } from "../../lib/store";
+import { getGitLog, gitRollback, renameCommit, gitCheckoutCommit } from "../../lib/ipc";
+import { agentColor, agentLetter } from "../../App";
+import { Button, Spinner, confirmDialog, toast } from "../ui";
 
 const UNIT_ABBR: Record<string, string> = {
   minute: "m", hour: "h", day: "d", week: "w", month: "mo", year: "y",
@@ -18,14 +19,15 @@ function relativeTime(timeStr: string): string {
   return `${m[1]}${UNIT_ABBR[m[2].toLowerCase()] ?? m[2]}`;
 }
 
-const CommitTimeline: Component = () => {
-  const [tick, setTick] = createSignal(0);
-  const interval = setInterval(() => setTick((n) => n + 1), 30_000);
-  onCleanup(() => clearInterval(interval));
-
+const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
   const [commits, { refetch }] = createResource(
-    () => ({ path: store.currentProject?.path, _tick: tick(), _v: store.gitStatusVersion }),
-    ({ path }) => (path ? getGitLog(path, 50) : Promise.resolve([]))
+    () => ({
+      path: store.currentProject?.path,
+      filter: store.historyFilterPath,
+      _tick: props.tick(),
+      _v: store.gitStatusVersion,
+    }),
+    ({ path, filter }) => (path ? getGitLog(path, 50, filter ?? undefined) : Promise.resolve([]))
   );
 
   const [renamingSha, setRenamingSha] = createSignal<string | null>(null);
@@ -36,8 +38,6 @@ const CommitTimeline: Component = () => {
     const tab = store.tabs.find((t) => t.sessionId === store.activeTabId);
     return tab?.agentId ?? "claude";
   };
-
-  const branch = () => store.currentBranch;
 
   function startRename(sha: string, message: string) {
     setRenamingSha(sha);
@@ -62,7 +62,7 @@ const CommitTimeline: Component = () => {
   async function rollbackTo(sha: string, shortSha: string) {
     if (!store.currentProject) return;
     const ok = await confirmDialog(
-      `Hard reset ${branch() || "this branch"} to ${shortSha}? Uncommitted work is lost.`,
+      `Hard reset ${store.currentBranch || "this branch"} to ${shortSha}? Uncommitted work is lost.`,
       "Roll back",
     );
     if (!ok) return;
@@ -79,57 +79,54 @@ const CommitTimeline: Component = () => {
     }
   }
 
+  async function checkoutCommit(sha: string, shortSha: string) {
+    if (!store.currentProject) return;
+    const ok = await confirmDialog(
+      `Checkout ${shortSha}? HEAD will be detached; use the Back button in the sync header to return.`,
+      "Checkout",
+    );
+    if (!ok) return;
+    setBusySha(sha);
+    try {
+      await gitCheckoutCommit(store.currentProject.path, sha);
+      toast(`Checked out ${shortSha} (detached)`, "success");
+      bumpGitStatus();
+      await updateCurrentBranch();
+    } catch (e) {
+      toast(`Checkout failed: ${String(e)}`, "error");
+    } finally {
+      setBusySha(null);
+    }
+  }
+
+  async function copySha(sha: string) {
+    try {
+      await navigator.clipboard.writeText(sha);
+      toast("SHA copied", "success");
+    } catch {
+      toast("Could not copy SHA", "error");
+    }
+  }
+
   return (
-    <div style={{
-      width: "312px", flex: "0 0 312px",
-      background: "var(--surface-2)",
-      "border-left": "1px solid var(--border-muted)",
-      display: "flex", "flex-direction": "column",
-      "min-height": 0,
-    }}>
-      {/* Header */}
-      <div style={{
-        height: "38px", flex: "0 0 38px",
-        display: "flex", "align-items": "center", gap: "9px",
-        padding: "0 10px 0 16px",
-        "border-bottom": "1px solid var(--border-muted)",
-      }}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6e7681" stroke-width="2">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M12 3v6M12 15v6" stroke-linecap="round" />
-        </svg>
-        <span style={{
-          "font-size": "11px", "letter-spacing": ".5px",
-          "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
-        }}>
-          Commits
-        </span>
-        <span style={{
-          "font-family": "var(--font-mono)",
-          "font-size": "10.5px", color: "var(--fg-subtle)",
-        }}>
-          {branch() || "no branch"} · {(commits() ?? []).length}
-        </span>
+    <div style={{ flex: "1", display: "flex", "flex-direction": "column", "min-height": 0 }}>
+      <Show when={store.historyFilterPath}>
+        <div style={{ display: "flex", "align-items": "center", gap: "6px", padding: "8px 12px 0" }}>
+          <span
+            title={store.historyFilterPath ?? undefined}
+            style={{
+              display: "flex", "align-items": "center", gap: "6px",
+              "font-family": "var(--font-mono)", "font-size": "10.5px",
+              color: "var(--fg-muted)", background: "var(--surface-4)",
+              padding: "3px 8px", "border-radius": "999px",
+            }}
+          >
+            {store.historyFilterPath!.split("/").pop()}
+            <button onclick={clearHistoryFilter} style={{ color: "var(--fg-subtle)", cursor: "pointer" }}>×</button>
+          </span>
+        </div>
+      </Show>
 
-        {/* Review working-tree changes */}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => openReview(undefined, "Working changes")}
-          disabled={!store.currentProject}
-          title="Review uncommitted changes"
-          style={{ "margin-left": "auto" }}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
-            <path d="M14 3v5h5" />
-            <path d="M9 15l2 2 4-5" />
-          </svg>
-          Review
-        </Button>
-      </div>
-
-      {/* Timeline */}
       <div style={{ flex: "1", overflow: "auto", padding: "6px 0" }}>
         <Show when={commits.loading && !commits()}>
           <div style={{ padding: "24px 0", display: "flex", "justify-content": "center" }}>
@@ -168,7 +165,7 @@ const CommitTimeline: Component = () => {
                 onclick={() => !isRenaming() && openReview(`${commit.sha}~1..${commit.sha}`, commit.short_sha)}
                 onmouseenter={() => setHovered(true)}
                 onmouseleave={() => setHovered(false)}
-                title={`Review commit ${commit.short_sha}`}
+                title={`Review commit ${commit.short_sha} — ${new Date(commit.date_iso).toLocaleString()}`}
                 style={{
                   position: "relative",
                   padding: "13px 18px 13px 40px",
@@ -197,7 +194,7 @@ const CommitTimeline: Component = () => {
                   top: isFirst() ? "30px" : "-13px",
                   bottom: "-13px",
                   width: "1px",
-                  background: "#23262f",
+                  background: "var(--border-muted)",
                 }} />
 
                 {/* Commit info */}
@@ -236,12 +233,29 @@ const CommitTimeline: Component = () => {
                   }}>
                     <Show when={hovered() && !isRenaming() && !isBusy()}>
                       <button
+                        onclick={(e) => { e.stopPropagation(); copySha(commit.sha); }}
+                        title="Copy full SHA"
+                        style={{ color: "var(--fg-subtle)", display: "flex", "align-items": "center", padding: "2px", "border-radius": "var(--radius-sm)" }}
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                          <rect x="9" y="9" width="13" height="13" rx="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                        </svg>
+                      </button>
+                      <button
+                        onclick={(e) => { e.stopPropagation(); checkoutCommit(commit.sha, commit.short_sha); }}
+                        title="Checkout (detached HEAD)"
+                        style={{ color: "var(--fg-subtle)", display: "flex", "align-items": "center", padding: "2px", "border-radius": "var(--radius-sm)" }}
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                          <circle cx="12" cy="12" r="3" />
+                          <path d="M12 3v6M12 15v6" stroke-linecap="round" />
+                        </svg>
+                      </button>
+                      <button
                         onclick={(e) => { e.stopPropagation(); startRename(commit.sha, commit.message); }}
                         title="Rename commit message"
-                        style={{
-                          color: "var(--fg-subtle)", display: "flex", "align-items": "center",
-                          padding: "2px", "border-radius": "var(--radius-sm)",
-                        }}
+                        style={{ color: "var(--fg-subtle)", display: "flex", "align-items": "center", padding: "2px", "border-radius": "var(--radius-sm)" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                           <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
@@ -251,10 +265,7 @@ const CommitTimeline: Component = () => {
                       <button
                         onclick={(e) => { e.stopPropagation(); rollbackTo(commit.sha, commit.short_sha); }}
                         title="Roll back to this commit"
-                        style={{
-                          color: "var(--fg-subtle)", display: "flex", "align-items": "center",
-                          padding: "2px", "border-radius": "var(--radius-sm)",
-                        }}
+                        style={{ color: "var(--fg-subtle)", display: "flex", "align-items": "center", padding: "2px", "border-radius": "var(--radius-sm)" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                           <path d="M3 12a9 9 0 1 0 3-6.7M3 12V5m0 7h7" />
@@ -301,12 +312,15 @@ const CommitTimeline: Component = () => {
                     "font-size": "13px",
                     color: isFirst() ? "var(--fg-default)" : "var(--fg-body)",
                     "line-height": "1.45",
-                    "margin-bottom": "6px",
+                    "margin-bottom": "3px",
                     overflow: "hidden",
                     "text-overflow": "ellipsis",
                     "white-space": "nowrap",
                   }}>
                     {commit.message}
+                  </div>
+                  <div style={{ "font-size": "10.5px", color: "var(--fg-faint)" }}>
+                    {commit.author}
                   </div>
                 </Show>
               </div>
@@ -318,4 +332,4 @@ const CommitTimeline: Component = () => {
   );
 };
 
-export default CommitTimeline;
+export default HistoryTab;
