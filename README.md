@@ -50,8 +50,7 @@ may the best (and cheapest) agent win.
 - **Native code review & diffs** - inspect working-tree changes and commit history
   natively. Features unified and split layout toggles, change statistics, and
   syntax highlighting.
-- **Git auto-commit** - everything lands on the `ai-work` branch, so `main`
-  stays pristine and your future self stays calm.
+- **Git auto-commit** - auto-commits changes on your current active branch so your progress is saved.
 - **Agent handoff** - hot-swap Claude for Codex (or agy, or Aider) in the
   middle of a session via `cli-continues`. Flip. Flop. Repeat.
 - **Shared config** - one `AGENTS.md` plus `.agents/` per project, read by every

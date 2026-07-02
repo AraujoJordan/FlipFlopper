@@ -38,7 +38,7 @@ Known gaps / current quirks:
 - The visible branch labels in `src/App.tsx` and
   `src/components/CommitTimeline.tsx` are hardcoded to `main`.
 - The git backend refuses auto-commit, rollback, and commit rename on
-  `main`/`master`; use `ai-work` for agent work.
+  `main`/`master`.
 - IPC wrappers exist for `ensure_work_branch`, `git_rollback`,
   `rename_commit`, `inject_file_refs`, and `pick_prompt_file`, but the current
   UI does not wire all of them.
@@ -149,7 +149,7 @@ requires generated output.
 
 ## Git And Commit Rules
 
-- Work on `ai-work`. Never commit directly to `main`.
+- Work on the current opened branch.
 - If asked to commit, check the branch first:
 
 ```sh
