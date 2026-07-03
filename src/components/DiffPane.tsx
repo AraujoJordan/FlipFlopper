@@ -26,7 +26,6 @@ const STATUS_COLORS: Record<string, { color: string; label: string }> = {
   binary:   { color: "var(--fg-muted)", label: "B" },
 };
 
-// ── Language detection ────────────────────────────────────────────────────────
 const EXT_TO_LANG: Record<string, string> = {
   ts: "typescript", tsx: "typescript",
   js: "javascript", jsx: "javascript",
@@ -43,6 +42,10 @@ const EXT_TO_LANG: Record<string, string> = {
   yaml: "yaml", yml: "yaml",
   c: "c", h: "c",
   cpp: "cpp", cc: "cpp", cxx: "cpp",
+  kt: "kotlin", kts: "kotlin",
+  swift: "swift",
+  cs: "csharp",
+  m: "objectivec", mm: "objectivec",
 };
 
 const MAX_HIGHLIGHT_LINES = 2_000;

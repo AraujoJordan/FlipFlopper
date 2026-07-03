@@ -34,6 +34,7 @@ import EditorPane from "./components/EditorPane";
 import OmniSearch from "./components/OmniSearch";
 import PromptComposer from "./components/PromptComposer";
 import RunButton from "./components/RunButton";
+import ValidationButton from "./components/ValidationButton";
 import { Button, Menu, MenuLabel, MenuItem, Spinner, ToastHost, ConfirmHost, confirmDialog, toast } from "./components/ui";
 import { installGlobalShortcuts } from "./lib/shortcuts";
 import "./App.css";
@@ -71,6 +72,7 @@ const AGENT_COLORS: Record<string, string> = {
   plandex: "#a5d6ff",
   droid: "#f778ba",
   run: "#3fb950",
+  validate: "#58a6ff",
 };
 
 export function agentColor(agentId: string): string {
@@ -82,6 +84,7 @@ export function agentLetter(agentId: string): string {
     claude: "C", qwen: "Q", gemini: "G", codex: "X", cursor: "C",
     agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R",
     run: "▶",
+    validate: "✓",
   };
   return map[agentId] ?? agentId[0]?.toUpperCase() ?? "?";
 }
@@ -678,6 +681,7 @@ const App: Component = () => {
 
         <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "14px", color: "var(--fg-subtle)" }}>
           <RunButton />
+          <ValidationButton />
           <BranchIndicator />
         </div>
       </div>

@@ -2,6 +2,13 @@ import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
 import { getAgents, getToolCatalog, installTool, onPtyExit, ptyKill, readFileText, getCurrentBranch } from "./ipc";
 import { confirmDialog } from "../components/ui";
+import {
+  detectModeMarker,
+  nextMode,
+  stripAnsi,
+  supportsModes,
+  type AgentMode,
+} from "./agentMeta";
 
 export interface Tab {
   sessionId: string;
@@ -42,6 +49,7 @@ export interface AppStore {
   recentProjects: ProjectInfo[];
   agents: AgentInfo[];
   tabs: Tab[];
+  agentModes: Record<string, AgentMode>;
   activeTabId: string | null;
   selectedFiles: string[];
   fileTreePath: string | null;
@@ -52,6 +60,7 @@ export interface AppStore {
   activeEditorPath: string | null;
   editorOpen: boolean;
   runSessionId: string | null;
+  validationSessionId: string | null;
   /** bumped after saves so git-status consumers refetch */
   gitStatusVersion: number;
   currentBranch: string;
@@ -60,13 +69,23 @@ export interface AppStore {
   /** project-relative path to scope the History tab log to, or null for repo-wide */
   historyFilterPath: string | null;
   yoloMode: boolean;
+  explorerCollapsed: boolean;
+  gitPanelCollapsed: boolean;
 }
 
 const YOLO_MODE_KEY = "flipflopper:yolo-mode";
+const EXPLORER_COLLAPSED_KEY = "flipflopper:explorer-collapsed";
+const GITPANEL_COLLAPSED_KEY = "flipflopper:gitpanel-collapsed";
 
 function readYoloMode(): boolean {
   try {
     return localStorage.getItem(YOLO_MODE_KEY) === "true";
+  } catch { return false; }
+}
+
+function readBoolFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "true";
   } catch { return false; }
 }
 
@@ -75,6 +94,7 @@ const initial: AppStore = {
   recentProjects: [],
   agents: [],
   tabs: [],
+  agentModes: {},
   activeTabId: null,
   selectedFiles: [],
   fileTreePath: null,
@@ -85,12 +105,15 @@ const initial: AppStore = {
   activeEditorPath: null,
   editorOpen: false,
   runSessionId: null,
+  validationSessionId: null,
   gitStatusVersion: 0,
   currentBranch: "",
   pendingLineFocus: null,
   gitPanelTab: "changes",
   historyFilterPath: null,
   yoloMode: readYoloMode(),
+  explorerCollapsed: readBoolFlag(EXPLORER_COLLAPSED_KEY),
+  gitPanelCollapsed: readBoolFlag(GITPANEL_COLLAPSED_KEY),
 };
 
 export const [store, setStore] = createStore<AppStore>(initial);
@@ -138,6 +161,7 @@ export const CONTINUE_AGENT_IDS = new Set([
 const CONTINUE_TARGET_KEY = "flipflopper:continue-targets";
 const CONTINUE_USAGE_KEY = "flipflopper:continue-agent-usage";
 const RUN_TARGET_KEY = "flipflopper:run-targets";
+const VALIDATION_TARGET_KEY = "flipflopper:validation-targets";
 
 export function readContinueTargets(): Record<string, string> {
   try {
@@ -166,6 +190,21 @@ export function writeRunTarget(projectPath: string, targetId: string) {
     const targets = readRunTargets();
     targets[projectPath] = targetId;
     localStorage.setItem(RUN_TARGET_KEY, JSON.stringify(targets));
+  } catch { /* ignore */ }
+}
+
+export function readValidationTargets(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(VALIDATION_TARGET_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+export function writeValidationTarget(projectPath: string, targetId: string) {
+  try {
+    const targets = readValidationTargets();
+    targets[projectPath] = targetId;
+    localStorage.setItem(VALIDATION_TARGET_KEY, JSON.stringify(targets));
   } catch { /* ignore */ }
 }
 
@@ -230,7 +269,43 @@ export function addTab(tab: Tab) {
   showAgent();
 }
 
+const agentModeTails: Record<string, string> = {};
+
+export function setAgentMode(sessionId: string, mode: AgentMode) {
+  setStore("agentModes", sessionId, mode);
+}
+
+export function clearAgentMode(sessionId: string) {
+  setStore("agentModes", (modes) => {
+    const next = { ...modes };
+    delete next[sessionId];
+    return next;
+  });
+  delete agentModeTails[sessionId];
+}
+
+export function cycleAgentModeOptimistic(sessionId: string) {
+  const tab = store.tabs.find((x) => x.sessionId === sessionId);
+  if (!tab) return;
+
+  const mode = nextMode(tab.agentId, store.agentModes[sessionId] ?? "normal");
+  if (mode) setAgentMode(sessionId, mode);
+}
+
+export function sniffAgentMode(sessionId: string, rawChunk: string) {
+  const tab = store.tabs.find((x) => x.sessionId === sessionId);
+  if (!tab || !supportsModes(tab.agentId)) return;
+
+  const stripped = stripAnsi(rawChunk);
+  const buffered = `${agentModeTails[sessionId] ?? ""}${stripped}`;
+  agentModeTails[sessionId] = buffered.slice(-160);
+
+  const mode = detectModeMarker(tab.agentId, buffered);
+  if (mode) setAgentMode(sessionId, mode);
+}
+
 export function removeTab(sessionId: string) {
+  clearAgentMode(sessionId);
   setStore("tabs", (t) => t.filter((x) => x.sessionId !== sessionId));
   setStore("activeTabId", (cur) => {
     if (cur !== sessionId) return cur;
@@ -256,7 +331,9 @@ export function clearFileSelection() {
 
 export function clearAllTabs() {
   setStore("tabs", []);
+  setStore("agentModes", {});
   setStore("activeTabId", null);
+  for (const sessionId of Object.keys(agentModeTails)) delete agentModeTails[sessionId];
 }
 
 export async function killAndClearAllTabs() {
@@ -268,6 +345,24 @@ export async function killAndClearAllTabs() {
 export function setYoloMode(enabled: boolean) {
   setStore("yoloMode", enabled);
   try { localStorage.setItem(YOLO_MODE_KEY, String(enabled)); } catch { /* ignore */ }
+}
+
+// ── Side panel collapse state ─────────────────────────────────────────────────
+
+export function toggleExplorerCollapsed() {
+  setStore("explorerCollapsed", (v) => {
+    const next = !v;
+    try { localStorage.setItem(EXPLORER_COLLAPSED_KEY, String(next)); } catch { /* ignore */ }
+    return next;
+  });
+}
+
+export function toggleGitPanelCollapsed() {
+  setStore("gitPanelCollapsed", (v) => {
+    const next = !v;
+    try { localStorage.setItem(GITPANEL_COLLAPSED_KEY, String(next)); } catch { /* ignore */ }
+    return next;
+  });
 }
 
 // ── PTY / install helpers ─────────────────────────────────────────────────────

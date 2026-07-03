@@ -83,7 +83,13 @@ pub struct StatusEntry {
 pub fn get_status_v2(project_path: &str) -> Result<Vec<StatusEntry>, String> {
     let out = git_output(
         project_path,
-        &["-c", "core.quotepath=false", "status", "--porcelain=v1", "-z"],
+        &[
+            "-c",
+            "core.quotepath=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+        ],
     )?;
     let raw = String::from_utf8_lossy(&out.stdout);
     let mut segments = raw.split('\0');
@@ -135,8 +141,7 @@ pub struct SyncStatus {
 /// rather than failing the whole call.
 pub fn get_sync_status(project_path: &str) -> Result<SyncStatus, String> {
     let branch = git(project_path, &["branch", "--show-current"]).unwrap_or_default();
-    let head_short_sha =
-        git(project_path, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    let head_short_sha = git(project_path, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
     let detached = branch.is_empty() && !head_short_sha.is_empty();
 
     let upstream = git(
@@ -163,7 +168,9 @@ pub fn get_sync_status(project_path: &str) -> Result<SyncStatus, String> {
         }
     }
 
-    let has_remote = !git(project_path, &["remote"]).unwrap_or_default().is_empty();
+    let has_remote = !git(project_path, &["remote"])
+        .unwrap_or_default()
+        .is_empty();
 
     let stash_count = git(project_path, &["stash", "list"])
         .unwrap_or_default()
@@ -485,7 +492,11 @@ pub struct PullOutcome {
 
 fn conflicted_paths(project_path: &str) -> Result<Vec<String>, String> {
     let out = git(project_path, &["diff", "--name-only", "--diff-filter=U"])?;
-    Ok(out.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+    Ok(out
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 /// Pull the current branch. Tries a fast-forward-only pull first (safe,

@@ -1,7 +1,17 @@
-import { Component, createEffect, createResource, createSignal, For, Show } from "solid-js";
-import { store, openReview, openEditorFile, openFileHistory, toggleFileSelection, clearFileSelection } from "../lib/store";
-import { getFileTree, getGitStatus, injectFileRefs, type FileEntry, type FileStatus } from "../lib/ipc";
-import { Button, Spinner, toast } from "./ui";
+import {
+  Component, createEffect, createMemo, createResource, createSignal, For, Show, type JSX,
+} from "solid-js";
+import {
+  store, openReview, openEditorFile, openFileHistory, toggleFileSelection, clearFileSelection,
+  bumpGitStatus, toggleExplorerCollapsed,
+} from "../lib/store";
+import {
+  getFileTree, getGitStatus, injectFileRefs, createEntry, renameEntry, deleteEntry, searchPromptFiles,
+  type FileEntry, type FileStatus,
+} from "../lib/ipc";
+import { Button, Spinner, toast, ContextMenu, MenuItem, MenuDivider, confirmDialog } from "./ui";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { getFileIconName, getFolderIconName, iconPath as materialIconPath } from "../lib/fileIcons";
 
 const STATUS_STYLE: Record<string, { color: string; bg: string; label: string }> = {
   A: { color: "var(--status-add)", bg: "#1a2a1e", label: "A" },
@@ -17,55 +27,61 @@ function statusKey(s: string): string | null {
   return null;
 }
 
-export function getFileIcon(filename: string): string | null {
-  const ext = filename.split('.').pop()?.toLowerCase();
-  if (!ext) return null;
-
-  const extMap: Record<string, string> = {
-    js: "javascript", mjs: "javascript", cjs: "javascript",
-    py: "python", pyw: "python",
-    java: "java", class: "java", jar: "java",
-    ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
-    cs: "csharp",
-    cpp: "cplusplus", cc: "cplusplus", cxx: "cplusplus", hpp: "cplusplus",
-    c: "c", h: "c",
-    php: "php", phtml: "php",
-    go: "go",
-    rs: "rust",
-    rb: "ruby", rbw: "ruby",
-    swift: "swift",
-    kt: "kotlin", kts: "kotlin",
-    sql: "sql",
-    sh: "bash", bash: "bash", zsh: "bash",
-    ps1: "powershell", psm1: "powershell", psd1: "powershell",
-    dart: "dart",
-    scala: "scala", sc: "scala",
-    r: "r",
-    lua: "lua",
-    hs: "haskell", lhs: "haskell",
-    ex: "elixir", exs: "elixir",
-    clj: "clojure", cljs: "clojure", cljc: "clojure", edn: "clojure",
-    pl: "perl", pm: "perl", t: "perl",
-    m: "matlab", mm: "objectivec",
-    groovy: "groovy", gvy: "groovy", gy: "groovy", gsh: "groovy",
-    jl: "julia",
-    fs: "fsharp", fsi: "fsharp", fsx: "fsharp", fsscript: "fsharp",
-    asm: "assembly", s: "assembly",
-    html: "html", htm: "html", xhtml: "html",
-    css: "css",
-    md: "markdown", markdown: "markdown",
-    xml: "xml", xsd: "xml", xsl: "xml", gpx: "xml",
-    json: "json", json5: "json",
-    yaml: "yaml", yml: "yaml",
-    svg: "svg",
-    csv: "csv",
-    toml: "toml",
-    tex: "latex", ltx: "latex", sty: "latex", cls: "latex",
-  };
-
-  const iconName = extMap[ext];
-  return iconName ? `/icons/${iconName}.svg` : null;
+/** Material Icon Theme file icon for a filename (always resolves — falls
+ *  back to the theme's generic file icon). See src/lib/fileIcons.ts. */
+export function getFileIcon(filename: string): string {
+  return materialIconPath(getFileIconName(filename));
 }
+
+/** Material Icon Theme folder icon for a folder's basename. */
+export function getFolderIcon(folderName: string, isRoot = false): string {
+  return materialIconPath(getFolderIconName(folderName, isRoot));
+}
+
+/** Vertical indent-guide lines, one per depth level, drawn as stacked
+ *  background layers so they don't disturb the row's existing flex layout.
+ *  Callers must use `background-color` (not the `background` shorthand) for
+ *  the row's own fill, since the shorthand would reset these layers. */
+function guideBackground(depth: number): JSX.CSSProperties {
+  if (depth <= 0) return {};
+  const images: string[] = [];
+  const positions: string[] = [];
+  for (let i = 0; i < depth; i++) {
+    images.push("linear-gradient(var(--border-muted), var(--border-muted))");
+    positions.push(`${8 + i * 14 + 6}px 0`);
+  }
+  return {
+    "background-image": images.join(", "),
+    "background-repeat": "no-repeat",
+    "background-size": "1px 100%",
+    "background-position": positions.join(", "),
+  };
+}
+
+const HeaderIconButton: Component<{ title: string; active?: boolean; onClick: () => void; children: JSX.Element }> = (props) => (
+  <button
+    onclick={props.onClick}
+    title={props.title}
+    style={{
+      display: "flex", "align-items": "center", "justify-content": "center",
+      width: "20px", height: "20px", "flex-shrink": 0,
+      color: props.active ? "var(--accent)" : "var(--fg-subtle)",
+      "background-color": props.active ? "var(--surface-4)" : "transparent",
+      "border-radius": "var(--radius-sm)",
+      cursor: "pointer",
+    }}
+    onmouseenter={(e) => { e.currentTarget.style.backgroundColor = "var(--surface-4)"; }}
+    onmouseleave={(e) => { e.currentTarget.style.backgroundColor = props.active ? "var(--surface-4)" : "transparent"; }}
+  >
+    {props.children}
+  </button>
+);
+
+type EditingState =
+  | { mode: "create-file" | "create-folder"; parent: string }
+  | { mode: "rename"; path: string; parent: string; originalName: string };
+
+type MenuTarget = { kind: "entry"; entry: FileEntry } | { kind: "root" };
 
 const FileTree: Component = () => {
   // Directories start collapsed; children are fetched lazily (one level at a
@@ -81,6 +97,26 @@ const FileTree: Component = () => {
   const [gitStatus] = createResource(
     () => (store.currentProject ? { path: store.currentProject.path, v: store.gitStatusVersion } : null),
     (key) => (key ? getGitStatus(key.path) : Promise.resolve([]))
+  );
+
+  const statuses = () => gitStatus() ?? [];
+
+  // ── Context menu / inline create-rename / keyboard focus state ─────────────
+  const [menu, setMenu] = createSignal<{ x: number; y: number; target: MenuTarget } | null>(null);
+  const [editing, setEditing] = createSignal<EditingState | null>(null);
+  const [editingValue, setEditingValue] = createSignal("");
+  const [focusedPath, setFocusedPath] = createSignal<string | null>(null);
+  const [filterOpen, setFilterOpen] = createSignal(false);
+  const [filterQuery, setFilterQuery] = createSignal("");
+  const rowRefs = new Map<string, HTMLDivElement>();
+
+  const [filterResults] = createResource(
+    () => {
+      const q = filterQuery().trim();
+      const path = store.fileTreePath;
+      return q && path ? { path, q } : null;
+    },
+    (key) => (key ? searchPromptFiles(key.path, key.q, 200) : Promise.resolve([]))
   );
 
   async function toggleDir(path: string) {
@@ -118,27 +154,59 @@ const FileTree: Component = () => {
     }
   }
 
-  async function revealActiveEditorFile(relPath: string) {
+  /** Reload one directory's already-fetched children (root or nested). */
+  async function reloadDir(dirPath: string) {
+    if (dirPath === store.fileTreePath) {
+      await refetchRoot();
+      return;
+    }
+    try {
+      const kids = await getFileTree(dirPath);
+      setChildrenByDir((prev) => new Map(prev).set(dirPath, kids));
+    } catch (e) {
+      toast(`Failed to refresh folder: ${String(e)}`, "error");
+    }
+  }
+
+  /** Expand every ancestor of `absPath` (loading children as needed) and
+   *  focus it, so it scrolls into view once rendered. */
+  async function revealPathInTree(absPath: string) {
     const root = store.fileTreePath;
-    if (!root || !relPath.includes("/")) return;
-    const parts = relPath.split("/").slice(0, -1);
+    if (!root || !absPath.startsWith(root)) return;
+    const rel = absPath.slice(root.length).replace(/^\//, "");
+    const parts = rel.split("/").slice(0, -1);
     let dir = root;
     for (const part of parts) {
       dir = `${dir}/${part}`;
       await ensureDirLoaded(dir);
     }
+    setFocusedPath(absPath);
   }
 
   createEffect(() => {
     const active = store.activeEditorPath;
-    if (active) void revealActiveEditorFile(active);
+    const root = store.fileTreePath;
+    if (active && root) void revealPathInTree(`${root}/${active}`);
   });
 
-  function relPath(entry: FileEntry): string {
+  // Scroll the focused row into view once it exists in the DOM.
+  createEffect(() => {
+    const path = focusedPath();
+    if (path) rowRefs.get(path)?.scrollIntoView({ block: "nearest" });
+  });
+
+  function relPathOf(path: string): string {
     const projectPath = store.fileTreePath ?? "";
-    return entry.path.startsWith(projectPath)
-      ? entry.path.slice(projectPath.length).replace(/^\//, "")
-      : entry.path;
+    return path.startsWith(projectPath) ? path.slice(projectPath.length).replace(/^\//, "") : path;
+  }
+
+  function relPath(entry: FileEntry): string {
+    return relPathOf(entry.path);
+  }
+
+  function parentOf(path: string): string {
+    const idx = path.lastIndexOf("/");
+    return idx > 0 ? path.slice(0, idx) : path;
   }
 
   function statusFor(entry: FileEntry, statuses: FileStatus[]): FileStatus | null {
@@ -184,6 +252,262 @@ const FileTree: Component = () => {
     }
   }
 
+  // ── Create / rename / delete ────────────────────────────────────────────
+
+  async function startCreate(dirPath: string, mode: "create-file" | "create-folder") {
+    setMenu(null);
+    if (dirPath !== store.fileTreePath) {
+      if (!expanded().has(dirPath)) await toggleDir(dirPath);
+      else if (!childrenByDir().has(dirPath)) await ensureDirLoaded(dirPath);
+    }
+    setEditing({ mode, parent: dirPath });
+    setEditingValue("");
+  }
+
+  function startRename(entry: FileEntry) {
+    setMenu(null);
+    setEditing({ mode: "rename", path: entry.path, parent: parentOf(entry.path), originalName: entry.name });
+    setEditingValue(entry.name);
+  }
+
+  function commitEditing() {
+    const state = editing();
+    if (!state) return;
+    const value = editingValue().trim();
+
+    if (state.mode === "rename") {
+      if (!value || value === state.originalName) { setEditing(null); return; }
+      renameEntry(state.path, value)
+        .then(async (entry) => {
+          await reloadDir(state.parent);
+          bumpGitStatus();
+          setEditing(null);
+          setFocusedPath(entry.path);
+        })
+        .catch((e) => toast(`Failed to rename: ${String(e)}`, "error"));
+      return;
+    }
+
+    if (!value) { setEditing(null); return; }
+    createEntry(state.parent, value, state.mode === "create-folder")
+      .then(async (entry) => {
+        await reloadDir(state.parent);
+        bumpGitStatus();
+        setEditing(null);
+        setFocusedPath(entry.path);
+        if (!entry.is_dir) {
+          openEditorFile(relPathOf(entry.path), entry.name).catch((e) => {
+            console.error("Failed to open new file:", e);
+          });
+        }
+      })
+      .catch((e) => toast(`Failed to create: ${String(e)}`, "error"));
+  }
+
+  async function handleDelete(entry: FileEntry) {
+    setMenu(null);
+    const message = entry.is_dir
+      ? `Permanently delete folder "${entry.name}" and everything inside it?`
+      : `Permanently delete "${entry.name}"?`;
+    const confirmed = await confirmDialog(message, "Delete");
+    if (!confirmed) return;
+    const parent = parentOf(entry.path);
+    try {
+      await deleteEntry(entry.path);
+      await reloadDir(parent);
+      bumpGitStatus();
+      if (focusedPath() === entry.path) setFocusedPath(null);
+    } catch (e) {
+      toast(`Failed to delete: ${String(e)}`, "error");
+    }
+  }
+
+  // ── Quick filter ─────────────────────────────────────────────────────────
+
+  function toggleFilter() {
+    setFilterOpen((v) => {
+      const next = !v;
+      if (!next) setFilterQuery("");
+      return next;
+    });
+  }
+
+  async function selectFilterResult(entry: FileEntry) {
+    setFilterOpen(false);
+    setFilterQuery("");
+    if (entry.is_dir) {
+      await ensureDirLoaded(entry.path);
+      await revealPathInTree(entry.path);
+    } else {
+      const base = entry.name.split("/").pop() ?? entry.name;
+      openFile({ ...entry, name: base }, statuses());
+    }
+  }
+
+  // ── Keyboard navigation ──────────────────────────────────────────────────
+
+  const visibleRows = createMemo<FileEntry[]>(() => {
+    const result: FileEntry[] = [];
+    const walk = (entries: FileEntry[]) => {
+      for (const e of entries) {
+        result.push(e);
+        if (e.is_dir && expanded().has(e.path)) {
+          const kids = childrenByDir().get(e.path);
+          if (kids) walk(kids);
+        }
+      }
+    };
+    walk(rootEntries() ?? []);
+    return result;
+  });
+
+  function onTreeKeyDown(e: KeyboardEvent) {
+    if (filterQuery().trim().length > 0) return;
+    const rows = visibleRows();
+    if (rows.length === 0) return;
+    const current = focusedPath();
+    const idx = current ? rows.findIndex((r) => r.path === current) : -1;
+
+    switch (e.key) {
+      case "ArrowDown": {
+        e.preventDefault();
+        setFocusedPath(rows[Math.min(rows.length - 1, idx + 1)].path);
+        break;
+      }
+      case "ArrowUp": {
+        e.preventDefault();
+        setFocusedPath(rows[Math.max(0, idx - 1)].path);
+        break;
+      }
+      case "ArrowRight": {
+        if (idx === -1) break;
+        e.preventDefault();
+        const row = rows[idx];
+        if (!row.is_dir) break;
+        if (!expanded().has(row.path)) {
+          void toggleDir(row.path);
+        } else {
+          const kids = childrenByDir().get(row.path);
+          if (kids && kids.length > 0) setFocusedPath(kids[0].path);
+        }
+        break;
+      }
+      case "ArrowLeft": {
+        if (idx === -1) break;
+        e.preventDefault();
+        const row = rows[idx];
+        if (row.is_dir && expanded().has(row.path)) {
+          void toggleDir(row.path);
+        } else {
+          const parent = parentOf(row.path);
+          if (rows.some((r) => r.path === parent)) setFocusedPath(parent);
+        }
+        break;
+      }
+      case "Enter": {
+        if (idx === -1) break;
+        e.preventDefault();
+        const row = rows[idx];
+        row.is_dir ? void toggleDir(row.path) : openFile(row, statuses());
+        break;
+      }
+      case "F2": {
+        if (idx === -1) break;
+        e.preventDefault();
+        startRename(rows[idx]);
+        break;
+      }
+      case "Delete":
+      case "Backspace": {
+        if (idx === -1) break;
+        e.preventDefault();
+        void handleDelete(rows[idx]);
+        break;
+      }
+    }
+  }
+
+  const menuEntry = createMemo(() => {
+    const m = menu();
+    return m && m.target.kind === "entry" ? m.target.entry : null;
+  });
+  const menuIsRoot = () => menu()?.target.kind === "root";
+
+  const NewEntryRow: Component<{ depth: number; kind: "create-file" | "create-folder" }> = (rowProps) => (
+    <div style={{
+      display: "flex", "align-items": "center", gap: "7px",
+      padding: "4px 8px",
+      "padding-left": `${8 + rowProps.depth * 14}px`,
+    }}>
+      <img
+        src={rowProps.kind === "create-folder" ? getFolderIcon(editingValue()) : getFileIcon(editingValue())}
+        style={{ width: "16px", height: "16px", "flex-shrink": 0 }}
+        alt=""
+      />
+      <input
+        value={editingValue()}
+        oninput={(e) => setEditingValue(e.currentTarget.value)}
+        ref={(el) => el.focus()}
+        onkeydown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") { e.preventDefault(); commitEditing(); }
+          else if (e.key === "Escape") { e.preventDefault(); setEditing(null); }
+        }}
+        onblur={() => commitEditing()}
+        placeholder={rowProps.kind === "create-folder" ? "Folder name" : "File name"}
+        style={{
+          flex: "1", "min-width": 0,
+          "background-color": "var(--surface-1)", border: "1px solid var(--accent)",
+          "border-radius": "var(--radius-sm)", color: "var(--fg-body)",
+          "font-family": "var(--font-mono)", "font-size": "12.5px", padding: "2px 5px",
+        }}
+      />
+    </div>
+  );
+
+  const FilterResultRow: Component<{ entry: FileEntry; statuses: FileStatus[] }> = (rowProps) => {
+    const st = () => statusFor(rowProps.entry, rowProps.statuses);
+    const stKey = () => (st() ? statusKey(st()!.status) : null);
+    const stStyle = () => (stKey() ? STATUS_STYLE[stKey()!] : null);
+
+    return (
+      <div
+        onclick={() => void selectFilterResult(rowProps.entry)}
+        title={rowProps.entry.name}
+        style={{
+          display: "flex", "align-items": "center", "justify-content": "space-between",
+          gap: "8px", padding: "5px 8px", "border-radius": "var(--radius-md)",
+          cursor: "pointer",
+          "background-color": stStyle()?.bg ?? "transparent",
+        }}
+        onmouseenter={(e) => { e.currentTarget.style.backgroundColor = "var(--surface-4)"; }}
+        onmouseleave={(e) => { e.currentTarget.style.backgroundColor = stStyle()?.bg ?? "transparent"; }}
+      >
+        <span style={{ display: "flex", gap: "6px", "align-items": "center", "min-width": 0 }}>
+          <img
+            src={rowProps.entry.is_dir ? getFolderIcon(rowProps.entry.name.split("/").pop() ?? rowProps.entry.name) : getFileIcon(rowProps.entry.name)}
+            style={{ width: "14px", height: "14px", "flex-shrink": 0 }}
+            alt=""
+          />
+          <span style={{
+            overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
+            color: stStyle()?.color ?? "var(--fg-muted)",
+          }}>
+            {rowProps.entry.name}
+          </span>
+        </span>
+        <Show when={stKey()}>
+          <span style={{
+            color: stStyle()!.color, "font-weight": "700", "font-size": "11px",
+            "font-family": "var(--font-mono)", "flex-shrink": 0,
+          }}>
+            {stStyle()!.label}
+          </span>
+        </Show>
+      </div>
+    );
+  };
+
   const FileNode: Component<{ entry: FileEntry; statuses: FileStatus[]; depth: number }> = (props) => {
     const isExpanded = () => expanded().has(props.entry.path);
     const st = () => statusFor(props.entry, props.statuses);
@@ -191,22 +515,52 @@ const FileTree: Component = () => {
     const stStyle = () => (stKey() ? STATUS_STYLE[stKey()!] : null);
     const isSelected = () => store.selectedFiles.includes(relPath(props.entry));
     const isActiveEditorFile = () => !props.entry.is_dir && store.activeEditorPath === relPath(props.entry);
+    const isFocused = () => focusedPath() === props.entry.path;
+    const isRenaming = () => {
+      const e = editing();
+      return e?.mode === "rename" && e.path === props.entry.path;
+    };
+    const creatingHere = (): "create-file" | "create-folder" | null => {
+      const e = editing();
+      return e && e.mode !== "rename" && e.parent === props.entry.path ? e.mode : null;
+    };
     const [rowHovered, setRowHovered] = createSignal(false);
 
+    // Stays populated while collapsed (not gated on isExpanded) so the
+    // collapse transition has content to animate away instead of an
+    // instant unmount.
     const childEntries = () => {
-      if (!props.entry.is_dir || !isExpanded()) return [];
+      if (!props.entry.is_dir) return [];
       return childrenByDir().get(props.entry.path) ?? [];
     };
+
+    const baseShadow = () =>
+      isActiveEditorFile() ? "inset 2px 0 0 var(--accent)"
+        : isSelected() ? "inset 2px 0 0 var(--fg-muted)"
+          : "none";
+    const rowShadow = () =>
+      isFocused()
+        ? (baseShadow() === "none" ? "inset 0 0 0 1px var(--border-strong)" : `${baseShadow()}, inset 0 0 0 1px var(--border-strong)`)
+        : baseShadow();
 
     return (
       <>
         <div
+          ref={(el) => rowRefs.set(props.entry.path, el)}
           onclick={(e: MouseEvent) => {
+            if (isRenaming()) return;
             if (!props.entry.is_dir && (e.metaKey || e.ctrlKey)) {
               toggleFileSelection(relPath(props.entry));
               return;
             }
+            setFocusedPath(props.entry.path);
             props.entry.is_dir ? toggleDir(props.entry.path) : openFile(props.entry, props.statuses);
+          }}
+          oncontextmenu={(e: MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setFocusedPath(props.entry.path);
+            setMenu({ x: e.clientX, y: e.clientY, target: { kind: "entry", entry: props.entry } });
           }}
           onmouseenter={() => setRowHovered(true)}
           onmouseleave={() => setRowHovered(false)}
@@ -216,111 +570,148 @@ const FileTree: Component = () => {
             padding: "4px 8px",
             "padding-left": `${8 + props.depth * 14}px`,
             "border-radius": "var(--radius-md)",
-            background: isActiveEditorFile()
+            "background-color": isActiveEditorFile()
               ? "rgba(88,166,255,0.14)"
               : isSelected()
                 ? "var(--surface-4)"
                 : (stStyle()?.bg ?? "transparent"),
-            "box-shadow": isActiveEditorFile()
-              ? "inset 2px 0 0 var(--accent)"
-              : isSelected()
-                ? "inset 2px 0 0 var(--fg-muted)"
-                : "none",
+            ...guideBackground(props.depth),
+            "box-shadow": rowShadow(),
             cursor: "pointer",
           }}
         >
-          <span style={{ display: "flex", gap: "7px", "align-items": "center" }}>
-            <Show when={props.entry.is_dir}>
-              <span style={{ color: "var(--fg-subtle)", "font-size": "11px" }}>
-                {isExpanded() ? "▾" : "▸"}
-              </span>
-            </Show>
-            <span style={{ color: stStyle()?.color ?? "var(--fg-muted)", display: "flex", "align-items": "center", gap: "6px" }}>
-              <Show when={props.entry.is_dir} fallback={
-                (() => {
-                  const iconPath = getFileIcon(props.entry.name);
-                  return iconPath ? (
-                    <img src={iconPath} style={{ width: "14px", height: "14px", "flex-shrink": 0 }} alt="" />
-                  ) : (
-                    <span style={{ "font-size": "13px", "line-height": 1 }}>📄</span>
-                  );
-                })()
-              }>
-                <Show
-                  when={isExpanded()}
-                  fallback={
-                    <svg data-component="Octicon" aria-hidden="true" class="octicon octicon-file-directory-fill icon-directory" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style={{ "vertical-align": "text-bottom", "flex-shrink": 0 }}><path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5a.25.25 0 0 1-.2-.1l-.9-1.2C6.07 1.26 5.55 1 5 1H1.75Z"></path></svg>
-                  }
-                >
-                  <svg data-component="Octicon" aria-hidden="true" class="octicon octicon-file-directory-open-fill icon-directory" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" display="inline-block" overflow="visible" style={{ "vertical-align": "text-bottom", "flex-shrink": 0 }}><path d="M.513 1.513A1.75 1.75 0 0 1 1.75 1h3.5c.55 0 1.07.26 1.4.7l.9 1.2a.25.25 0 0 0 .2.1H13a1 1 0 0 1 1 1v.5H2.75a.75.75 0 0 0 0 1.5h11.978a1 1 0 0 1 .994 1.117L15 13.25A1.75 1.75 0 0 1 13.25 15H1.75A1.75 1.75 0 0 1 0 13.25V2.75c0-.464.184-.91.513-1.237Z"></path></svg>
-                </Show>
+          <Show when={isRenaming()} fallback={
+            <span style={{ display: "flex", gap: "7px", "align-items": "center", "min-width": 0 }}>
+              <Show when={props.entry.is_dir}>
+                <span style={{
+                  color: "var(--fg-subtle)", "font-size": "11px",
+                  display: "inline-block", "transform-origin": "50% 50%",
+                  transform: isExpanded() ? "rotate(90deg)" : "rotate(0deg)",
+                  transition: "transform 140ms ease",
+                }}>
+                  ▸
+                </span>
               </Show>
-              {props.entry.name}
+              <span style={{ color: stStyle()?.color ?? "var(--fg-muted)", display: "flex", "align-items": "center", gap: "6px", "min-width": 0 }}>
+                <img
+                  src={props.entry.is_dir ? getFolderIcon(props.entry.name) : getFileIcon(props.entry.name)}
+                  style={{ width: "16px", height: "16px", "flex-shrink": 0 }}
+                  alt=""
+                />
+                <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
+                  {props.entry.name}
+                </span>
+              </span>
             </span>
-          </span>
-          <span style={{ display: "flex", "align-items": "center", gap: "4px" }}>
-            <Show when={!props.entry.is_dir && rowHovered()}>
-              <button
-                onclick={(e) => { e.stopPropagation(); openFileHistory(relPath(props.entry)); }}
-                title="File history"
+          }>
+            <span style={{ display: "flex", "align-items": "center", gap: "6px", flex: "1", "min-width": 0 }} onclick={(e) => e.stopPropagation()}>
+              <input
+                value={editingValue()}
+                oninput={(e) => setEditingValue(e.currentTarget.value)}
+                ref={(el) => { el.focus(); el.select(); }}
+                onkeydown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Enter") { e.preventDefault(); commitEditing(); }
+                  else if (e.key === "Escape") { e.preventDefault(); setEditing(null); }
+                }}
+                onblur={() => commitEditing()}
                 style={{
-                  color: "var(--fg-subtle)", display: "flex", "align-items": "center",
-                  padding: "2px", "border-radius": "var(--radius-sm)",
+                  flex: "1", "min-width": 0,
+                  "background-color": "var(--surface-1)", border: "1px solid var(--accent)",
+                  "border-radius": "var(--radius-sm)", color: "var(--fg-body)",
+                  "font-family": "var(--font-mono)", "font-size": "12.5px", padding: "2px 5px",
+                }}
+              />
+            </span>
+          </Show>
+          <Show when={!isRenaming()}>
+            <span style={{ display: "flex", "align-items": "center", gap: "4px", "flex-shrink": 0 }}>
+              <Show when={!props.entry.is_dir && rowHovered()}>
+                <button
+                  onclick={(e) => { e.stopPropagation(); openFileHistory(relPath(props.entry)); }}
+                  title="File history"
+                  style={{
+                    color: "var(--fg-subtle)", display: "flex", "align-items": "center",
+                    padding: "2px", "border-radius": "var(--radius-sm)",
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M12 7v5l3 3" />
+                  </svg>
+                </button>
+              </Show>
+              <Show when={stKey()}>
+              <span
+                onclick={(e) => {
+                  e.stopPropagation();
+                  if (!props.entry.is_dir) reviewFile(props.entry, props.statuses);
+                }}
+                title={props.entry.is_dir ? undefined : "Review changes"}
+                style={{
+                  color: stStyle()!.color,
+                  "font-weight": "700", "font-size": "11px",
+                  "font-family": "var(--font-mono)",
+                  padding: "1px 5px", "border-radius": "var(--radius-sm)",
+                  cursor: props.entry.is_dir ? "default" : "pointer",
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="12" cy="12" r="9" />
-                  <path d="M12 7v5l3 3" />
-                </svg>
-              </button>
-            </Show>
-            <Show when={stKey()}>
-            <span
-              onclick={(e) => {
-                e.stopPropagation();
-                if (!props.entry.is_dir) reviewFile(props.entry, props.statuses);
-              }}
-              title={props.entry.is_dir ? undefined : "Review changes"}
-              style={{
-                color: stStyle()!.color,
-                "font-weight": "700", "font-size": "11px",
-                "font-family": "var(--font-mono)",
-                padding: "1px 5px", "border-radius": "var(--radius-sm)",
-                cursor: props.entry.is_dir ? "default" : "pointer",
-              }}
-            >
-              {stStyle()!.label}
+                {stStyle()!.label}
+              </span>
+              </Show>
             </span>
-            </Show>
-          </span>
+          </Show>
         </div>
 
-        <Show when={props.entry.is_dir && isExpanded()}>
-          <For each={childEntries()}>
-            {(child) => (
-              <FileNode entry={child} statuses={props.statuses} depth={props.depth + 1} />
-            )}
-          </For>
+        {/* Always mounted (even before the first expand) so the row starts
+            at grid-template-rows: 0fr and has a real value to transition
+            from — otherwise the very first expand pops open with no
+            animation since the element didn't exist yet to animate from. */}
+        <Show when={props.entry.is_dir}>
+          <div style={{
+            display: "grid",
+            "grid-template-rows": isExpanded() ? "1fr" : "0fr",
+            transition: "grid-template-rows 160ms ease",
+          }}>
+            <div style={{ overflow: "hidden", "min-height": 0 }}>
+              <Show when={creatingHere()}>
+                {(kind) => <NewEntryRow depth={props.depth + 1} kind={kind()} />}
+              </Show>
+              <For each={childEntries()}>
+                {(child) => (
+                  <FileNode entry={child} statuses={props.statuses} depth={props.depth + 1} />
+                )}
+              </For>
+            </div>
+          </div>
         </Show>
       </>
     );
   };
 
-  const statuses = () => gitStatus() ?? [];
+  const collapsed = () => store.explorerCollapsed;
 
   return (
-    <div style={{
-      width: "262px", flex: "0 0 262px",
-      background: "var(--surface-2)",
-      "border-right": "1px solid var(--border-muted)",
-      display: "flex", "flex-direction": "column",
-      "min-height": 0,
-    }}>
+    <div
+      class="side-panel"
+      style={{
+        flex: collapsed() ? "0 0 44px" : "0 0 262px",
+        width: collapsed() ? "44px" : "262px",
+        background: "var(--surface-2)",
+        "border-right": "1px solid var(--border-muted)",
+        "min-height": 0,
+      }}
+    >
+      <div
+        class="side-panel-content"
+        classList={{ "side-panel-content-hidden": collapsed() }}
+        style={{ width: "262px" }}
+      >
       {/* Header */}
       <div style={{
         height: "38px", flex: "0 0 38px",
         display: "flex", "align-items": "center", "justify-content": "space-between",
-        padding: "0 14px",
+        padding: "0 10px 0 14px",
         "border-bottom": "1px solid var(--border-muted)",
       }}>
         <span style={{
@@ -329,48 +720,143 @@ const FileTree: Component = () => {
         }}>
           Explorer
         </span>
-        <Show when={statuses().length > 0}>
-          <span style={{
-            "font-family": "var(--font-mono)",
-            "font-size": "10px", color: "var(--fg-subtle)",
-            background: "var(--surface-4)", padding: "2px 7px", "border-radius": "var(--radius-md)",
-          }}>
-            {changedCount(statuses())} changed
-          </span>
-        </Show>
+        <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
+          <Show when={statuses().length > 0}>
+            <span style={{
+              "font-family": "var(--font-mono)",
+              "font-size": "10px", color: "var(--fg-subtle)",
+              background: "var(--surface-4)", padding: "2px 7px", "border-radius": "var(--radius-md)",
+            }}>
+              {changedCount(statuses())} changed
+            </span>
+          </Show>
+          <div style={{ display: "flex", "align-items": "center", gap: "2px" }}>
+            <HeaderIconButton title="Filter files" active={filterOpen()} onClick={toggleFilter}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="7" />
+                <path d="M21 21l-4.35-4.35" />
+              </svg>
+            </HeaderIconButton>
+            <HeaderIconButton title="Collapse all" onClick={() => setExpanded(new Set<string>())}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 9l4-4 4 4M4 15l4 4 4-4" />
+                <path d="M12 5h8M12 19h8" />
+              </svg>
+            </HeaderIconButton>
+            <HeaderIconButton
+              title="Refresh"
+              onClick={() => {
+                setChildrenByDir(new Map());
+                setExpanded(new Set<string>());
+                void refetchRoot();
+                bumpGitStatus();
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 12a9 9 0 0 1 15.4-6.4L21 8M21 3v5h-5" />
+                <path d="M21 12a9 9 0 0 1-15.4 6.4L3 16M3 21v-5h5" />
+              </svg>
+            </HeaderIconButton>
+            <HeaderIconButton title="Collapse Explorer" onClick={toggleExplorerCollapsed}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M11 17l-5-5 5-5M18 17l-5-5 5-5" />
+              </svg>
+            </HeaderIconButton>
+          </div>
+        </div>
       </div>
 
+      {/* Quick filter */}
+      <Show when={filterOpen()}>
+        <div style={{ padding: "6px 10px", "border-bottom": "1px solid var(--border-muted)" }}>
+          <input
+            value={filterQuery()}
+            oninput={(e) => setFilterQuery(e.currentTarget.value)}
+            ref={(el) => el.focus()}
+            onkeydown={(e) => {
+              if (e.key === "Escape") { e.stopPropagation(); setFilterOpen(false); setFilterQuery(""); }
+            }}
+            placeholder="Filter files…"
+            style={{
+              width: "100%", "background-color": "var(--surface-1)", border: "1px solid var(--border-default)",
+              "border-radius": "var(--radius-md)", color: "var(--fg-body)", "font-family": "var(--font-mono)",
+              "font-size": "12px", padding: "5px 8px",
+            }}
+          />
+        </div>
+      </Show>
+
       {/* File list */}
-      <div style={{
-        flex: "1", overflow: "auto",
-        padding: "8px 6px",
-        "font-family": "var(--font-mono)",
-        "font-size": "12.5px",
-      }}>
+      <div
+        tabIndex={0}
+        onkeydown={onTreeKeyDown}
+        oncontextmenu={(e: MouseEvent) => {
+          if (e.target !== e.currentTarget || !store.fileTreePath) return;
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY, target: { kind: "root" } });
+        }}
+        style={{
+          flex: "1", overflow: "auto",
+          padding: "8px 6px",
+          "font-family": "var(--font-mono)",
+          "font-size": "12.5px",
+          outline: "none",
+        }}
+      >
         <Show when={!store.fileTreePath}>
           <div style={{ padding: "16px", color: "var(--fg-subtle)", "font-size": "12px" }}>
             No project open
           </div>
         </Show>
 
-        <Show when={rootEntries.loading}>
-          <div style={{ padding: "16px 0", display: "flex", "justify-content": "center" }}>
-            <Spinner />
-          </div>
-        </Show>
+        <Show when={store.fileTreePath}>
+          <Show
+            when={filterQuery().trim().length > 0}
+            fallback={
+              <>
+                <Show when={rootEntries.loading}>
+                  <div style={{ padding: "16px 0", display: "flex", "justify-content": "center" }}>
+                    <Spinner />
+                  </div>
+                </Show>
 
-        <Show when={rootEntries.error}>
-          <div style={{ padding: "16px", "text-align": "center" }}>
-            <div style={{ color: "var(--status-del)", "font-size": "11.5px", "margin-bottom": "8px" }}>
-              {String(rootEntries.error)}
-            </div>
-            <Button size="sm" onClick={() => refetchRoot()}>Retry</Button>
-          </div>
-        </Show>
+                <Show when={rootEntries.error}>
+                  <div style={{ padding: "16px", "text-align": "center" }}>
+                    <div style={{ color: "var(--status-del)", "font-size": "11.5px", "margin-bottom": "8px" }}>
+                      {String(rootEntries.error)}
+                    </div>
+                    <Button size="sm" onClick={() => refetchRoot()}>Retry</Button>
+                  </div>
+                </Show>
 
-        <For each={rootEntries() ?? []}>
-          {(entry) => <FileNode entry={entry} statuses={statuses()} depth={0} />}
-        </For>
+                <Show when={editing() && editing()!.mode !== "rename" && editing()!.parent === store.fileTreePath}>
+                  {(() => {
+                    const e = editing() as Extract<EditingState, { mode: "create-file" | "create-folder" }>;
+                    return <NewEntryRow depth={0} kind={e.mode} />;
+                  })()}
+                </Show>
+
+                <For each={rootEntries() ?? []}>
+                  {(entry) => <FileNode entry={entry} statuses={statuses()} depth={0} />}
+                </For>
+              </>
+            }
+          >
+            <Show when={filterResults.loading}>
+              <div style={{ padding: "16px 0", display: "flex", "justify-content": "center" }}>
+                <Spinner />
+              </div>
+            </Show>
+            <For each={filterResults() ?? []}>
+              {(entry) => <FilterResultRow entry={entry} statuses={statuses()} />}
+            </For>
+            <Show when={!filterResults.loading && (filterResults() ?? []).length === 0}>
+              <div style={{ padding: "16px", color: "var(--fg-subtle)", "font-size": "11.5px", "text-align": "center" }}>
+                No matches
+              </div>
+            </Show>
+          </Show>
+        </Show>
       </div>
 
       {/* Legend / selection action bar */}
@@ -399,6 +885,102 @@ const FileTree: Component = () => {
           <Button size="sm" variant="ghost" onClick={clearFileSelection}>Clear</Button>
         </Show>
       </div>
+      </div>
+
+      {/* Collapsed rail */}
+      <div
+        class="panel-rail"
+        classList={{ "panel-rail-visible": collapsed() }}
+        onclick={toggleExplorerCollapsed}
+        title="Expand Explorer"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--fg-subtle)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+        <span class="panel-rail-label">Explorer</span>
+        <Show when={statuses().length > 0}>
+          <span style={{
+            "font-family": "var(--font-mono)",
+            "font-size": "9.5px", color: "var(--fg-subtle)",
+            background: "var(--surface-4)", padding: "2px 5px", "border-radius": "999px",
+          }}>
+            {changedCount(statuses())}
+          </span>
+        </Show>
+      </div>
+
+      {/* Context menu */}
+      <ContextMenu open={menu() !== null} onClose={() => setMenu(null)} x={menu()?.x ?? 0} y={menu()?.y ?? 0} width={210}>
+        <Show when={menuEntry()}>
+          {(entry) => {
+            const changed = () => !!statusFor(entry(), statuses());
+            const selected = () => store.selectedFiles.includes(relPath(entry()));
+            return (
+              <>
+                <Show when={!entry().is_dir}>
+                  <MenuItem onSelect={() => { setMenu(null); openFile(entry(), statuses()); }} style={{ padding: "7px 9px" }}>Open</MenuItem>
+                  <Show when={changed()}>
+                    <MenuItem onSelect={() => { setMenu(null); reviewFile(entry(), statuses()); }} style={{ padding: "7px 9px" }}>Review changes</MenuItem>
+                  </Show>
+                  <MenuItem onSelect={() => { setMenu(null); openFileHistory(relPath(entry())); }} style={{ padding: "7px 9px" }}>File history</MenuItem>
+                  <MenuItem onSelect={() => { setMenu(null); toggleFileSelection(relPath(entry())); }} style={{ padding: "7px 9px" }}>
+                    {selected() ? "Remove from selection" : "Add to selection"}
+                  </MenuItem>
+                  <MenuDivider />
+                </Show>
+                <Show when={entry().is_dir}>
+                  <MenuItem onSelect={() => void startCreate(entry().path, "create-file")} style={{ padding: "7px 9px" }}>New File…</MenuItem>
+                  <MenuItem onSelect={() => void startCreate(entry().path, "create-folder")} style={{ padding: "7px 9px" }}>New Folder…</MenuItem>
+                  <Show when={expanded().has(entry().path)}>
+                    <MenuItem onSelect={() => { setMenu(null); void toggleDir(entry().path); }} style={{ padding: "7px 9px" }}>Collapse</MenuItem>
+                  </Show>
+                  <MenuDivider />
+                </Show>
+                <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(entry().path); }} style={{ padding: "7px 9px" }}>Copy path</MenuItem>
+                <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(relPath(entry())); }} style={{ padding: "7px 9px" }}>Copy relative path</MenuItem>
+                <MenuItem
+                  onSelect={() => {
+                    setMenu(null);
+                    revealItemInDir(entry().path).catch((e) => toast(`Failed to reveal: ${String(e)}`, "error"));
+                  }}
+                  style={{ padding: "7px 9px" }}
+                >
+                  Reveal in Finder
+                </MenuItem>
+                <MenuDivider />
+                <MenuItem onSelect={() => startRename(entry())} style={{ padding: "7px 9px" }}>Rename</MenuItem>
+                <MenuItem onSelect={() => void handleDelete(entry())} style={{ padding: "7px 9px", color: "var(--status-del)" }}>Delete</MenuItem>
+              </>
+            );
+          }}
+        </Show>
+        <Show when={menuIsRoot()}>
+          <MenuItem onSelect={() => void startCreate(store.fileTreePath!, "create-file")} style={{ padding: "7px 9px" }}>New File…</MenuItem>
+          <MenuItem onSelect={() => void startCreate(store.fileTreePath!, "create-folder")} style={{ padding: "7px 9px" }}>New Folder…</MenuItem>
+          <MenuDivider />
+          <MenuItem
+            onSelect={() => {
+              setMenu(null);
+              revealItemInDir(store.fileTreePath!).catch((e) => toast(`Failed to reveal: ${String(e)}`, "error"));
+            }}
+            style={{ padding: "7px 9px" }}
+          >
+            Reveal in Finder
+          </MenuItem>
+          <MenuItem
+            onSelect={() => {
+              setMenu(null);
+              setChildrenByDir(new Map());
+              setExpanded(new Set<string>());
+              void refetchRoot();
+              bumpGitStatus();
+            }}
+            style={{ padding: "7px 9px" }}
+          >
+            Refresh
+          </MenuItem>
+        </Show>
+      </ContextMenu>
     </div>
   );
 };

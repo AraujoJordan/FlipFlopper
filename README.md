@@ -4,7 +4,7 @@
 
 # FlipFlopper
 
-**One cockpit. Every CLI coding agent. Zero terminal-tab chaos.**
+**One AI IDE. Every CLI coding agent. Zero terminal-tab chaos.**
 
 Because juggling Claude Code, Codex, agy, and Aider in seven different
 terminal windows was making you flip out (and then flop back).
@@ -27,8 +27,8 @@ terminal windows was making you flip out (and then flop back).
 
 ## What is this?
 
-FlipFlopper is a cross-platform desktop app that wraps your favorite CLI AI
-coding agents in a GUI that doesn't make you cry. It is, naturally,
+FlipFlopper is a cross-platform AI IDE that wraps your favorite CLI AI
+coding agents in a unified developer workspace that doesn't make you cry. It is, naturally,
 **blazingly fast** (it's written in Rust, we are legally required to tell you
 this), uses **zero-cost abstractions**, and is **memory safe** (no agents were
 segfaulted in the making of this app).

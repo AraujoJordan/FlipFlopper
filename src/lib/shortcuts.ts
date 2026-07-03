@@ -1,4 +1,7 @@
-import { store, setActiveTab, removeTab, closeEditorFile, closeReview, selectWorkspaceMode } from "./store";
+import {
+  store, setActiveTab, removeTab, closeEditorFile, closeReview, selectWorkspaceMode,
+  toggleExplorerCollapsed, toggleGitPanelCollapsed,
+} from "./store";
 
 // Global keyboard shortcuts. Installed once from App's onMount as a
 // capture-phase window listener so handled keys never reach xterm or
@@ -6,20 +9,20 @@ import { store, setActiveTab, removeTab, closeEditorFile, closeReview, selectWor
 // capture-phase stopPropagation() intercepts before the event gets there.
 // We deliberately never bind Mod-S: CodeMirror owns that for save.
 
-type ShortcutAction = "new-agent-menu" | "focus-prompt" | "omni-search";
+type ShortcutAction = "new-agent-menu" | "focus-prompt" | "omni-search" | "prompt-type-through";
 
-const actionHandlers = new Map<ShortcutAction, () => void>();
+const actionHandlers = new Map<ShortcutAction, (payload?: string) => void>();
 
 /** Components register handlers for actions that need a local ref/signal. */
-export function registerShortcutHandler(action: ShortcutAction, fn: () => void): () => void {
+export function registerShortcutHandler(action: ShortcutAction, fn: (payload?: string) => void): () => void {
   actionHandlers.set(action, fn);
   return () => {
     if (actionHandlers.get(action) === fn) actionHandlers.delete(action);
   };
 }
 
-function runAction(action: ShortcutAction) {
-  actionHandlers.get(action)?.();
+export function runAction(action: ShortcutAction, payload?: string) {
+  actionHandlers.get(action)?.(payload);
 }
 
 const isMac = navigator.platform.toLowerCase().includes("mac");
@@ -96,6 +99,18 @@ export function installGlobalShortcuts(): () => void {
     if (mod && !e.altKey && (e.key === "1" || e.key === "2" || e.key === "3")) {
       e.preventDefault(); e.stopPropagation();
       selectWorkspaceMode(e.key === "1" ? "code" : e.key === "2" ? "agent" : "review");
+      return;
+    }
+
+    if (mod && !e.shiftKey && e.key.toLowerCase() === "b") {
+      e.preventDefault(); e.stopPropagation();
+      toggleExplorerCollapsed();
+      return;
+    }
+
+    if (mod && e.shiftKey && e.key.toLowerCase() === "g") {
+      e.preventDefault(); e.stopPropagation();
+      toggleGitPanelCollapsed();
       return;
     }
 

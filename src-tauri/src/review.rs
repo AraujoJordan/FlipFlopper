@@ -322,8 +322,14 @@ pub fn get_review_diff(
             } else {
                 EMPTY_TREE_SHA.to_string()
             };
-            let mut args: Vec<&str> =
-                vec!["-c", "core.quotepath=false", "diff", "--unified=3", "--cached", &before];
+            let mut args: Vec<&str> = vec![
+                "-c",
+                "core.quotepath=false",
+                "diff",
+                "--unified=3",
+                "--cached",
+                &before,
+            ];
             if let Some(ref p) = path {
                 args.push("--");
                 args.push(p.as_str());

@@ -21,7 +21,7 @@ use lsp::{LspCompletion, LspDefinition, LspDiagnostic, LspManager, LspStatus};
 use project::{FileEntry, ProjectInfo, SkillEntry, TextMatch};
 use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
-use runner::RunTarget;
+use runner::{RunTarget, ValidationTarget};
 use tools::ToolInfo;
 
 // Bridge a PtyEvent receiver to Tauri events on the given session_id.
@@ -345,6 +345,21 @@ fn inject_file_refs(
     pty::inject_refs(&state, &session_id, &paths)
 }
 
+#[tauri::command]
+fn create_entry(parent_path: String, name: String, is_dir: bool) -> Result<FileEntry, String> {
+    project::create_entry(&parent_path, &name, is_dir)
+}
+
+#[tauri::command]
+fn rename_entry(path: String, new_name: String) -> Result<FileEntry, String> {
+    project::rename_entry(&path, &new_name)
+}
+
+#[tauri::command]
+fn delete_entry(path: String) -> Result<(), String> {
+    project::delete_entry(&path)
+}
+
 // ════════════════════════════════════════════════
 // Editor commands
 // ════════════════════════════════════════════════
@@ -602,6 +617,26 @@ fn run_project(
     Ok(session_id)
 }
 
+#[tauri::command]
+fn detect_validation_targets(project_path: String) -> Result<Vec<ValidationTarget>, String> {
+    runner::detect_validation_targets(&project_path)
+}
+
+#[tauri::command]
+fn validate_project(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    target_id: Option<String>,
+) -> Result<String, String> {
+    let target = runner::resolve_validation_command(&project_path, target_id.as_deref())?;
+    let label = format!("validate:{}", target.kind);
+    let (session_id, rx) =
+        pty::spawn_shell_command(&state, &label, &target.command, &project_path)?;
+    bridge_pty(app, session_id.clone(), rx);
+    Ok(session_id)
+}
+
 // ════════════════════════════════════════════════
 // Native diff review
 // ════════════════════════════════════════════════
@@ -718,6 +753,9 @@ pub fn run() {
             search_project_text,
             list_prompt_skills,
             inject_file_refs,
+            create_entry,
+            rename_entry,
+            delete_entry,
             // Editor
             read_file_text,
             write_file_text,
@@ -757,6 +795,8 @@ pub fn run() {
             // Runner
             detect_run_targets,
             run_project,
+            detect_validation_targets,
+            validate_project,
             // Review
             get_review_diff,
             // Handoff

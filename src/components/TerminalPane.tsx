@@ -3,6 +3,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { onPtyOutput, onPtyExit, ptyInput, ptyResize } from "../lib/ipc";
+import { runAction } from "../lib/shortcuts";
+import { clearAgentMode, cycleAgentModeOptimistic, sniffAgentMode } from "../lib/store";
 
 interface Props {
   sessionId: string;
@@ -53,12 +55,29 @@ const TerminalPane: Component<Props> = (props) => {
     fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(containerRef);
+    terminal.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== "keydown") return true;
+      if (ev.key === "Tab" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        cycleAgentModeOptimistic(props.sessionId);
+        return true;
+      }
+      const printable = ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey;
+      if (printable) {
+        runAction("prompt-type-through", ev.key);
+        return false;
+      }
+      return true;
+    });
 
     fitAndResize();
-    if (props.active) terminal.focus();
+    if (props.active) runAction("focus-prompt");
 
-    unlisten = await onPtyOutput(props.sessionId, (data) => terminal.write(data));
+    unlisten = await onPtyOutput(props.sessionId, (data) => {
+      terminal.write(data);
+      sniffAgentMode(props.sessionId, data);
+    });
     unlistenExit = await onPtyExit(props.sessionId, () => {
+      clearAgentMode(props.sessionId);
       terminal.writeln("\r\n\x1b[90m[process exited]\x1b[0m");
     });
 
@@ -74,7 +93,7 @@ const TerminalPane: Component<Props> = (props) => {
 
   createEffect(() => {
     if (props.active && fitAddon) {
-      setTimeout(() => { fitAndResize(); terminal?.focus(); }, 0);
+      setTimeout(() => { fitAndResize(); runAction("focus-prompt"); }, 0);
     }
   });
 

@@ -222,13 +222,72 @@ textarea:focus-visible {
   transition-delay: 0s;
 }
 
+/* ── Collapsible side panels (Explorer / Source Control) ─────────────────── */
+
+.side-panel {
+  position: relative;
+  overflow: hidden;
+  transition: flex-basis 200ms ease, width 200ms ease, min-width 200ms ease;
+}
+
+.side-panel-content {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transition: opacity 160ms ease;
+}
+
+.side-panel-content-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.panel-rail {
+  position: absolute;
+  inset: 0;
+  width: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding-top: 14px;
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  transition: opacity 160ms ease, background-color 120ms ease;
+}
+
+.panel-rail-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.panel-rail:hover {
+  background-color: var(--surface-3);
+}
+
+.panel-rail-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 11px;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .workspace-mode-button,
   .workspace-mode-button svg,
   .workspace-pane,
   .app-yolo-mode,
   .yolo-toggle,
-  .yolo-toggle-active {
+  .yolo-toggle-active,
+  .side-panel,
+  .side-panel-content,
+  .panel-rail {
     transition: none;
     animation: none;
   }

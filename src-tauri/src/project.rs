@@ -228,8 +228,93 @@ pub fn list_dir(dir_path: &str) -> Result<Vec<FileEntry>, String> {
     Ok(entries)
 }
 
+/// Reject empty names, `.`/`..`, and anything containing a path separator —
+/// these commands operate on a single entry within a known parent directory.
+fn validate_entry_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err("Invalid name".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("Name cannot contain a path separator".to_string());
+    }
+    Ok(())
+}
+
+/// Create a new file or directory inside `parent_path`.
+pub fn create_entry(parent_path: &str, name: &str, is_dir: bool) -> Result<FileEntry, String> {
+    validate_entry_name(name)?;
+
+    let parent = PathBuf::from(parent_path);
+    if !parent.is_dir() {
+        return Err(format!("Not a directory: {parent_path}"));
+    }
+
+    let target = parent.join(name);
+    if target.exists() {
+        return Err(format!("\"{name}\" already exists"));
+    }
+
+    if is_dir {
+        fs::create_dir(&target).map_err(|e| format!("Failed to create folder: {e}"))?;
+    } else {
+        fs::write(&target, b"").map_err(|e| format!("Failed to create file: {e}"))?;
+    }
+
+    Ok(FileEntry {
+        name: name.to_string(),
+        path: target.to_string_lossy().to_string(),
+        is_dir,
+    })
+}
+
+/// Rename a file or directory in place (same parent directory).
+pub fn rename_entry(path: &str, new_name: &str) -> Result<FileEntry, String> {
+    validate_entry_name(new_name)?;
+
+    let source = PathBuf::from(path);
+    if !source.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+    let parent = source
+        .parent()
+        .ok_or_else(|| "Cannot rename the root directory".to_string())?;
+
+    let target = parent.join(new_name);
+    if target.exists() {
+        return Err(format!("\"{new_name}\" already exists"));
+    }
+
+    let is_dir = source.is_dir();
+    fs::rename(&source, &target).map_err(|e| format!("Failed to rename: {e}"))?;
+
+    Ok(FileEntry {
+        name: new_name.to_string(),
+        path: target.to_string_lossy().to_string(),
+        is_dir,
+    })
+}
+
+/// Permanently delete a file or directory (no trash/recycle bin support).
+pub fn delete_entry(path: &str) -> Result<(), String> {
+    let target = PathBuf::from(path);
+    if !target.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+
+    if target.is_dir() {
+        fs::remove_dir_all(&target).map_err(|e| format!("Failed to delete folder: {e}"))
+    } else {
+        fs::remove_file(&target).map_err(|e| format!("Failed to delete file: {e}"))
+    }
+}
+
 /// Search project files and directories for prompt autocomplete.
-/// Returned names are project-relative paths using `/`, ready for `@path` refs.
+/// Bare queries search the project recursively. Explicit filesystem queries
+/// (`~/`, `/...`, `../...`, Windows absolute paths) browse that location.
+/// Returned names use `/`, ready for `@path` refs.
 pub fn search_files(
     project_path: &str,
     query: &str,
@@ -240,7 +325,12 @@ pub fn search_files(
         return Err(format!("Not a directory: {project_path}"));
     }
 
-    let normalized_query = query.trim_start_matches('@').trim_start_matches('/');
+    let query = query.trim_start_matches('@');
+    if let Some(explicit) = explicit_file_query(project_path, query, dirs::home_dir().as_deref())? {
+        return search_explicit_file_query(explicit, limit);
+    }
+
+    let normalized_query = query.trim_start_matches('/');
     if normalized_query.is_empty() {
         return list_dir(project_path)
             .map(|entries| entries.into_iter().take(limit.max(1)).collect());
@@ -300,6 +390,247 @@ pub fn search_files(
         .take(limit.max(1))
         .map(|(_, entry)| entry)
         .collect())
+}
+
+struct ExplicitFileQuery {
+    parent: PathBuf,
+    display_parent: String,
+    partial: String,
+}
+
+fn explicit_file_query(
+    project_path: &str,
+    query: &str,
+    home_dir: Option<&Path>,
+) -> Result<Option<ExplicitFileQuery>, String> {
+    let normalized = query.replace('\\', "/");
+    let ends_with_separator = normalized.ends_with('/');
+
+    let (absolute_text, display_text) = if normalized == "~" || normalized.starts_with("~/") {
+        let Some(home) = home_dir else {
+            return Ok(Some(ExplicitFileQuery {
+                parent: PathBuf::new(),
+                display_parent: "~".to_string(),
+                partial: String::new(),
+            }));
+        };
+        let rest = normalized.strip_prefix("~/").unwrap_or("");
+        (
+            home.join(rest),
+            if normalized == "~" {
+                "~".to_string()
+            } else {
+                normalized.trim_end_matches('/').to_string()
+            },
+        )
+    } else if normalized.starts_with("../") || normalized == ".." {
+        (
+            Path::new(project_path).join(&normalized),
+            normalized.trim_end_matches('/').to_string(),
+        )
+    } else if is_absolute_query(&normalized) {
+        (
+            PathBuf::from(&normalized),
+            if normalized == "/" {
+                "/".to_string()
+            } else {
+                normalized.trim_end_matches('/').to_string()
+            },
+        )
+    } else {
+        return Ok(None);
+    };
+
+    if ends_with_separator || absolute_text.is_dir() {
+        return Ok(Some(ExplicitFileQuery {
+            parent: absolute_text,
+            display_parent: display_text,
+            partial: String::new(),
+        }));
+    }
+
+    let parent = absolute_text
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(PathBuf::new);
+    let partial = absolute_text
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let display_parent = display_text
+        .rsplit_once('/')
+        .map(|(parent, _)| {
+            if parent.is_empty() && display_text.starts_with('/') {
+                "/".to_string()
+            } else {
+                parent.to_string()
+            }
+        })
+        .unwrap_or_else(|| {
+            if display_text.starts_with('/') {
+                "/".to_string()
+            } else {
+                String::new()
+            }
+        });
+
+    Ok(Some(ExplicitFileQuery {
+        parent,
+        display_parent,
+        partial,
+    }))
+}
+
+fn is_absolute_query(query: &str) -> bool {
+    query.starts_with('/') || is_windows_absolute_query(query)
+}
+
+fn is_windows_absolute_query(query: &str) -> bool {
+    let bytes = query.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+fn search_explicit_file_query(
+    query: ExplicitFileQuery,
+    limit: usize,
+) -> Result<Vec<FileEntry>, String> {
+    if !query.parent.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let partial_lower = query.partial.to_lowercase();
+    let mut entries = Vec::new();
+    let read_dir = match fs::read_dir(&query.parent) {
+        Ok(read_dir) => read_dir,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    for result in read_dir {
+        let Ok(entry) = result else {
+            continue;
+        };
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !partial_lower.is_empty() && !name.to_lowercase().starts_with(&partial_lower) {
+            continue;
+        }
+        let is_dir = path.is_dir();
+        entries.push(FileEntry {
+            name: join_display_path(&query.display_parent, &name),
+            path: path.to_string_lossy().replace('\\', "/"),
+            is_dir,
+        });
+    }
+
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    Ok(entries.into_iter().take(limit.max(1)).collect())
+}
+
+fn join_display_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else if parent == "/" {
+        format!("/{child}")
+    } else {
+        format!("{}/{child}", parent.trim_end_matches('/'))
+    }
+}
+
+#[cfg(test)]
+mod prompt_file_search_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("flipflopper-{name}-{}-{id}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn bare_queries_stay_project_relative() {
+        let root = temp_root("project-relative");
+        let project = root.join("project");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("src").join("main.rs"), "fn main() {}").unwrap();
+
+        let matches = search_files(project.to_str().unwrap(), "src/ma", 10).unwrap();
+
+        assert!(matches.iter().any(|entry| entry.name == "src/main.rs"));
+        assert!(matches.iter().all(|entry| !entry.name.starts_with('/')));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parent_queries_browse_outside_project() {
+        let root = temp_root("parent-query");
+        let project = root.join("project");
+        let sibling = root.join("sibling");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+        fs::write(sibling.join("note.txt"), "outside").unwrap();
+
+        let matches = search_files(project.to_str().unwrap(), "../sibling/", 10).unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "../sibling/note.txt");
+        assert!(matches[0].path.ends_with("/sibling/note.txt"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn absolute_queries_return_absolute_prompt_names() {
+        let root = temp_root("absolute-query");
+        let project = root.join("project");
+        let downloads = root.join("Downloads");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&downloads).unwrap();
+        fs::write(downloads.join("file.pdf"), "pdf").unwrap();
+
+        let query = format!("{}/", downloads.to_string_lossy().replace('\\', "/"));
+        let matches = search_files(project.to_str().unwrap(), &query, 10).unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].name,
+            format!(
+                "{}/file.pdf",
+                downloads.to_string_lossy().replace('\\', "/")
+            )
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tilde_queries_use_tilde_prompt_names() {
+        let root = temp_root("tilde-query");
+        let home = root.join("home");
+        fs::create_dir_all(home.join("Downloads")).unwrap();
+        fs::write(home.join("Downloads").join("receipt.pdf"), "pdf").unwrap();
+
+        let query = explicit_file_query("/tmp/project", "~/Downloads/", Some(&home))
+            .unwrap()
+            .unwrap();
+        let matches = search_explicit_file_query(query, 10).unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "~/Downloads/receipt.pdf");
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// Search project text with .gitignore-aware walking.

@@ -1,5 +1,5 @@
 import { Component, createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { store, bumpGitStatus } from "../lib/store";
+import { store, bumpGitStatus, cycleAgentModeOptimistic } from "../lib/store";
 import {
   autoCommit,
   ensureWorkBranch,
@@ -15,12 +15,13 @@ import { getFileIcon } from "./FileTree";
 import { NewAgentMenu } from "./AgentBar";
 import { toast } from "./ui";
 import { registerShortcutHandler } from "../lib/shortcuts";
+import { AGENT_SLASH_COMMANDS, agentModeLabel } from "../lib/agentMeta";
 
-type CompletionKind = "file" | "skill";
+type CompletionKind = "file" | "skill" | "command";
 
 interface CompletionToken {
   kind: CompletionKind;
-  marker: "@" | "/";
+  marker: "@" | "/" | "\\";
   start: number;
   end: number;
   query: string;
@@ -31,16 +32,26 @@ interface CompletionItem {
   label: string;
   value: string;
   detail: string;
+  marker?: "/" | "\\";
   isDir?: boolean;
 }
 
+const NAV_SEQ: Record<string, string> = {
+  ArrowUp: "\x1b[A",
+  ArrowDown: "\x1b[B",
+  ArrowRight: "\x1b[C",
+  ArrowLeft: "\x1b[D",
+  Enter: "\r",
+  Escape: "\x1b",
+};
+
 function activeCompletionToken(text: string, caret: number): CompletionToken | null {
   const beforeCaret = text.slice(0, caret);
-  const match = /(^|\s)([@/][^\s]*)$/.exec(beforeCaret);
+  const match = /(^|\s)([@/\\][^\s]*)$/.exec(beforeCaret);
   if (!match) return null;
 
   const token = match[2];
-  const marker = token[0] as "@" | "/";
+  const marker = token[0] as "@" | "/" | "\\";
   const start = beforeCaret.length - token.length;
 
   return {
@@ -71,6 +82,8 @@ const FileSuggestionIcon: Component<{ item: CompletionItem }> = (props) => {
   const iconPath = () => props.item.kind === "file" && !props.item.isDir
     ? getFileIcon(fileLabel(props.item.value))
     : null;
+  const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
+  const commandColor = () => agentColor(activeTab()?.agentId ?? "claude");
 
   return (
     <span style={{
@@ -78,7 +91,7 @@ const FileSuggestionIcon: Component<{ item: CompletionItem }> = (props) => {
       display: "flex", "align-items": "center", "justify-content": "center",
       flex: "0 0 auto", color: "#79c0ff",
     }}>
-      <Show when={props.item.kind === "skill"} fallback={
+      <Show when={props.item.kind === "skill" || props.item.kind === "command"} fallback={
         <Show when={props.item.isDir} fallback={
           <Show when={iconPath()} fallback={
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -97,13 +110,13 @@ const FileSuggestionIcon: Component<{ item: CompletionItem }> = (props) => {
         <span style={{
           width: "20px", height: "20px",
           "border-radius": "6px",
-          background: "#1a2636",
-          color: "#79c0ff",
+          background: props.item.kind === "command" ? `${commandColor()}22` : "#1a2636",
+          color: props.item.kind === "command" ? commandColor() : "#79c0ff",
           display: "flex", "align-items": "center", "justify-content": "center",
           "font-family": "'JetBrains Mono', monospace",
           "font-size": "13px", "font-weight": "700",
         }}>
-          /
+          {props.item.marker ?? "/"}
         </span>
       </Show>
     </span>
@@ -122,12 +135,28 @@ const PromptComposer: Component = () => {
   let newAgentToggleRef: HTMLButtonElement | undefined;
 
   onMount(() => {
-    const unregister = registerShortcutHandler("focus-prompt", () => textareaRef?.focus());
-    onCleanup(unregister);
+    const unregisterFocus = registerShortcutHandler("focus-prompt", () => textareaRef?.focus());
+    const unregisterTypeThrough = registerShortcutHandler("prompt-type-through", (payload) => {
+      textareaRef?.focus();
+      if (payload) insertAtCaret(payload);
+    });
+    onCleanup(() => {
+      unregisterFocus();
+      unregisterTypeThrough();
+    });
   });
 
   const activeTab = () => store.tabs.find((t) => t.sessionId === store.activeTabId);
   const activeColor = () => activeTab() ? agentColor(activeTab()!.agentId) : "#8b949e";
+  const agentMode = createMemo(() => {
+    const tab = activeTab();
+    return tab ? store.agentModes[tab.sessionId] : undefined;
+  });
+  const modeLabel = createMemo(() => {
+    const tab = activeTab();
+    const mode = agentMode();
+    return tab && mode && mode !== "normal" ? agentModeLabel(tab.agentId, mode) : null;
+  });
   const placeholder = () => {
     const tab = activeTab();
     if (tab) return `Prompt ${tab.label}`;
@@ -177,6 +206,28 @@ const PromptComposer: Component = () => {
       }));
   });
 
+  const commandItems = createMemo<CompletionItem[]>(() => {
+    const token = completionToken();
+    const tab = activeTab();
+    if (token?.kind !== "skill" || !tab) return [];
+
+    const query = token.query.toLowerCase();
+    return (AGENT_SLASH_COMMANDS[tab.agentId] ?? [])
+      .filter((command) => (command.marker ?? "/") === token.marker)
+      .filter((command) => {
+        const name = command.name.toLowerCase();
+        return !query || name.startsWith(query) || name.includes(query);
+      })
+      .slice(0, 12)
+      .map((command) => ({
+        kind: "command",
+        label: command.name,
+        value: command.name,
+        detail: command.description,
+        marker: command.marker,
+      }));
+  });
+
   const fileItems = createMemo<CompletionItem[]>(() => {
     const token = completionToken();
     if (token?.kind !== "file") return [];
@@ -193,7 +244,7 @@ const PromptComposer: Component = () => {
   const completionItems = createMemo(() => {
     const token = completionToken();
     if (!token) return [];
-    return token.kind === "file" ? fileItems() : skillItems();
+    return token.kind === "file" ? fileItems() : [...commandItems(), ...skillItems()].slice(0, 12);
   });
 
   const showCompletions = () =>
@@ -236,12 +287,19 @@ const PromptComposer: Component = () => {
     if (!token) return;
 
     const suffix = item.kind === "file" && item.isDir ? "/" : " ";
-    const replacement = `${token.marker}${item.value}${suffix}`;
+    const replacement = `${item.marker ?? token.marker}${item.value}${suffix}`;
     const next = `${value().slice(0, token.start)}${replacement}${value().slice(token.end)}`;
     const caret = token.start + replacement.length;
     setValue(next);
     setDismissedTokenKey(null);
     focusAt(caret);
+  }
+
+  function cycleActiveAgentMode() {
+    const tab = activeTab();
+    if (!tab) return;
+    ptyInput(tab.sessionId, "\x1b[Z").catch(console.error);
+    cycleAgentModeOptimistic(tab.sessionId);
   }
 
   async function pickFile() {
@@ -309,6 +367,17 @@ const PromptComposer: Component = () => {
   }
 
   function handleKeyDown(e: KeyboardEvent) {
+    if (e.key === "Tab" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      const tab = activeTab();
+      if (tab) {
+        ptyInput(tab.sessionId, "\x1b[Z").catch(console.error);
+        cycleAgentModeOptimistic(tab.sessionId);
+      }
+      return;
+    }
+
     if (showCompletions()) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -330,6 +399,21 @@ const PromptComposer: Component = () => {
         setDismissedTokenKey(completionTokenKey());
         return;
       }
+    }
+
+    const tab = activeTab();
+    const seq = NAV_SEQ[e.key];
+    if (
+      tab &&
+      seq &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.shiftKey &&
+      (value().length === 0 || e.altKey)
+    ) {
+      e.preventDefault();
+      ptyInput(tab.sessionId, seq).catch(console.error);
+      return;
     }
 
     if (e.key === "Enter" && !e.shiftKey) {
@@ -402,7 +486,9 @@ const PromptComposer: Component = () => {
                           "text-overflow": "ellipsis",
                           "white-space": "nowrap",
                         }}>
-                          {item.kind === "skill" ? `/${item.label}` : item.label}
+                          {item.kind === "skill" || item.kind === "command"
+                            ? `${item.marker ?? "/"}${item.label}`
+                            : item.label}
                         </span>
                         <Show when={item.isDir}>
                           <span style={{ color: "var(--fg-subtle)", "font-size": "11px" }}>/</span>
@@ -519,6 +605,29 @@ const PromptComposer: Component = () => {
             overflow: "auto",
           }}
         />
+
+        <Show when={modeLabel()}>
+          {(label) => (
+            <button
+              type="button"
+              onclick={cycleActiveAgentMode}
+              title="Shift+Tab to cycle mode"
+              style={{
+                "font-family": "'JetBrains Mono', monospace",
+                "font-size": "10.5px",
+                color: activeColor(),
+                border: `1px solid ${activeColor()}66`,
+                background: `${activeColor()}14`,
+                "border-radius": "6px",
+                padding: "3px 8px",
+                flex: "0 0 auto",
+                cursor: "pointer",
+              }}
+            >
+              {label()}
+            </button>
+          )}
+        </Show>
 
         <Show when={!activeTab()}>
           <span style={{

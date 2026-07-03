@@ -26,6 +26,22 @@ struct Candidate {
     target: RunTarget,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationTarget {
+    pub id: String,
+    pub label: String,
+    pub command: String,
+    pub kind: String,
+    pub category: String,
+}
+
+#[derive(Debug, Clone)]
+struct ValidationCandidate {
+    tier: u8,
+    order: usize,
+    target: ValidationTarget,
+}
+
 #[derive(Debug, Clone, Default)]
 struct PackageJson {
     deps: HashSet<String>,
@@ -191,6 +207,14 @@ impl ProjectFacts {
         let pyproject = self.pyproject.as_deref().unwrap_or("").to_ascii_lowercase();
         let requirements = self.requirements.to_ascii_lowercase();
         pyproject.contains(&needle) || requirements.contains(&needle)
+    }
+
+    fn has_python_tool_config(&self, name: &str) -> bool {
+        let Some(pyproject) = self.pyproject.as_deref() else {
+            return false;
+        };
+        let needle = format!("[tool.{name}");
+        pyproject.to_ascii_lowercase().contains(&needle)
     }
 
     fn is_poetry_project(&self) -> bool {
@@ -950,6 +974,544 @@ pub fn resolve_run_command(
     Ok(target)
 }
 
+pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTarget>, String> {
+    let root = PathBuf::from(project_path);
+    if !root.is_dir() {
+        return Err(format!("Project path is not a directory: {project_path}"));
+    }
+
+    let facts = ProjectFacts::new(root);
+    let js = facts.js_package_manager();
+    let mut candidates: Vec<ValidationCandidate> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut order = 0usize;
+
+    for script in [
+        "test",
+        "test:unit",
+        "unit",
+        "lint",
+        "typecheck",
+        "type-check",
+        "check",
+        "validate",
+        "build",
+    ] {
+        if facts.pkg_script(script).is_some() {
+            let category = validation_category(script);
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                10,
+                &format!("npm-script:{script}"),
+                &validation_script_label(script),
+                &format!("{} {script}", js.pm_run),
+                "node",
+                category,
+            );
+        }
+    }
+
+    for task in ["test", "lint", "check", "fmt", "format"] {
+        if facts.deno_task(task) {
+            let category = if matches!(task, "fmt" | "format") {
+                "format"
+            } else {
+                validation_category(task)
+            };
+            let command = if matches!(task, "fmt" | "format") {
+                format!("deno task {task}")
+            } else {
+                format!("deno task {task}")
+            };
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                15,
+                &format!("deno-task:{task}"),
+                &validation_script_label(task),
+                &command,
+                "deno",
+                category,
+            );
+        }
+    }
+
+    if (facts.exists("deno.json") || facts.exists("deno.jsonc")) && !seen.contains("deno-check") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            35,
+            "deno-check",
+            "Deno check",
+            "deno check .",
+            "deno",
+            "typecheck",
+        );
+    }
+
+    if facts.exists("Cargo.toml") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "cargo-test",
+            "Cargo test",
+            "cargo test",
+            "rust",
+            "test",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            25,
+            "cargo-clippy",
+            "Cargo clippy",
+            "cargo clippy --all-targets --all-features",
+            "rust",
+            "lint",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            25,
+            "cargo-fmt-check",
+            "Cargo fmt check",
+            "cargo fmt --all -- --check",
+            "rust",
+            "format",
+        );
+    }
+
+    if facts.exists("go.mod") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "go-test",
+            "Go test",
+            "go test ./...",
+            "go",
+            "test",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            25,
+            "go-vet",
+            "Go vet",
+            "go vet ./...",
+            "go",
+            "lint",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            30,
+            "gofmt-check",
+            "gofmt check",
+            "test -z \"$(gofmt -l .)\"",
+            "go",
+            "format",
+        );
+    }
+
+    if facts.exists("pyproject.toml")
+        || facts.exists("requirements.txt")
+        || facts.exists("requirements-dev.txt")
+        || facts.exists("setup.py")
+        || facts.exists("tox.ini")
+        || facts.exists("tests")
+    {
+        if facts.has_python_dep("pytest") || facts.exists("pytest.ini") || facts.exists("tests") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                20,
+                "pytest",
+                "pytest",
+                &format!("{}pytest", facts.command_prefix()),
+                "python",
+                "test",
+            );
+        } else if facts.exists("test") || facts.exists("tests") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                35,
+                "python-unittest",
+                "Python unittest",
+                &format!("{} -m unittest discover", facts.python_command()),
+                "python",
+                "test",
+            );
+        }
+        if facts.has_python_dep("ruff") || facts.has_python_tool_config("ruff") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                25,
+                "ruff-check",
+                "Ruff check",
+                &format!("{}ruff check .", facts.command_prefix()),
+                "python",
+                "lint",
+            );
+        }
+        if facts.has_python_dep("mypy") || facts.has_python_tool_config("mypy") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                30,
+                "mypy",
+                "mypy",
+                &format!("{}mypy .", facts.command_prefix()),
+                "python",
+                "typecheck",
+            );
+        }
+        if facts.has_python_dep("pyright") || facts.exists("pyrightconfig.json") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                30,
+                "pyright",
+                "Pyright",
+                &format!("{}pyright", facts.command_prefix()),
+                "python",
+                "typecheck",
+            );
+        }
+    }
+
+    if facts.exists("pubspec.yaml") && facts.file_contains("pubspec.yaml", "flutter:") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "flutter-test",
+            "Flutter test",
+            "flutter test",
+            "flutter",
+            "test",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            25,
+            "flutter-analyze",
+            "Flutter analyze",
+            "flutter analyze",
+            "flutter",
+            "lint",
+        );
+    } else if facts.exists("pubspec.yaml") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "dart-test",
+            "Dart test",
+            "dart test",
+            "dart",
+            "test",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            25,
+            "dart-analyze",
+            "Dart analyze",
+            "dart analyze",
+            "dart",
+            "lint",
+        );
+    }
+
+    if let Some(gradle) = facts.gradle_command() {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "gradle-test",
+            "Gradle test",
+            &format!("{gradle} test"),
+            "jvm",
+            "test",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            25,
+            "gradle-check",
+            "Gradle check",
+            &format!("{gradle} check"),
+            "jvm",
+            "check",
+        );
+        if facts.gradle_text().contains("com.android.") || !android_app_modules(&facts).is_empty() {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                25,
+                "gradle-lint",
+                "Android lint",
+                &format!("{gradle} lint"),
+                "android",
+                "lint",
+            );
+        }
+    }
+
+    if facts.exists("pom.xml") {
+        let mvn = facts.maven_command();
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "maven-test",
+            "Maven test",
+            &format!("{mvn} test"),
+            "jvm",
+            "test",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            30,
+            "maven-verify",
+            "Maven verify",
+            &format!("{mvn} verify"),
+            "jvm",
+            "check",
+        );
+    }
+
+    if facts.exists("build.sbt") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "sbt-test",
+            "sbt test",
+            "sbt test",
+            "jvm",
+            "test",
+        );
+    }
+
+    if facts.exists("Package.swift") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "swift-test",
+            "Swift test",
+            "swift test",
+            "swift",
+            "test",
+        );
+    }
+
+    if facts.exists("mix.exs") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "mix-test",
+            "Mix test",
+            "mix test",
+            "elixir",
+            "test",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            25,
+            "mix-format-check",
+            "Mix format check",
+            "mix format --check-formatted",
+            "elixir",
+            "format",
+        );
+    }
+
+    if facts.exists("artisan") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "phpunit",
+            "PHPUnit",
+            "php artisan test",
+            "php",
+            "test",
+        );
+    } else if facts.exists("vendor/bin/phpunit") || facts.exists("phpunit.xml") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "phpunit",
+            "PHPUnit",
+            if facts.exists("vendor/bin/phpunit") {
+                "vendor/bin/phpunit"
+            } else {
+                "phpunit"
+            },
+            "php",
+            "test",
+        );
+    }
+
+    if facts.exists("bin/rails") || facts.exists("Gemfile") {
+        if facts.exists("spec") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                20,
+                "rspec",
+                "RSpec",
+                "bundle exec rspec",
+                "ruby",
+                "test",
+            );
+        }
+        if facts.file_contains("Gemfile", "rubocop")
+            || facts.exists(".rubocop.yml")
+            || facts.exists(".rubocop_todo.yml")
+        {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                25,
+                "rubocop",
+                "RuboCop",
+                "bundle exec rubocop",
+                "ruby",
+                "lint",
+            );
+        }
+    }
+
+    if facts
+        .any_root_file_with_ext(&["sln", "csproj", "fsproj"])
+        .is_some()
+    {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            20,
+            "dotnet-test",
+            "dotnet test",
+            "dotnet test",
+            "dotnet",
+            "test",
+        );
+    }
+
+    if facts.exists("Makefile") || facts.exists("makefile") {
+        let makefile = read_small_string(&facts.root.join("Makefile"))
+            .or_else(|| read_small_string(&facts.root.join("makefile")))
+            .unwrap_or_default();
+        if makefile
+            .lines()
+            .any(|line| line.trim_start().starts_with("test:"))
+        {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                35,
+                "make-test",
+                "Make test",
+                "make test",
+                "make",
+                "test",
+            );
+        }
+        if makefile
+            .lines()
+            .any(|line| line.trim_start().starts_with("lint:"))
+        {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                35,
+                "make-lint",
+                "Make lint",
+                "make lint",
+                "make",
+                "lint",
+            );
+        }
+    }
+
+    candidates.sort_by_key(|c| (c.tier, c.order));
+    Ok(candidates.into_iter().map(|c| c.target).collect())
+}
+
+pub fn resolve_validation_command(
+    project_path: &str,
+    target_id: Option<&str>,
+) -> Result<ValidationTarget, String> {
+    let targets = detect_validation_targets(project_path)?;
+    if targets.is_empty() {
+        return Err("No validation target detected for this project.".to_string());
+    }
+
+    let requested = target_id.and_then(|id| {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    if let Some(id) = requested {
+        return targets
+            .into_iter()
+            .find(|target| target.id == id)
+            .ok_or_else(|| format!("Validation target no longer exists: {id}"));
+    }
+
+    Ok(targets.into_iter().next().unwrap())
+}
+
 pub fn should_auto_open_browser(target: &RunTarget) -> bool {
     if target.needs_emulator.is_some()
         || matches!(target.id.as_str(), "tauri-dev" | "expo-start" | "node-main")
@@ -998,6 +1560,64 @@ fn push_target(
         },
     });
     *order += 1;
+}
+
+fn push_validation_target(
+    candidates: &mut Vec<ValidationCandidate>,
+    seen: &mut HashSet<String>,
+    order: &mut usize,
+    tier: u8,
+    id: &str,
+    label: &str,
+    command: &str,
+    kind: &str,
+    category: &str,
+) {
+    if !seen.insert(id.to_string()) {
+        return;
+    }
+    let full_label = format!("{label} - {command}");
+    candidates.push(ValidationCandidate {
+        tier,
+        order: *order,
+        target: ValidationTarget {
+            id: id.to_string(),
+            label: full_label,
+            command: command.to_string(),
+            kind: kind.to_string(),
+            category: category.to_string(),
+        },
+    });
+    *order += 1;
+}
+
+fn validation_category(name: &str) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("test") || lower == "unit" {
+        "test"
+    } else if lower.contains("lint") {
+        "lint"
+    } else if lower.contains("type") {
+        "typecheck"
+    } else if lower.contains("build") {
+        "build"
+    } else {
+        "check"
+    }
+}
+
+fn validation_script_label(name: &str) -> String {
+    match name {
+        "test" => "Unit tests".to_string(),
+        "test:unit" | "unit" => "Unit tests".to_string(),
+        "lint" => "Lint".to_string(),
+        "typecheck" | "type-check" => "Typecheck".to_string(),
+        "check" => "Check".to_string(),
+        "validate" => "Validate".to_string(),
+        "build" => "Build check".to_string(),
+        "fmt" | "format" => "Format check".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn read_small_string(path: &Path) -> Option<String> {
@@ -1497,7 +2117,7 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::detect_run_targets;
+    use super::{detect_run_targets, detect_validation_targets};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -1545,6 +2165,14 @@ mod tests {
             .collect()
     }
 
+    fn validation_ids_for(path: &Path) -> Vec<String> {
+        detect_validation_targets(path.to_str().unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|target| target.id)
+            .collect()
+    }
+
     #[test]
     fn detects_kmp_android_and_desktop_modules() {
         let project = TempProject::new("kmp");
@@ -1566,6 +2194,46 @@ mod tests {
         let ids = ids_for(&project.path);
         assert!(ids.contains(&"android-gradle-install:androidApp".to_string()));
         assert!(ids.contains(&"compose-desktop-run:desktopApp".to_string()));
+    }
+
+    #[test]
+    fn detects_node_validation_scripts() {
+        let project = TempProject::new("node-validation");
+        project.write(
+            "package.json",
+            r#"{
+                "scripts": {
+                    "test": "vitest run",
+                    "lint": "eslint .",
+                    "typecheck": "tsc --noEmit"
+                },
+                "devDependencies": { "vite": "latest" }
+            }"#,
+        );
+
+        let ids = validation_ids_for(&project.path);
+        assert_eq!(
+            ids,
+            vec![
+                "npm-script:test".to_string(),
+                "npm-script:lint".to_string(),
+                "npm-script:typecheck".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn detects_rust_validation_targets() {
+        let project = TempProject::new("rust-validation");
+        project.write(
+            "Cargo.toml",
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        );
+
+        let ids = validation_ids_for(&project.path);
+        assert!(ids.contains(&"cargo-test".to_string()));
+        assert!(ids.contains(&"cargo-clippy".to_string()));
+        assert!(ids.contains(&"cargo-fmt-check".to_string()));
     }
 
     #[cfg(target_os = "macos")]

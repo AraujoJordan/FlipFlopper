@@ -329,12 +329,10 @@ fn spawn_session(
         .spawn()
         .map_err(|e| format!("Failed to spawn {}: {e}", spec.command))?;
 
-    let stdin = Arc::new(Mutex::new(
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| "Language server stdin unavailable".to_string())?,
-    ));
+    let stdin =
+        Arc::new(Mutex::new(child.stdin.take().ok_or_else(|| {
+            "Language server stdin unavailable".to_string()
+        })?));
     let stdout = child
         .stdout
         .take()
@@ -415,7 +413,9 @@ fn start_reader(
     });
 }
 
-fn read_message(reader: &mut BufReader<std::process::ChildStdout>) -> Result<Option<Value>, String> {
+fn read_message(
+    reader: &mut BufReader<std::process::ChildStdout>,
+) -> Result<Option<Value>, String> {
     let mut content_length: Option<usize> = None;
     loop {
         let mut line = String::new();
@@ -537,6 +537,36 @@ fn server_for_path(rel_path: &str) -> Option<ServerSpec> {
             command: "vscode-html-language-server",
             args: &["--stdio"],
         }),
+        "kt" | "kts" => Some(ServerSpec {
+            id: "kotlin",
+            command: "kotlin-language-server",
+            args: &[],
+        }),
+        "swift" => Some(ServerSpec {
+            id: "swift",
+            command: "sourcekit-lsp",
+            args: &[],
+        }),
+        "cs" => {
+            if which::which("csharp-ls").is_ok() {
+                Some(ServerSpec {
+                    id: "csharp",
+                    command: "csharp-ls",
+                    args: &[],
+                })
+            } else {
+                Some(ServerSpec {
+                    id: "csharp",
+                    command: "OmniSharp",
+                    args: &["--languageserver"],
+                })
+            }
+        }
+        "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "m" | "mm" => Some(ServerSpec {
+            id: "c-cpp",
+            command: "clangd",
+            args: &[],
+        }),
         _ => None,
     }
 }
@@ -559,6 +589,13 @@ fn language_id(rel_path: &str) -> &'static str {
         "sass" => "sass",
         "less" => "less",
         "html" | "htm" => "html",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        "cs" => "csharp",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "m" => "objective-c",
+        "mm" => "objective-cpp",
         _ => "plaintext",
     }
 }
@@ -652,9 +689,11 @@ fn parse_hover(result: Value) -> Option<String> {
         let text = arr
             .iter()
             .filter_map(|v| {
-                v.as_str()
-                    .map(|s| s.to_string())
-                    .or_else(|| v.get("value").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                v.as_str().map(|s| s.to_string()).or_else(|| {
+                    v.get("value")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                })
             })
             .collect::<Vec<_>>()
             .join("\n\n");

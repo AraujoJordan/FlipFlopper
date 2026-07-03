@@ -111,6 +111,14 @@ export interface RunTarget {
   needs_emulator: string | null;
 }
 
+export interface ValidationTarget {
+  id: string;
+  label: string;
+  command: string;
+  kind: string;
+  category: string;
+}
+
 // ── PTY ──────────────────────────────────────────────────────────────────────
 
 export const spawnAgent = (agentId: string, projectPath: string, yolo = false): Promise<string> =>
@@ -171,6 +179,15 @@ export const listPromptSkills = (projectPath: string | null): Promise<PromptSkil
 
 export const injectFileRefs = (sessionId: string, paths: string[]): Promise<void> =>
   invoke("inject_file_refs", { sessionId, paths });
+
+export const createEntry = (parentPath: string, name: string, isDir: boolean): Promise<FileEntry> =>
+  invoke("create_entry", { parentPath, name, isDir });
+
+export const renameEntry = (path: string, newName: string): Promise<FileEntry> =>
+  invoke("rename_entry", { path, newName });
+
+export const deleteEntry = (path: string): Promise<void> =>
+  invoke("delete_entry", { path });
 
 export const pickProjectFolder = (): Promise<string | null> =>
   invoke("pick_project_folder");
@@ -403,6 +420,12 @@ export const detectRunTargets = (projectPath: string): Promise<RunTarget[]> =>
 
 export const runProject = (projectPath: string, targetId?: string): Promise<string> =>
   invoke("run_project", { projectPath, targetId: targetId ?? null });
+
+export const detectValidationTargets = (projectPath: string): Promise<ValidationTarget[]> =>
+  invoke("detect_validation_targets", { projectPath });
+
+export const validateProject = (projectPath: string, targetId?: string): Promise<string> =>
+  invoke("validate_project", { projectPath, targetId: targetId ?? null });
 
 // ── Handoff ──────────────────────────────────────────────────────────────────
 

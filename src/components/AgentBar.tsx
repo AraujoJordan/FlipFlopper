@@ -4,6 +4,7 @@ import { spawnAgent, type AgentInfo } from "../lib/ipc";
 import { agentColor, AgentLogo } from "../App";
 import { Menu, MenuLabel, MenuItem, Spinner, toast } from "./ui";
 import { registerShortcutHandler } from "../lib/shortcuts";
+import { agentModeShortLabel } from "../lib/agentMeta";
 
 /** The "pick an agent to start" dropdown. Shared by AgentBar's "+" tab
  *  button, the empty agent-workspace CTA, and the prompt composer's
@@ -120,6 +121,10 @@ const AgentBar: Component = () => {
         {(tab) => {
           const isActive = () => tab.sessionId === store.activeTabId;
           const color = () => agentColor(tab.agentId);
+          const modeBadge = () => {
+            const mode = store.agentModes[tab.sessionId];
+            return mode && mode !== "normal" ? agentModeShortLabel(tab.agentId, mode) : null;
+          };
 
           return (
             <div
@@ -167,6 +172,23 @@ const AgentBar: Component = () => {
               }}>
                 {tab.label}
               </span>
+
+              <Show when={modeBadge()}>
+                {(label) => (
+                  <span style={{
+                    "font-family": "var(--font-mono)",
+                    "font-size": "9.5px",
+                    color: color(),
+                    border: `1px solid ${color()}66`,
+                    "border-radius": "4px",
+                    padding: "1px 5px",
+                    "line-height": "1.25",
+                    flex: "0 0 auto",
+                  }}>
+                    {label()}
+                  </span>
+                )}
+              </Show>
 
               {/* Close button */}
               <button

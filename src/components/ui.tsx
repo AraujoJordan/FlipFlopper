@@ -221,6 +221,95 @@ export const MenuItem: Component<{
   </button>
 );
 
+export const MenuDivider: Component = () => (
+  <div style={{ height: "1px", background: "var(--border-muted)", margin: "5px 4px" }} />
+);
+
+// ── ContextMenu ───────────────────────────────────────────────────────────────
+// Same Portal / outside-click / Escape / viewport-clamp pattern as `Menu`, but
+// anchored to cursor coordinates (e.g. a right-click) instead of a toggle element.
+
+const CONTEXT_MENU_MARGIN = 8;
+
+export const ContextMenu: Component<{
+  open: boolean;
+  onClose: () => void;
+  x: number;
+  y: number;
+  width?: number;
+  style?: JSX.CSSProperties;
+  children: JSX.Element;
+}> = (props) => {
+  let ref: HTMLDivElement | undefined;
+  const [pos, setPos] = createSignal<{ left: number; top: number } | null>(null);
+
+  createEffect(() => {
+    if (!props.open) return;
+    const width = props.width ?? 220;
+    // Measure actual rendered height once mounted; fall back to a reasonable
+    // guess for the first frame so we still clamp against the viewport edge.
+    const height = ref?.getBoundingClientRect().height ?? 240;
+    const left = Math.min(props.x, window.innerWidth - width - CONTEXT_MENU_MARGIN);
+    const top = Math.min(props.y, window.innerHeight - height - CONTEXT_MENU_MARGIN);
+    setPos({ left: Math.max(CONTEXT_MENU_MARGIN, left), top: Math.max(CONTEXT_MENU_MARGIN, top) });
+  });
+
+  onMount(() => {
+    function handleClick(e: Event) {
+      if (!props.open) return;
+      const target = e.target as Node;
+      if (ref?.contains(target)) return;
+      props.onClose();
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (props.open && e.key === "Escape") {
+        e.stopPropagation();
+        props.onClose();
+      }
+    }
+    // Any subsequent right-click (context menu) or scroll dismisses too.
+    document.addEventListener("click", handleClick);
+    document.addEventListener("contextmenu", handleClick);
+    document.addEventListener("scroll", handleClick, true);
+    document.addEventListener("keydown", handleKey, true);
+    onCleanup(() => {
+      document.removeEventListener("click", handleClick);
+      document.removeEventListener("contextmenu", handleClick);
+      document.removeEventListener("scroll", handleClick, true);
+      document.removeEventListener("keydown", handleKey, true);
+    });
+  });
+
+  return (
+    <Show when={props.open && pos()}>
+      {(p) => (
+        <Portal>
+          <div
+            ref={ref}
+            role="menu"
+            style={{
+              position: "fixed",
+              left: `${p().left}px`,
+              top: `${p().top}px`,
+              width: `${props.width ?? 220}px`,
+              "max-height": "70vh",
+              overflow: "auto",
+              background: "var(--surface-3)",
+              border: "1px solid var(--border-default)",
+              "border-radius": "var(--radius-xl)",
+              "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+              padding: "6px", "z-index": "150",
+              ...(props.style ?? {}),
+            }}
+          >
+            {props.children}
+          </div>
+        </Portal>
+      )}
+    </Show>
+  );
+};
+
 // ── Toast ─────────────────────────────────────────────────────────────────────
 
 export type ToastKind = "info" | "success" | "error";
