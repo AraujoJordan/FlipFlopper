@@ -9,6 +9,10 @@ import { clearAgentMode, cycleAgentModeOptimistic, sniffAgentMode } from "../lib
 interface Props {
   sessionId: string;
   active: boolean;
+  /** "agent" (default) routes Shift+Tab mode-cycling and printable keys through
+   *  the prompt composer's type-through action; "shell" leaves all keys to the
+   *  PTY, since a plain terminal has no agent mode and no composer to type into. */
+  variant?: "agent" | "shell";
 }
 
 const TerminalPane: Component<Props> = (props) => {
@@ -55,7 +59,10 @@ const TerminalPane: Component<Props> = (props) => {
     fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(containerRef);
+    const isShell = props.variant === "shell";
+
     terminal.attachCustomKeyEventHandler((ev) => {
+      if (isShell) return true;
       if (ev.type !== "keydown") return true;
       if (ev.key === "Tab" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
         cycleAgentModeOptimistic(props.sessionId);
@@ -70,7 +77,10 @@ const TerminalPane: Component<Props> = (props) => {
     });
 
     fitAndResize();
-    if (props.active) runAction("focus-prompt");
+    if (props.active) {
+      if (isShell) terminal.focus();
+      else runAction("focus-prompt");
+    }
 
     unlisten = await onPtyOutput(props.sessionId, (data) => {
       terminal.write(data);
@@ -93,7 +103,11 @@ const TerminalPane: Component<Props> = (props) => {
 
   createEffect(() => {
     if (props.active && fitAddon) {
-      setTimeout(() => { fitAndResize(); runAction("focus-prompt"); }, 0);
+      setTimeout(() => {
+        fitAndResize();
+        if (props.variant === "shell") terminal.focus();
+        else runAction("focus-prompt");
+      }, 0);
     }
   });
 

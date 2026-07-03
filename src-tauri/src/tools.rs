@@ -333,7 +333,10 @@ pub(crate) fn current_os() -> &'static str {
 fn pick_install_cmd(entry: &ToolEntry) -> Option<String> {
     let os = current_os();
     let pm = detect_pkg_manager();
+    pick_install_cmd_for(entry, os, pm)
+}
 
+fn pick_install_cmd_for(entry: &ToolEntry, os: &str, pm: &str) -> Option<String> {
     // Prefer the detected package manager; fall back to any available for this OS
     for spec in entry.installs {
         if let InstallSpec::Package {
@@ -400,28 +403,37 @@ fn tool_binary(entry: &ToolEntry) -> Option<String> {
 // ────────────────────────────────────────────────
 
 pub fn list_tools() -> Vec<ToolInfo> {
-    CATALOG
-        .iter()
-        .map(|e| {
-            let binary = tool_binary(e);
-            let version = if let Some(binary) = binary.as_deref() {
-                get_tool_version(binary)
-            } else {
-                None
-            };
-            let install_cmd = pick_install_cmd(e);
-            ToolInfo {
-                id: e.id.to_string(),
-                name: e.name.to_string(),
-                description: e.description.to_string(),
-                icon: e.icon.to_string(),
-                category: e.category.to_string(),
-                installed: binary.is_some(),
-                version,
-                install_cmd,
-            }
-        })
-        .collect()
+    let os = current_os();
+    let pm = detect_pkg_manager();
+
+    std::thread::scope(|s| {
+        let handles: Vec<_> = CATALOG
+            .iter()
+            .map(|e| {
+                s.spawn(move || {
+                    let binary = tool_binary(e);
+                    let version = if let Some(binary) = binary.as_deref() {
+                        get_tool_version(binary)
+                    } else {
+                        None
+                    };
+                    let install_cmd = pick_install_cmd_for(e, os, pm);
+                    ToolInfo {
+                        id: e.id.to_string(),
+                        name: e.name.to_string(),
+                        description: e.description.to_string(),
+                        icon: e.icon.to_string(),
+                        category: e.category.to_string(),
+                        installed: binary.is_some(),
+                        version,
+                        install_cmd,
+                    }
+                })
+            })
+            .collect();
+
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
 }
 
 /// Return the shell install command for a given tool id.

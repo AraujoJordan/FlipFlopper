@@ -11,7 +11,8 @@ mod tools;
 
 use std::process::Command;
 
-use tauri::{Emitter, State};
+use serde::Deserialize;
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use agents::AgentInfo;
@@ -23,6 +24,38 @@ use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
 use runner::{RunTarget, ValidationTarget};
 use tools::ToolInfo;
+
+const MENU_OPEN_PROJECT: &str = "menu-open-project";
+const MENU_REVEAL_PROJECT: &str = "menu-reveal-project";
+const MENU_CLOSE_PROJECT: &str = "menu-close-project";
+const MENU_NEW_AGENT: &str = "menu-new-agent";
+const MENU_FOCUS_PROMPT: &str = "menu-focus-prompt";
+const MENU_CLOSE_AGENT: &str = "menu-close-agent";
+const MENU_YOLO_MODE: &str = "menu-yolo-mode";
+const MENU_WORKSPACE_AGENT: &str = "menu-workspace-agent";
+const MENU_WORKSPACE_CODE: &str = "menu-workspace-code";
+const MENU_WORKSPACE_REVIEW: &str = "menu-workspace-review";
+const MENU_TOGGLE_EXPLORER: &str = "menu-toggle-explorer";
+const MENU_TOGGLE_GIT_PANEL: &str = "menu-toggle-git-panel";
+const MENU_TOGGLE_TERMINAL_PANEL: &str = "menu-toggle-terminal-panel";
+const MENU_TOGGLE_AUTO_SIDEBAR: &str = "menu-toggle-auto-sidebar";
+const MENU_REVIEW_WORKING_CHANGES: &str = "menu-review-working-changes";
+const MENU_SHOW_CHANGES: &str = "menu-show-changes";
+const MENU_SHOW_HISTORY: &str = "menu-show-history";
+const MENU_COMMAND_SEARCH: &str = "menu-command-search";
+
+#[derive(Debug, Deserialize)]
+struct NativeMenuState {
+    has_project: bool,
+    has_active_agent: bool,
+    workspace_mode: String,
+    yolo_mode: bool,
+    explorer_collapsed: bool,
+    git_panel_collapsed: bool,
+    terminal_panel_open: bool,
+    auto_toggle_sidebars: bool,
+    git_panel_tab: String,
+}
 
 // Bridge a PtyEvent receiver to Tauri events on the given session_id.
 fn bridge_pty(app: tauri::AppHandle, session_id: String, rx: std::sync::mpsc::Receiver<PtyEvent>) {
@@ -116,6 +149,221 @@ fn normalize_local_browser_url(raw: &str) -> Option<String> {
     let normalized_host = normalize_local_host_port(host_port)?;
 
     Some(format!("{scheme}{normalized_host}{tail}"))
+}
+
+fn menu_item(
+    handle: &tauri::AppHandle,
+    id: &str,
+    label: &str,
+    accelerator: Option<&str>,
+) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+    tauri::menu::MenuItem::with_id(handle, id, label, true, accelerator)
+}
+
+fn check_menu_item(
+    handle: &tauri::AppHandle,
+    id: &str,
+    label: &str,
+    checked: bool,
+    accelerator: Option<&str>,
+) -> tauri::Result<tauri::menu::CheckMenuItem<tauri::Wry>> {
+    tauri::menu::CheckMenuItem::with_id(handle, id, label, true, checked, accelerator)
+}
+
+fn separator(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::PredefinedMenuItem<tauri::Wry>> {
+    tauri::menu::PredefinedMenuItem::separator(handle)
+}
+
+fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let menu = tauri::menu::Menu::default(handle)?;
+
+    let project_menu = tauri::menu::Submenu::with_id_and_items(
+        handle,
+        "project-menu",
+        "Project",
+        true,
+        &[
+            &menu_item(handle, MENU_OPEN_PROJECT, "Open Project...", Some("CmdOrCtrl+O"))?,
+            &menu_item(handle, MENU_REVEAL_PROJECT, reveal_project_label(), None::<&str>)?,
+            &separator(handle)?,
+            &menu_item(handle, MENU_CLOSE_PROJECT, "Close Project", None::<&str>)?,
+        ],
+    )?;
+
+    let agent_menu = tauri::menu::Submenu::with_id_and_items(
+        handle,
+        "agent-menu",
+        "Agent",
+        true,
+        &[
+            &menu_item(handle, MENU_NEW_AGENT, "New Agent Session", Some("CmdOrCtrl+T"))?,
+            &menu_item(handle, MENU_FOCUS_PROMPT, "Focus Prompt", Some("CmdOrCtrl+K"))?,
+            &menu_item(handle, MENU_CLOSE_AGENT, "Close Agent Session", Some("CmdOrCtrl+W"))?,
+            &separator(handle)?,
+            &check_menu_item(handle, MENU_YOLO_MODE, "YOLO Mode", false, None::<&str>)?,
+        ],
+    )?;
+
+    let view_menu = tauri::menu::Submenu::with_id_and_items(
+        handle,
+        "view-menu",
+        "View",
+        true,
+        &[
+            &check_menu_item(handle, MENU_WORKSPACE_CODE, "Code", false, Some("CmdOrCtrl+1"))?,
+            &check_menu_item(handle, MENU_WORKSPACE_AGENT, "AI Agent", true, Some("CmdOrCtrl+2"))?,
+            &check_menu_item(handle, MENU_WORKSPACE_REVIEW, "Review", false, Some("CmdOrCtrl+3"))?,
+            &separator(handle)?,
+            &check_menu_item(handle, MENU_TOGGLE_EXPLORER, "Explorer", true, Some("CmdOrCtrl+B"))?,
+            &check_menu_item(handle, MENU_TOGGLE_GIT_PANEL, "Git Panel", false, Some("CmdOrCtrl+Shift+G"))?,
+            &check_menu_item(handle, MENU_TOGGLE_TERMINAL_PANEL, "Terminal Panel", false, Some("CmdOrCtrl+J"))?,
+            &separator(handle)?,
+            &check_menu_item(handle, MENU_TOGGLE_AUTO_SIDEBAR, "Auto-toggle Sidebars", true, None::<&str>)?,
+        ],
+    )?;
+
+    let review_menu = tauri::menu::Submenu::with_id_and_items(
+        handle,
+        "review-menu",
+        "Review",
+        true,
+        &[
+            &menu_item(handle, MENU_REVIEW_WORKING_CHANGES, "Review Working Changes", None::<&str>)?,
+            &separator(handle)?,
+            &check_menu_item(handle, MENU_SHOW_CHANGES, "Show Changes", true, None::<&str>)?,
+            &check_menu_item(handle, MENU_SHOW_HISTORY, "Show History", false, None::<&str>)?,
+        ],
+    )?;
+
+    #[cfg(target_os = "macos")]
+    {
+        menu.insert(&project_menu, 2)?;
+        menu.insert(&agent_menu, 3)?;
+        menu.insert(&view_menu, 5)?;
+        menu.insert(&review_menu, 6)?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        menu.insert(&project_menu, 1)?;
+        menu.insert(&agent_menu, 2)?;
+        menu.insert(&view_menu, 4)?;
+        menu.insert(&review_menu, 5)?;
+    }
+
+    if let Some(tauri::menu::MenuItemKind::Submenu(help_menu)) =
+        menu.get(tauri::menu::HELP_SUBMENU_ID)
+    {
+        let command_search =
+            menu_item(handle, MENU_COMMAND_SEARCH, "Command Search", Some("CmdOrCtrl+Shift+F"))?;
+        if !help_menu.items().unwrap_or_default().is_empty() {
+            let help_separator = separator(handle)?;
+            let _ = help_menu.append(&help_separator);
+        }
+        let _ = help_menu.append(&command_search);
+    }
+
+    Ok(menu)
+}
+
+fn reveal_project_label() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Reveal Project in Finder"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Reveal Project in Explorer"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "Reveal Project in File Manager"
+    }
+}
+
+fn sync_native_menu(app: &tauri::AppHandle, state: &NativeMenuState) {
+    let Some(menu) = app.menu() else { return; };
+
+    set_menu_enabled(&menu, MENU_REVEAL_PROJECT, state.has_project);
+    set_menu_enabled(&menu, MENU_CLOSE_PROJECT, state.has_project);
+    set_menu_enabled(&menu, MENU_NEW_AGENT, state.has_project);
+    set_menu_enabled(&menu, MENU_FOCUS_PROMPT, state.has_project);
+    set_menu_enabled(&menu, MENU_CLOSE_AGENT, state.has_active_agent);
+    set_menu_enabled(&menu, MENU_REVIEW_WORKING_CHANGES, state.has_project);
+    set_menu_enabled(&menu, MENU_SHOW_CHANGES, state.has_project);
+    set_menu_enabled(&menu, MENU_SHOW_HISTORY, state.has_project);
+    set_menu_enabled(&menu, MENU_COMMAND_SEARCH, state.has_project);
+
+    set_menu_checked(&menu, MENU_WORKSPACE_CODE, state.workspace_mode == "code");
+    set_menu_checked(&menu, MENU_WORKSPACE_AGENT, state.workspace_mode == "agent");
+    set_menu_checked(&menu, MENU_WORKSPACE_REVIEW, state.workspace_mode == "review");
+    set_menu_checked(&menu, MENU_YOLO_MODE, state.yolo_mode);
+    set_menu_checked(&menu, MENU_TOGGLE_EXPLORER, !state.explorer_collapsed);
+    set_menu_checked(&menu, MENU_TOGGLE_GIT_PANEL, !state.git_panel_collapsed);
+    set_menu_checked(&menu, MENU_TOGGLE_TERMINAL_PANEL, state.terminal_panel_open);
+    set_menu_checked(&menu, MENU_TOGGLE_AUTO_SIDEBAR, state.auto_toggle_sidebars);
+    set_menu_checked(&menu, MENU_SHOW_CHANGES, state.git_panel_tab == "changes");
+    set_menu_checked(&menu, MENU_SHOW_HISTORY, state.git_panel_tab == "history");
+}
+
+fn find_menu_item(
+    menu: &tauri::menu::Menu<tauri::Wry>,
+    id: &str,
+) -> Option<tauri::menu::MenuItemKind<tauri::Wry>> {
+    for item in menu.items().unwrap_or_default() {
+        if item.id() == &id {
+            return Some(item);
+        }
+        if let tauri::menu::MenuItemKind::Submenu(submenu) = item {
+            if let Some(found) = find_submenu_item(&submenu, id) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn find_submenu_item(
+    submenu: &tauri::menu::Submenu<tauri::Wry>,
+    id: &str,
+) -> Option<tauri::menu::MenuItemKind<tauri::Wry>> {
+    for item in submenu.items().unwrap_or_default() {
+        if item.id() == &id {
+            return Some(item);
+        }
+        if let tauri::menu::MenuItemKind::Submenu(child) = item {
+            if let Some(found) = find_submenu_item(&child, id) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn set_menu_enabled(menu: &tauri::menu::Menu<tauri::Wry>, id: &str, enabled: bool) {
+    if let Some(item) = find_menu_item(menu, id) {
+        match item {
+            tauri::menu::MenuItemKind::MenuItem(item) => {
+                let _ = item.set_enabled(enabled);
+            }
+            tauri::menu::MenuItemKind::Check(item) => {
+                let _ = item.set_enabled(enabled);
+            }
+            tauri::menu::MenuItemKind::Icon(item) => {
+                let _ = item.set_enabled(enabled);
+            }
+            tauri::menu::MenuItemKind::Submenu(item) => {
+                let _ = item.set_enabled(enabled);
+            }
+            tauri::menu::MenuItemKind::Predefined(_) => {}
+        }
+    }
+}
+
+fn set_menu_checked(menu: &tauri::menu::Menu<tauri::Wry>, id: &str, checked: bool) {
+    if let Some(tauri::menu::MenuItemKind::Check(item)) = find_menu_item(menu, id) {
+        let _ = item.set_checked(checked);
+    }
 }
 
 fn normalize_local_host_port(host_port: &str) -> Option<String> {
@@ -279,6 +527,17 @@ fn pty_kill(state: State<'_, PtyManager>, session_id: String) -> Result<(), Stri
 #[tauri::command]
 fn list_sessions(state: State<'_, PtyManager>) -> Vec<SessionInfo> {
     pty::list_sessions(&state)
+}
+
+#[tauri::command]
+fn open_terminal(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+) -> Result<String, String> {
+    let (session_id, rx) = pty::spawn_interactive_shell(&state, &project_path)?;
+    bridge_pty(app, session_id.clone(), rx);
+    Ok(session_id)
 }
 
 // ════════════════════════════════════════════════
@@ -674,6 +933,12 @@ fn continue_agent(
     Ok(session_id)
 }
 
+#[tauri::command]
+fn sync_native_menu_state(app: tauri::AppHandle, state: NativeMenuState) -> Result<(), String> {
+    sync_native_menu(&app, &state);
+    Ok(())
+}
+
 // ════════════════════════════════════════════════
 // Native dialog
 // ════════════════════════════════════════════════
@@ -736,6 +1001,26 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(PtyManager::new())
         .manage(LspManager::new())
+        .setup(|app| {
+            let handle = app.handle();
+            if let Ok(menu) = build_app_menu(handle) {
+                let _ = app.set_menu(menu);
+            }
+
+            if let Some(win) = app.get_webview_window("main") {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    let _ = win.show();
+                });
+            }
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            let id = event.id.as_ref();
+            if id.starts_with("menu-") {
+                let _ = app.emit("native-menu-command", id.to_string());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             // PTY
             spawn_agent,
@@ -743,6 +1028,7 @@ pub fn run() {
             pty_resize,
             pty_kill,
             list_sessions,
+            open_terminal,
             // Agents
             get_agents,
             // Project
@@ -804,6 +1090,8 @@ pub fn run() {
             // Dialog
             pick_project_folder,
             pick_prompt_file,
+            // Menu
+            sync_native_menu_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlipFlopper");

@@ -278,6 +278,30 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+/* ── Bottom terminal panel ────────────────────────────────────────────────── */
+
+.terminal-resize-handle {
+  height: 5px;
+  flex: 0 0 5px;
+  cursor: ns-resize;
+  background: transparent;
+  position: relative;
+}
+
+.terminal-resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: 2px 0;
+  border-radius: 2px;
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+
+.terminal-resize-handle:hover::after,
+.terminal-resize-handle-active::after {
+  background: var(--accent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .workspace-mode-button,
   .workspace-mode-button svg,

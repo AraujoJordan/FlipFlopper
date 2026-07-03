@@ -199,29 +199,35 @@ fn get_version(binary: &str) -> Option<String> {
 
 /// Build the full AgentInfo list (detect installed status).
 pub fn list_agents() -> Vec<AgentInfo> {
-    AGENTS
-        .iter()
-        .map(|def| {
-            let binary_path = resolve_binary(def);
-            let installed = binary_path.is_some();
-            let version = if installed {
-                let bin = launch_binary(def).unwrap_or_default();
-                get_version(&bin)
-            } else {
-                None
-            };
-            AgentInfo {
-                id: def.id.to_string(),
-                name: def.name.to_string(),
-                description: def.description.to_string(),
-                icon: def.icon.to_string(),
-                installed,
-                version,
-                binary_path,
-                yolo_supported: !def.yolo_launch_args.is_empty(),
-            }
-        })
-        .collect()
+    std::thread::scope(|s| {
+        let handles: Vec<_> = AGENTS
+            .iter()
+            .map(|def| {
+                s.spawn(move || {
+                    let binary_path = resolve_binary(def);
+                    let installed = binary_path.is_some();
+                    let version = if installed {
+                        let bin = launch_binary(def).unwrap_or_default();
+                        get_version(&bin)
+                    } else {
+                        None
+                    };
+                    AgentInfo {
+                        id: def.id.to_string(),
+                        name: def.name.to_string(),
+                        description: def.description.to_string(),
+                        icon: def.icon.to_string(),
+                        installed,
+                        version,
+                        binary_path,
+                        yolo_supported: !def.yolo_launch_args.is_empty(),
+                    }
+                })
+            })
+            .collect();
+
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
 }
 
 /// Look up a def by id.

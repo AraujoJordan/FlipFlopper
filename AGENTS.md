@@ -69,6 +69,21 @@ Notes:
 - For docs-only edits, build checks are usually unnecessary; still inspect the
   diff.
 
+## Homebrew Cask Updates
+
+To manually update the Homebrew Cask inside the `homebrew-tap` folder:
+
+```sh
+# Run the script with the release version from the root of the workspace
+./homebrew-tap/update.sh 0.1.0
+
+# Navigate to the tap folder, commit and push the updated Cask to your tap repo
+cd homebrew-tap
+git add Casks/flipflopper.rb
+git commit -m "update flipflopper to 0.1.0"
+git push origin main
+```
+
 ## Source Map
 
 ```text

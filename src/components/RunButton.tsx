@@ -7,7 +7,7 @@ import {
   type RunTarget,
 } from "../lib/ipc";
 import {
-  addTab,
+  addTerminal,
   readRunTargets,
   setStore,
   store,
@@ -106,11 +106,10 @@ const RunButton: Component = () => {
     try {
       const sessionId = await runProject(path, target.id);
       writeRunTarget(path, target.id);
-      addTab({
+      addTerminal({
         sessionId,
         label: `Run · ${shortLabel(target)}`,
-        agentId: "run",
-        agentIcon: "",
+        kind: "run",
       });
       setStore("runSessionId", sessionId);
       runExitUnlisten?.();

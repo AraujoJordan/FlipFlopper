@@ -17,6 +17,14 @@ export interface Tab {
   agentIcon: string;
 }
 
+export type TerminalKind = "run" | "validate" | "install" | "shell";
+
+export interface TerminalTab {
+  sessionId: string;
+  label: string;
+  kind: TerminalKind;
+}
+
 export type WorkspaceMode = "code" | "review" | "agent";
 
 export interface ReviewState {
@@ -71,11 +79,24 @@ export interface AppStore {
   yoloMode: boolean;
   explorerCollapsed: boolean;
   gitPanelCollapsed: boolean;
+  autoToggleSidebars: boolean;
+  terminals: TerminalTab[];
+  activeTerminalId: string | null;
+  terminalPanelOpen: boolean;
+  terminalPanelHeight: number;
 }
 
 const YOLO_MODE_KEY = "flipflopper:yolo-mode";
-const EXPLORER_COLLAPSED_KEY = "flipflopper:explorer-collapsed";
-const GITPANEL_COLLAPSED_KEY = "flipflopper:gitpanel-collapsed";
+const TERMINAL_PANEL_HEIGHT_KEY = "flipflopper:terminal-panel-height";
+const DEFAULT_TERMINAL_PANEL_HEIGHT = 240;
+
+function readNumber(key: string, fallback: number): number {
+  try {
+    const raw = localStorage.getItem(key);
+    const n = raw ? Number(raw) : NaN;
+    return Number.isFinite(n) ? n : fallback;
+  } catch { return fallback; }
+}
 
 function readYoloMode(): boolean {
   try {
@@ -83,10 +104,30 @@ function readYoloMode(): boolean {
   } catch { return false; }
 }
 
-function readBoolFlag(key: string): boolean {
+function readBoolFlagWithFallback(key: string, fallback: boolean): boolean {
   try {
-    return localStorage.getItem(key) === "true";
-  } catch { return false; }
+    const raw = localStorage.getItem(key);
+    if (raw !== null) return raw === "true";
+  } catch {}
+  return fallback;
+}
+
+export function getExplorerCollapsedForMode(mode: WorkspaceMode): boolean {
+  try {
+    const key = `flipflopper:explorer-collapsed:${mode}`;
+    const raw = localStorage.getItem(key);
+    if (raw !== null) return raw === "true";
+  } catch {}
+  return mode !== "code";
+}
+
+export function getGitPanelCollapsedForMode(mode: WorkspaceMode): boolean {
+  try {
+    const key = `flipflopper:gitpanel-collapsed:${mode}`;
+    const raw = localStorage.getItem(key);
+    if (raw !== null) return raw === "true";
+  } catch {}
+  return mode !== "review";
 }
 
 const initial: AppStore = {
@@ -112,8 +153,13 @@ const initial: AppStore = {
   gitPanelTab: "changes",
   historyFilterPath: null,
   yoloMode: readYoloMode(),
-  explorerCollapsed: readBoolFlag(EXPLORER_COLLAPSED_KEY),
-  gitPanelCollapsed: readBoolFlag(GITPANEL_COLLAPSED_KEY),
+  explorerCollapsed: getExplorerCollapsedForMode("agent"),
+  gitPanelCollapsed: getGitPanelCollapsedForMode("agent"),
+  autoToggleSidebars: readBoolFlagWithFallback("flipflopper:auto-toggle-sidebars", true),
+  terminals: [],
+  activeTerminalId: null,
+  terminalPanelOpen: false,
+  terminalPanelHeight: readNumber(TERMINAL_PANEL_HEIGHT_KEY, DEFAULT_TERMINAL_PANEL_HEIGHT),
 };
 
 export const [store, setStore] = createStore<AppStore>(initial);
@@ -342,6 +388,49 @@ export async function killAndClearAllTabs() {
   clearAllTabs();
 }
 
+// ── Terminal panel helpers ────────────────────────────────────────────────────
+
+export function addTerminal(tab: TerminalTab) {
+  setStore("terminals", (t) => [...t, tab]);
+  setStore("activeTerminalId", tab.sessionId);
+  setStore("terminalPanelOpen", true);
+}
+
+export function setActiveTerminal(sessionId: string) {
+  setStore("activeTerminalId", sessionId);
+  setStore("terminalPanelOpen", true);
+}
+
+export function removeTerminal(sessionId: string) {
+  ptyKill(sessionId).catch(() => { /* already exited */ });
+  setStore("terminals", (t) => t.filter((x) => x.sessionId !== sessionId));
+  setStore("activeTerminalId", (cur) => {
+    if (cur !== sessionId) return cur;
+    const remaining = store.terminals.filter((x) => x.sessionId !== sessionId);
+    return remaining.length > 0 ? remaining[remaining.length - 1].sessionId : null;
+  });
+  if (store.runSessionId === sessionId) setStore("runSessionId", null);
+  if (store.validationSessionId === sessionId) setStore("validationSessionId", null);
+}
+
+export function toggleTerminalPanel() {
+  setStore("terminalPanelOpen", (v) => !v);
+}
+
+export function setTerminalPanelHeight(px: number) {
+  const clamped = Math.min(Math.max(px, 80), window.innerHeight * 0.7);
+  setStore("terminalPanelHeight", clamped);
+  try { localStorage.setItem(TERMINAL_PANEL_HEIGHT_KEY, String(clamped)); } catch { /* ignore */ }
+}
+
+export async function killAndClearAllTerminals() {
+  const sessionIds = store.terminals.map((t) => t.sessionId);
+  await Promise.allSettled(sessionIds.map((sessionId) => ptyKill(sessionId)));
+  setStore("terminals", []);
+  setStore("activeTerminalId", null);
+  setStore("terminalPanelOpen", false);
+}
+
 export function setYoloMode(enabled: boolean) {
   setStore("yoloMode", enabled);
   try { localStorage.setItem(YOLO_MODE_KEY, String(enabled)); } catch { /* ignore */ }
@@ -352,7 +441,9 @@ export function setYoloMode(enabled: boolean) {
 export function toggleExplorerCollapsed() {
   setStore("explorerCollapsed", (v) => {
     const next = !v;
-    try { localStorage.setItem(EXPLORER_COLLAPSED_KEY, String(next)); } catch { /* ignore */ }
+    try {
+      localStorage.setItem(`flipflopper:explorer-collapsed:${store.workspaceMode}`, String(next));
+    } catch { /* ignore */ }
     return next;
   });
 }
@@ -360,7 +451,19 @@ export function toggleExplorerCollapsed() {
 export function toggleGitPanelCollapsed() {
   setStore("gitPanelCollapsed", (v) => {
     const next = !v;
-    try { localStorage.setItem(GITPANEL_COLLAPSED_KEY, String(next)); } catch { /* ignore */ }
+    try {
+      localStorage.setItem(`flipflopper:gitpanel-collapsed:${store.workspaceMode}`, String(next));
+    } catch { /* ignore */ }
+    return next;
+  });
+}
+
+export function toggleAutoToggleSidebars() {
+  setStore("autoToggleSidebars", (v) => {
+    const next = !v;
+    try {
+      localStorage.setItem("flipflopper:auto-toggle-sidebars", String(next));
+    } catch { /* ignore */ }
     return next;
   });
 }
@@ -384,6 +487,7 @@ export async function hiddenInstallTool(
   projectPath: string
 ): Promise<{ agents: AgentInfo[]; tools: ToolInfo[] }> {
   const sessionId = await installTool(toolId, projectPath);
+  addTerminal({ sessionId, label: `Install · ${toolId}`, kind: "install" });
   await waitForPtyExit(sessionId);
   const [agents, tools] = await Promise.all([getAgents(), getToolCatalog()]);
   setStore("agents", agents);

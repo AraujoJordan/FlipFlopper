@@ -1,6 +1,6 @@
 import {
   store, setActiveTab, removeTab, closeEditorFile, closeReview, selectWorkspaceMode,
-  toggleExplorerCollapsed, toggleGitPanelCollapsed,
+  toggleExplorerCollapsed, toggleGitPanelCollapsed, toggleTerminalPanel,
 } from "./store";
 
 // Global keyboard shortcuts. Installed once from App's onMount as a
@@ -9,7 +9,7 @@ import {
 // capture-phase stopPropagation() intercepts before the event gets there.
 // We deliberately never bind Mod-S: CodeMirror owns that for save.
 
-type ShortcutAction = "new-agent-menu" | "focus-prompt" | "omni-search" | "prompt-type-through";
+type ShortcutAction = "new-agent-menu" | "focus-prompt" | "omni-search" | "prompt-type-through" | "toggle-terminal-panel";
 
 const actionHandlers = new Map<ShortcutAction, (payload?: string) => void>();
 
@@ -111,6 +111,13 @@ export function installGlobalShortcuts(): () => void {
     if (mod && e.shiftKey && e.key.toLowerCase() === "g") {
       e.preventDefault(); e.stopPropagation();
       toggleGitPanelCollapsed();
+      return;
+    }
+
+    if (mod && !e.shiftKey && e.key.toLowerCase() === "j") {
+      e.preventDefault(); e.stopPropagation();
+      toggleTerminalPanel();
+      runAction("toggle-terminal-panel");
       return;
     }
 

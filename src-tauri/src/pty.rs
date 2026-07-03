@@ -303,6 +303,90 @@ pub fn spawn_shell_command(
     Ok((session_id, rx))
 }
 
+/// Spawn an interactive login shell (e.g. for a user-opened terminal tab),
+/// as opposed to `spawn_shell_command` which runs a one-off command via
+/// `sh -c` and exits when it completes.
+///
+/// Returns `(session_id, receiver)`.
+pub fn spawn_interactive_shell(
+    manager: &PtyManager,
+    project_path: &str,
+) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
+    let session_id = Uuid::new_v4().to_string();
+    let (tx, rx) = mpsc::channel::<PtyEvent>();
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("Failed to open PTY: {e}"))?;
+
+    let mut cmd = if cfg!(target_os = "windows") {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        CommandBuilder::new(shell)
+    } else {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let mut cmd = CommandBuilder::new(&shell);
+        cmd.arg("-l");
+        cmd.env("TERM", "xterm-256color");
+        cmd
+    };
+    cmd.cwd(project_path);
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| format!("Failed to spawn shell: {e}"))?;
+
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("Failed to clone PTY reader: {e}"))?;
+
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("Failed to take PTY writer: {e}"))?;
+
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if tx.send(PtyEvent::Data(data)).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = tx.send(PtyEvent::Exit);
+    });
+
+    let session = PtySession {
+        id: session_id.clone(),
+        agent_id: "shell".to_string(),
+        project_path: project_path.to_string(),
+        writer,
+        master: pair.master,
+        child,
+    };
+
+    manager
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+
+    Ok((session_id, rx))
+}
+
 /// List active sessions.
 pub fn list_sessions(manager: &PtyManager) -> Vec<SessionInfo> {
     manager

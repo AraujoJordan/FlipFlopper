@@ -7,7 +7,7 @@ import {
   type ValidationTarget,
 } from "../lib/ipc";
 import {
-  addTab,
+  addTerminal,
   readValidationTargets,
   setStore,
   store,
@@ -111,11 +111,10 @@ const ValidationButton: Component = () => {
     try {
       const sessionId = await validateProject(path, target.id);
       writeValidationTarget(path, target.id);
-      addTab({
+      addTerminal({
         sessionId,
         label: `Validate · ${shortLabel(target)}`,
-        agentId: "validate",
-        agentIcon: "",
+        kind: "validate",
       });
       setStore("validationSessionId", sessionId);
       validationExitUnlisten?.();

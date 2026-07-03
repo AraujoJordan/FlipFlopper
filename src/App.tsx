@@ -1,15 +1,26 @@
 import { Component, createEffect, createSignal, For, onMount, Show, onCleanup } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   store,
   setStore,
   addTab,
   killAndClearAllTabs,
+  killAndClearAllTerminals,
+  removeTab,
+  openReview,
   selectWorkspaceMode,
+  setGitPanelTab,
   setYoloMode,
+  toggleAutoToggleSidebars,
+  toggleExplorerCollapsed,
+  toggleGitPanelCollapsed,
+  toggleTerminalPanel,
   updateCurrentBranch,
   rankContinueCandidates,
   recordContinueAgentUse,
+  getExplorerCollapsedForMode,
+  getGitPanelCollapsedForMode,
 } from "./lib/store";
 import {
   continueAgent,
@@ -21,11 +32,14 @@ import {
   openProject,
   pickProjectFolder,
   spawnAgent,
+  syncNativeMenuState,
+  onNativeMenuCommand,
   type ProjectInfo,
 } from "./lib/ipc";
 import type { Tab, WorkspaceMode } from "./lib/store";
 import AgentBar, { NewAgentMenu } from "./components/AgentBar";
 import TerminalPane from "./components/TerminalPane";
+import TerminalPanel from "./components/TerminalPanel";
 import FileTree from "./components/FileTree";
 import GitPanel from "./components/git/GitPanel";
 import { ConflictFixDialogHost } from "./components/git/ConflictFixDialog";
@@ -36,7 +50,7 @@ import PromptComposer from "./components/PromptComposer";
 import RunButton from "./components/RunButton";
 import ValidationButton from "./components/ValidationButton";
 import { Button, Menu, MenuLabel, MenuItem, Spinner, ToastHost, ConfirmHost, confirmDialog, toast } from "./components/ui";
-import { installGlobalShortcuts } from "./lib/shortcuts";
+import { installGlobalShortcuts, runAction } from "./lib/shortcuts";
 import "./App.css";
 
 const WORKSPACE_KEY = "flipflopper:last-workspace";
@@ -514,6 +528,7 @@ const App: Component = () => {
     const previousPath = store.currentProject?.path;
     if (previousPath && previousPath !== project.path) {
       void lspShutdownProject(previousPath);
+      void killAndClearAllTerminals();
       setStore("editorFiles", []);
       setStore("activeEditorPath", null);
       setStore("editorOpen", false);
@@ -524,7 +539,92 @@ const App: Component = () => {
     setStore("fileTreePath", project.path);
   }
 
+  function closeProject() {
+    const path = store.currentProject?.path;
+    if (path) void lspShutdownProject(path);
+    void killAndClearAllTabs();
+    void killAndClearAllTerminals();
+    setStore("currentProject", null);
+    setStore("fileTreePath", null);
+    setStore("editorFiles", []);
+    setStore("activeEditorPath", null);
+    setStore("editorOpen", false);
+    setStore("selectedFiles", []);
+    setStore("review", null);
+    setStore("currentBranch", "");
+    setStore("historyFilterPath", null);
+    setStore("workspaceMode", "agent");
+  }
+
+  async function handleNativeMenuCommand(id: string) {
+    switch (id) {
+      case "menu-open-project":
+        await handlePickProject();
+        return;
+      case "menu-reveal-project":
+        if (store.currentProject) {
+          revealItemInDir(store.currentProject.path).catch((e) => toast(`Failed to reveal project: ${String(e)}`, "error"));
+        }
+        return;
+      case "menu-close-project":
+        closeProject();
+        return;
+      case "menu-new-agent":
+        runAction("new-agent-menu");
+        return;
+      case "menu-focus-prompt":
+        runAction("focus-prompt");
+        return;
+      case "menu-close-agent":
+        if (store.activeTabId) removeTab(store.activeTabId);
+        return;
+      case "menu-yolo-mode":
+        setYoloMode(!store.yoloMode);
+        return;
+      case "menu-workspace-code":
+        selectWorkspaceMode("code");
+        return;
+      case "menu-workspace-agent":
+        selectWorkspaceMode("agent");
+        return;
+      case "menu-workspace-review":
+        selectWorkspaceMode("review");
+        return;
+      case "menu-toggle-explorer":
+        toggleExplorerCollapsed();
+        return;
+      case "menu-toggle-git-panel":
+        toggleGitPanelCollapsed();
+        return;
+      case "menu-toggle-terminal-panel":
+        toggleTerminalPanel();
+        return;
+      case "menu-toggle-auto-sidebar":
+        toggleAutoToggleSidebars();
+        return;
+      case "menu-review-working-changes":
+        if (store.currentProject) openReview(undefined, "Working changes");
+        return;
+      case "menu-show-changes":
+        setGitPanelTab("changes");
+        setStore("gitPanelCollapsed", false);
+        return;
+      case "menu-show-history":
+        setGitPanelTab("history");
+        setStore("historyFilterPath", null);
+        setStore("gitPanelCollapsed", false);
+        return;
+      case "menu-command-search":
+        runAction("omni-search");
+        return;
+    }
+  }
+
   onMount(async () => {
+    requestAnimationFrame(() => {
+      void win.show().then(() => win.setFocus());
+    });
+
     const [agents, recents, tools] = await Promise.all([
       getAgents(),
       getRecentProjects(),
@@ -564,12 +664,17 @@ const App: Component = () => {
       } catch { /* first run or path gone */ }
     }
 
+    const unlistenMenu = await onNativeMenuCommand((id) => {
+      void handleNativeMenuCommand(id);
+    });
+
     const branchInterval = setInterval(updateCurrentBranch, 15_000);
     const uninstallShortcuts = installGlobalShortcuts();
 
     onCleanup(() => {
       clearInterval(branchInterval);
       uninstallShortcuts();
+      unlistenMenu();
     });
   });
 
@@ -581,6 +686,27 @@ const App: Component = () => {
       projectPath: project?.path ?? null,
       tabs: tabs.map((t) => ({ agentId: t.agentId })),
       activeIndex: Math.max(0, activeIndex),
+    });
+  });
+
+  createEffect(() => {
+    if (!store.autoToggleSidebars) return;
+    const mode = store.workspaceMode;
+    setStore("explorerCollapsed", getExplorerCollapsedForMode(mode));
+    setStore("gitPanelCollapsed", getGitPanelCollapsedForMode(mode));
+  });
+
+  createEffect(() => {
+    void syncNativeMenuState({
+      hasProject: !!store.currentProject,
+      hasActiveAgent: !!store.activeTabId,
+      workspaceMode: store.workspaceMode,
+      yoloMode: store.yoloMode,
+      explorerCollapsed: store.explorerCollapsed,
+      gitPanelCollapsed: store.gitPanelCollapsed,
+      terminalPanelOpen: store.terminalPanelOpen,
+      autoToggleSidebars: store.autoToggleSidebars,
+      gitPanelTab: store.gitPanelTab,
     });
   });
 
@@ -728,6 +854,9 @@ const App: Component = () => {
               <AgentWorkspace />
             </div>
           </div>
+
+          {/* Run / validate / plain shell terminals — visible in every workspace mode */}
+          <TerminalPanel />
         </div>
 
         {/* Git panel */}

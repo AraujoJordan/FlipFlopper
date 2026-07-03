@@ -136,6 +136,9 @@ export const ptyKill = (sessionId: string): Promise<void> =>
 export const listSessions = (): Promise<SessionInfo[]> =>
   invoke("list_sessions");
 
+export const openTerminal = (projectPath: string): Promise<string> =>
+  invoke("open_terminal", { projectPath });
+
 export const onPtyOutput = (sessionId: string, cb: (data: string) => void): Promise<UnlistenFn> =>
   listen<string>(`pty://${sessionId}`, (e) => cb(e.payload));
 
@@ -431,3 +434,23 @@ export const validateProject = (projectPath: string, targetId?: string): Promise
 
 export const continueAgent = (projectPath: string, fromAgent: string, toAgent: string, yolo = false): Promise<string> =>
   invoke("continue_agent", { projectPath, fromAgent, toAgent, yolo });
+
+// ── Native menu ──────────────────────────────────────────────────────────────
+
+export interface NativeMenuState {
+  hasProject: boolean;
+  hasActiveAgent: boolean;
+  workspaceMode: "code" | "review" | "agent";
+  yoloMode: boolean;
+  explorerCollapsed: boolean;
+  gitPanelCollapsed: boolean;
+  terminalPanelOpen: boolean;
+  autoToggleSidebars: boolean;
+  gitPanelTab: "changes" | "history";
+}
+
+export const syncNativeMenuState = (state: NativeMenuState): Promise<void> =>
+  invoke("sync_native_menu_state", { state });
+
+export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenFn> =>
+  listen<string>("native-menu-command", (e) => cb(e.payload));
