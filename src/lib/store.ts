@@ -1,6 +1,7 @@
 import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
 import { getAgents, getToolCatalog, installTool, onPtyExit, ptyKill, readFileText, getCurrentBranch } from "./ipc";
+import { confirmDialog } from "../components/ui";
 
 export interface Tab {
   sessionId: string;

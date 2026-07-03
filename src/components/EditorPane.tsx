@@ -1,15 +1,37 @@
-import { Component, createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "@codemirror/view";
+import { Component, createEffect, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
+import {
+  EditorView,
+  keymap,
+  lineNumbers,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  drawSelection,
+  dropCursor,
+  rectangularSelection,
+  crosshairCursor,
+  hoverTooltip,
+} from "@codemirror/view";
 import { EditorState, Compartment } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { bracketMatching, indentOnInput } from "@codemirror/language";
+import { bracketMatching, indentOnInput, foldGutter, foldKeymap } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import {
+  autocompletion,
+  closeBrackets,
+  closeBracketsKeymap,
+  completeAnyWord,
+  completionKeymap,
+  type CompletionContext,
+  type CompletionResult,
+} from "@codemirror/autocomplete";
+import { linter, lintGutter, lintKeymap, type Diagnostic } from "@codemirror/lint";
 import { languages } from "@codemirror/language-data";
 import { LanguageDescription } from "@codemirror/language";
 import {
   store,
   setStore,
   openReview,
+  openEditorFile,
   closeEditorFile,
   setActiveEditorFile,
   setEditorDirty,
@@ -20,12 +42,60 @@ import {
   unregisterEditorSaveFlush,
   type EditorFile,
 } from "../lib/store";
-import { readFileText, writeFileText, statFile } from "../lib/ipc";
+import {
+  readFileText,
+  writeFileText,
+  statFile,
+  lspOpenDocument,
+  lspChangeDocument,
+  lspCompletion,
+  lspHover,
+  lspDefinition,
+  lspDiagnostics,
+  type LspDiagnostic,
+} from "../lib/ipc";
 import { getFileIcon } from "./FileTree";
 import { flipflopperTheme } from "../lib/cmTheme";
 
 const POLL_MS = 3000;
 const AUTO_SAVE_MS = 500;
+const LSP_SYNC_MS = 350;
+
+function diagnosticSeverity(severity: number | null): Diagnostic["severity"] {
+  if (severity === 1) return "error";
+  if (severity === 2) return "warning";
+  if (severity === 3) return "info";
+  return "hint";
+}
+
+function completionType(kind: number | null): string | undefined {
+  switch (kind) {
+    case 2: return "function";
+    case 3: return "method";
+    case 4: return "class";
+    case 5: return "interface";
+    case 6: return "variable";
+    case 7: return "variable";
+    case 8: return "property";
+    case 9: return "module";
+    case 10: return "property";
+    case 11: return "keyword";
+    case 12: return "constant";
+    case 13: return "variable";
+    case 14: return "constant";
+    case 15: return "text";
+    case 16: return "color";
+    case 17: return "file";
+    case 18: return "reference";
+    case 20: return "enum";
+    case 21: return "constant";
+    case 22: return "struct";
+    case 23: return "event";
+    case 24: return "operator";
+    case 25: return "type";
+    default: return undefined;
+  }
+}
 
 // ── Per-file buffer ───────────────────────────────────────────────────────────
 
@@ -34,6 +104,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
   let view: EditorView | undefined;
   let applyingExternal = false;
   let saveTimer: number | undefined;
+  let lspTimer: number | undefined;
 
   const [saveError, setSaveError] = createSignal<string | null>(null);
   const [conflict, setConflict] = createSignal(false);
@@ -66,6 +137,82 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     }, AUTO_SAVE_MS);
   }
 
+  function lspPosition(pos: number) {
+    if (!view) return { line: 0, character: 0 };
+    const line = view.state.doc.lineAt(pos);
+    return { line: line.number - 1, character: pos - line.from };
+  }
+
+  function posFromLsp(diagnostic: LspDiagnostic, which: "start" | "end") {
+    if (!view) return 0;
+    const point = diagnostic.range[which];
+    const lineNo = Math.min(point.line + 1, view.state.doc.lines);
+    const line = view.state.doc.line(lineNo);
+    return Math.min(line.from + point.character, line.to);
+  }
+
+  function scheduleLspSync() {
+    if (!view || props.file.binary) return;
+    if (lspTimer !== undefined) window.clearTimeout(lspTimer);
+    lspTimer = window.setTimeout(() => {
+      lspTimer = undefined;
+      const project = store.currentProject;
+      if (!project || !view) return;
+      void lspChangeDocument(project.path, props.file.path, view.state.doc.toString()).catch(() => {});
+    }, LSP_SYNC_MS);
+  }
+
+  async function gotoDefinition(pos: number) {
+    const project = store.currentProject;
+    if (!project || !view) return;
+    const point = lspPosition(pos);
+    const def = await lspDefinition(project.path, props.file.path, point.line, point.character).catch(() => null);
+    if (!def) return;
+    const name = def.path.split("/").pop() || def.path;
+    await openEditorFile(def.path, name, def.line + 1);
+  }
+
+  async function lspCompletionSource(context: CompletionContext): Promise<CompletionResult | null> {
+    const project = store.currentProject;
+    if (!project) return null;
+    const word = context.matchBefore(/[\w$]*/);
+    if (!context.explicit && (!word || word.from === word.to)) return null;
+    const line = context.state.doc.lineAt(context.pos);
+    const items = await lspCompletion(
+      project.path,
+      props.file.path,
+      line.number - 1,
+      context.pos - line.from,
+    ).catch(() => []);
+    if (items.length === 0) return null;
+    return {
+      from: word?.from ?? context.pos,
+      options: items.map((item) => ({
+        label: item.label,
+        detail: item.detail ?? undefined,
+        apply: item.insert_text || item.label,
+        type: completionType(item.kind),
+      })),
+    };
+  }
+
+  async function lspLintSource(): Promise<readonly Diagnostic[]> {
+    const project = store.currentProject;
+    if (!project || !view) return [];
+    const items = await lspDiagnostics(project.path, props.file.path).catch(() => []);
+    return items.map((item) => {
+      const from = posFromLsp(item, "start");
+      const to = Math.max(from, posFromLsp(item, "end"));
+      return {
+        from,
+        to,
+        severity: diagnosticSeverity(item.severity),
+        source: "LSP",
+        message: item.message,
+      };
+    });
+  }
+
   async function flushAutoSave() {
     if (saveTimer !== undefined) {
       window.clearTimeout(saveTimer);
@@ -89,6 +236,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
         },
       });
       applyingExternal = false;
+      scheduleLspSync();
       refreshEditorBaseline(props.file.path, file.content, file.modified_ms);
       setConflict(false);
     } catch (e) {
@@ -119,26 +267,72 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
         doc: props.file.baseline,
         extensions: [
           history(),
+          autocompletion({ override: [lspCompletionSource, completeAnyWord] }),
           keymap.of([
             { key: "Mod-s", run: () => { void flushAutoSave(); return true; } },
+            { key: "F12", run: (v) => { void gotoDefinition(v.state.selection.main.head); return true; } },
             ...defaultKeymap,
             ...historyKeymap,
             ...searchKeymap,
+            ...completionKeymap,
+            ...closeBracketsKeymap,
+            ...foldKeymap,
+            ...lintKeymap,
             indentWithTab,
           ]),
           lineNumbers(),
+          foldGutter(),
+          lintGutter(),
           highlightActiveLine(),
           highlightActiveLineGutter(),
+          drawSelection(),
+          dropCursor(),
+          rectangularSelection(),
+          crosshairCursor(),
           bracketMatching(),
+          closeBrackets(),
           indentOnInput(),
           highlightSelectionMatches(),
+          linter(lspLintSource, { delay: 900 }),
+          hoverTooltip(async (_view, pos) => {
+            const project = store.currentProject;
+            if (!project) return null;
+            const point = lspPosition(pos);
+            const text = await lspHover(project.path, props.file.path, point.line, point.character).catch(() => null);
+            if (!text) return null;
+            return {
+              pos,
+              above: true,
+              create() {
+                const dom = document.createElement("div");
+                dom.textContent = text;
+                dom.style.maxWidth = "520px";
+                dom.style.whiteSpace = "pre-wrap";
+                dom.style.fontFamily = "var(--font-mono)";
+                dom.style.fontSize = "12px";
+                dom.style.lineHeight = "1.45";
+                return { dom };
+              },
+            };
+          }, { hoverTime: 450, hideOnChange: true }),
           EditorView.lineWrapping,
+          EditorView.domEventHandlers({
+            mousedown: (event, v) => {
+              if (!event.metaKey && !event.ctrlKey) return false;
+              const pos = v.posAtCoords({ x: event.clientX, y: event.clientY });
+              if (pos == null) return false;
+              event.preventDefault();
+              void gotoDefinition(pos);
+              return true;
+            },
+          }),
           ...flipflopperTheme,
           langCompartment.of([]),
           EditorView.updateListener.of((u) => {
             if (u.docChanged && !applyingExternal) {
               setEditorDirty(props.file.path, true);
               scheduleAutoSave();
+              scheduleLspSync();
             }
           }),
         ],
@@ -153,6 +347,11 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       }).catch(() => { /* plain text fallback */ });
     }
 
+    const project = store.currentProject;
+    if (project) {
+      void lspOpenDocument(project.path, props.file.path, props.file.baseline).catch(() => {});
+    }
+
     registerEditorSaveFlush(props.file.path, flushAutoSave);
     const poll = window.setInterval(() => {
       if (props.active && store.workspaceMode === "code") checkStale();
@@ -161,6 +360,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     onCleanup(() => {
       window.clearInterval(poll);
       if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+      if (lspTimer !== undefined) window.clearTimeout(lspTimer);
       void flushAutoSave();
       unregisterEditorSaveFlush(props.file.path);
       view?.destroy();
@@ -171,7 +371,9 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     if (props.active && view) {
       view.requestMeasure();
       view.focus();
-      checkStale();
+      untrack(() => {
+        void checkStale();
+      });
 
       const focus = store.pendingLineFocus;
       if (focus && focus.path === props.file.path) {

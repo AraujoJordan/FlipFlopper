@@ -1,4 +1,4 @@
-import { Component, createResource, createSignal, For, Show } from "solid-js";
+import { Component, createEffect, createResource, createSignal, For, Show } from "solid-js";
 import { store, openReview, openEditorFile, openFileHistory, toggleFileSelection, clearFileSelection } from "../lib/store";
 import { getFileTree, getGitStatus, injectFileRefs, type FileEntry, type FileStatus } from "../lib/ipc";
 import { Button, Spinner, toast } from "./ui";
@@ -102,6 +102,38 @@ const FileTree: Component = () => {
     }
   }
 
+  async function ensureDirLoaded(path: string) {
+    setExpanded((prev) => {
+      if (prev.has(path)) return prev;
+      const next = new Set(prev);
+      next.add(path);
+      return next;
+    });
+    if (childrenByDir().has(path)) return;
+    try {
+      const kids = await getFileTree(path);
+      setChildrenByDir((prev) => new Map(prev).set(path, kids));
+    } catch {
+      /* The active file may have been moved or deleted; leave the tree as-is. */
+    }
+  }
+
+  async function revealActiveEditorFile(relPath: string) {
+    const root = store.fileTreePath;
+    if (!root || !relPath.includes("/")) return;
+    const parts = relPath.split("/").slice(0, -1);
+    let dir = root;
+    for (const part of parts) {
+      dir = `${dir}/${part}`;
+      await ensureDirLoaded(dir);
+    }
+  }
+
+  createEffect(() => {
+    const active = store.activeEditorPath;
+    if (active) void revealActiveEditorFile(active);
+  });
+
   function relPath(entry: FileEntry): string {
     const projectPath = store.fileTreePath ?? "";
     return entry.path.startsWith(projectPath)
@@ -158,6 +190,7 @@ const FileTree: Component = () => {
     const stKey = () => (st() ? statusKey(st()!.status) : null);
     const stStyle = () => (stKey() ? STATUS_STYLE[stKey()!] : null);
     const isSelected = () => store.selectedFiles.includes(relPath(props.entry));
+    const isActiveEditorFile = () => !props.entry.is_dir && store.activeEditorPath === relPath(props.entry);
     const [rowHovered, setRowHovered] = createSignal(false);
 
     const childEntries = () => {
@@ -183,8 +216,16 @@ const FileTree: Component = () => {
             padding: "4px 8px",
             "padding-left": `${8 + props.depth * 14}px`,
             "border-radius": "var(--radius-md)",
-            background: isSelected() ? "var(--surface-4)" : (stStyle()?.bg ?? "transparent"),
-            "box-shadow": isSelected() ? "inset 2px 0 0 var(--accent)" : "none",
+            background: isActiveEditorFile()
+              ? "rgba(88,166,255,0.14)"
+              : isSelected()
+                ? "var(--surface-4)"
+                : (stStyle()?.bg ?? "transparent"),
+            "box-shadow": isActiveEditorFile()
+              ? "inset 2px 0 0 var(--accent)"
+              : isSelected()
+                ? "inset 2px 0 0 var(--fg-muted)"
+                : "none",
             cursor: "pointer",
           }}
         >

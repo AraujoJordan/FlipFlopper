@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "FlipFlopper",
@@ -17,7 +18,8 @@
         "height": 900,
         "minWidth": 900,
         "minHeight": 600,
-        "decorations": false
+        "decorations": false,
+        "transparent": true
       }
     ],
     "security": {

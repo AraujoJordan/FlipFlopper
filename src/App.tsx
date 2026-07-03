@@ -17,9 +17,11 @@ import {
   getAgents,
   getRecentProjects,
   getToolCatalog,
+  lspShutdownProject,
   openProject,
   pickProjectFolder,
   spawnAgent,
+  type ProjectInfo,
 } from "./lib/ipc";
 import type { Tab, WorkspaceMode } from "./lib/store";
 import AgentBar, { NewAgentMenu } from "./components/AgentBar";
@@ -505,6 +507,20 @@ const BranchIndicator: Component = () => {
 const App: Component = () => {
   const win = getCurrentWindow();
 
+  function setActiveProject(project: ProjectInfo) {
+    const previousPath = store.currentProject?.path;
+    if (previousPath && previousPath !== project.path) {
+      void lspShutdownProject(previousPath);
+      setStore("editorFiles", []);
+      setStore("activeEditorPath", null);
+      setStore("editorOpen", false);
+      setStore("selectedFiles", []);
+      setStore("review", null);
+    }
+    setStore("currentProject", project);
+    setStore("fileTreePath", project.path);
+  }
+
   onMount(async () => {
     const [agents, recents, tools] = await Promise.all([
       getAgents(),
@@ -521,8 +537,7 @@ const App: Component = () => {
     if (lastPath) {
       try {
         const project = await openProject(lastPath);
-        setStore("currentProject", project);
-        setStore("fileTreePath", project.path);
+        setActiveProject(project);
 
         const tabsToRestore = persisted?.tabs ?? [];
         const restoredTabs: Tab[] = [];
@@ -571,8 +586,7 @@ const App: Component = () => {
     if (!path) return;
     try {
       const project = await openProject(path);
-      setStore("currentProject", project);
-      setStore("fileTreePath", project.path);
+      setActiveProject(project);
       updateCurrentBranch();
     } catch (e) {
       console.error("Failed to open project:", e);

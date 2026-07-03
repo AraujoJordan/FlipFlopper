@@ -24,7 +24,11 @@ const theme = EditorView.theme(
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#58a6ff" },
     "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, ::selection":
       { background: "#58a6ff33" },
-    ".cm-selectionMatch": { background: "#58a6ff22" },
+    ".cm-selectionMatch": {
+      background: "#58a6ff24",
+      outline: "1px solid #58a6ff55",
+      borderRadius: "2px",
+    },
     ".cm-activeLine": { background: "#ffffff06" },
     ".cm-gutters": {
       background: "#0b0c10",
@@ -34,6 +38,12 @@ const theme = EditorView.theme(
     },
     ".cm-activeLineGutter": { background: "#ffffff06", color: "#8b949e" },
     ".cm-lineNumbers .cm-gutterElement": { padding: "0 10px 0 16px" },
+    ".cm-foldGutter .cm-gutterElement": { padding: "0 6px" },
+    ".cm-foldPlaceholder": {
+      background: "#14161d",
+      border: "1px solid #2a2e3a",
+      color: "#8b949e",
+    },
     ".cm-matchingBracket": {
       background: "#58a6ff2e",
       outline: "1px solid #58a6ff66",
@@ -54,6 +64,26 @@ const theme = EditorView.theme(
       border: "1px solid #2a2e3a",
       color: "#c9d1d9",
     },
+    ".cm-tooltip-autocomplete": {
+      boxShadow: "0 12px 30px rgba(0,0,0,0.35)",
+    },
+    ".cm-tooltip-autocomplete > ul": {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: "12px",
+      maxHeight: "280px",
+    },
+    ".cm-tooltip-autocomplete ul li[aria-selected]": {
+      background: "#1f6feb33",
+      color: "#f0f6fc",
+    },
+    ".cm-completionDetail": { color: "#8b949e" },
+    ".cm-diagnostic": {
+      background: "#14161d",
+      border: "1px solid #2a2e3a",
+      color: "#c9d1d9",
+    },
+    ".cm-lintRange-error": { backgroundImage: "linear-gradient(45deg, transparent 65%, #f85149 80%, transparent 90%)" },
+    ".cm-lintRange-warning": { backgroundImage: "linear-gradient(45deg, transparent 65%, #d29922 80%, transparent 90%)" },
   },
   { dark: true }
 );

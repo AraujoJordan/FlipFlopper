@@ -2,6 +2,7 @@ mod agents;
 mod editor;
 mod git;
 mod handoff;
+mod lsp;
 mod project;
 mod pty;
 mod review;
@@ -16,6 +17,7 @@ use tauri_plugin_dialog::DialogExt;
 use agents::AgentInfo;
 use editor::FileContent;
 use git::{CommitEntry, CommitResult, FileStatus, PullOutcome, StatusEntry, SyncStatus};
+use lsp::{LspCompletion, LspDefinition, LspDiagnostic, LspManager, LspStatus};
 use project::{FileEntry, ProjectInfo, SkillEntry, TextMatch};
 use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
@@ -362,6 +364,78 @@ fn stat_file(project_path: String, rel_path: String) -> Result<u64, String> {
     editor::stat_file(&project_path, &rel_path)
 }
 
+#[tauri::command]
+fn lsp_status(project_path: String, rel_path: String) -> LspStatus {
+    lsp::status(&project_path, &rel_path)
+}
+
+#[tauri::command]
+fn lsp_open_document(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    content: String,
+) -> Result<LspStatus, String> {
+    lsp::open_document(&state, &project_path, &rel_path, &content)
+}
+
+#[tauri::command]
+fn lsp_change_document(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    content: String,
+) -> Result<LspStatus, String> {
+    lsp::change_document(&state, &project_path, &rel_path, &content)
+}
+
+#[tauri::command]
+fn lsp_completion(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    line: u64,
+    character: u64,
+) -> Result<Vec<LspCompletion>, String> {
+    lsp::completion(&state, &project_path, &rel_path, line, character)
+}
+
+#[tauri::command]
+fn lsp_hover(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    line: u64,
+    character: u64,
+) -> Result<Option<String>, String> {
+    lsp::hover(&state, &project_path, &rel_path, line, character)
+}
+
+#[tauri::command]
+fn lsp_definition(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    line: u64,
+    character: u64,
+) -> Result<Option<LspDefinition>, String> {
+    lsp::definition(&state, &project_path, &rel_path, line, character)
+}
+
+#[tauri::command]
+fn lsp_diagnostics(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+) -> Result<Vec<LspDiagnostic>, String> {
+    lsp::diagnostics(&state, &project_path, &rel_path)
+}
+
+#[tauri::command]
+fn lsp_shutdown_project(state: State<'_, LspManager>, project_path: String) {
+    lsp::shutdown_project(&state, &project_path);
+}
+
 // ════════════════════════════════════════════════
 // Git commands
 // ════════════════════════════════════════════════
@@ -626,6 +700,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(PtyManager::new())
+        .manage(LspManager::new())
         .invoke_handler(tauri::generate_handler![
             // PTY
             spawn_agent,
@@ -647,6 +722,14 @@ pub fn run() {
             read_file_text,
             write_file_text,
             stat_file,
+            lsp_status,
+            lsp_open_document,
+            lsp_change_document,
+            lsp_completion,
+            lsp_hover,
+            lsp_definition,
+            lsp_diagnostics,
+            lsp_shutdown_project,
             // Git
             get_git_status,
             get_git_status_v2,

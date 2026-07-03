@@ -61,6 +61,7 @@ export function installGlobalShortcuts(): () => void {
   function handleKeydown(e: KeyboardEvent) {
     const { inTerminal, inEditor, inInput } = classifyTarget(e.target);
     const mod = isMod(e);
+    
 
     if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") {
       e.preventDefault(); e.stopPropagation();

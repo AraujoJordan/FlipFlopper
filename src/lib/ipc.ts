@@ -197,6 +197,91 @@ export const writeFileText = (projectPath: string, relPath: string, content: str
 export const statFile = (projectPath: string, relPath: string): Promise<number> =>
   invoke("stat_file", { projectPath, relPath });
 
+export interface LspStatus {
+  available: boolean;
+  server: string | null;
+  message: string;
+}
+
+export interface LspPosition {
+  line: number;
+  character: number;
+}
+
+export interface LspRange {
+  start: LspPosition;
+  end: LspPosition;
+}
+
+export interface LspCompletion {
+  label: string;
+  detail: string | null;
+  kind: number | null;
+  insert_text: string;
+}
+
+export interface LspDiagnostic {
+  range: LspRange;
+  severity: number | null;
+  message: string;
+}
+
+export interface LspDefinition {
+  path: string;
+  line: number;
+  character: number;
+}
+
+export const lspStatus = (projectPath: string, relPath: string): Promise<LspStatus> =>
+  invoke("lsp_status", { projectPath, relPath });
+
+export const lspOpenDocument = (
+  projectPath: string,
+  relPath: string,
+  content: string,
+): Promise<LspStatus> =>
+  invoke("lsp_open_document", { projectPath, relPath, content });
+
+export const lspChangeDocument = (
+  projectPath: string,
+  relPath: string,
+  content: string,
+): Promise<LspStatus> =>
+  invoke("lsp_change_document", { projectPath, relPath, content });
+
+export const lspCompletion = (
+  projectPath: string,
+  relPath: string,
+  line: number,
+  character: number,
+): Promise<LspCompletion[]> =>
+  invoke("lsp_completion", { projectPath, relPath, line, character });
+
+export const lspHover = (
+  projectPath: string,
+  relPath: string,
+  line: number,
+  character: number,
+): Promise<string | null> =>
+  invoke("lsp_hover", { projectPath, relPath, line, character });
+
+export const lspDefinition = (
+  projectPath: string,
+  relPath: string,
+  line: number,
+  character: number,
+): Promise<LspDefinition | null> =>
+  invoke("lsp_definition", { projectPath, relPath, line, character });
+
+export const lspDiagnostics = (
+  projectPath: string,
+  relPath: string,
+): Promise<LspDiagnostic[]> =>
+  invoke("lsp_diagnostics", { projectPath, relPath });
+
+export const lspShutdownProject = (projectPath: string): Promise<void> =>
+  invoke("lsp_shutdown_project", { projectPath });
+
 // ── Git ──────────────────────────────────────────────────────────────────────
 
 export const getGitStatus = (projectPath: string): Promise<FileStatus[]> =>
