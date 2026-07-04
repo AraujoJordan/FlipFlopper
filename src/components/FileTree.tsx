@@ -812,6 +812,7 @@ const FileTree: Component = () => {
             ...guideBackground(props.depth),
             "box-shadow": rowShadow(),
             cursor: "pointer",
+            "user-select": "none",
           }}
         >
           <Show when={isRenaming()} fallback={

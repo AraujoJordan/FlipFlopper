@@ -254,7 +254,9 @@ export const ContextMenu: Component<{
     setPos({ left: Math.max(CONTEXT_MENU_MARGIN, left), top: Math.max(CONTEXT_MENU_MARGIN, top) });
   });
 
-  onMount(() => {
+  createEffect(() => {
+    if (!props.open) return;
+
     function handleClick(e: Event) {
       if (!props.open) return;
       const target = e.target as Node;
@@ -267,12 +269,27 @@ export const ContextMenu: Component<{
         props.onClose();
       }
     }
+    // Defer registration until the next tick. SolidJS delegates `contextmenu`
+    // and `click` to the document root, so this component's document-level
+    // dismissal handlers would otherwise fire on the very same event that
+    // opened the menu (the opening handler runs first inside SolidJS's
+    // delegated walk and flips `open` to true synchronously; the browser
+    // then invokes our other `contextmenu` listener on the same dispatch
+    // and immediately closes the menu we just opened). `stopPropagation()`
+    // in the opener cannot prevent that since both listeners share document.
     // Any subsequent right-click (context menu) or scroll dismisses too.
-    document.addEventListener("click", handleClick);
-    document.addEventListener("contextmenu", handleClick);
-    document.addEventListener("scroll", handleClick, true);
-    document.addEventListener("keydown", handleKey, true);
+    let cancelled = false;
+    const id = window.setTimeout(() => {
+      if (cancelled) return;
+      document.addEventListener("click", handleClick);
+      document.addEventListener("contextmenu", handleClick);
+      document.addEventListener("scroll", handleClick, true);
+      document.addEventListener("keydown", handleKey, true);
+    }, 0);
+
     onCleanup(() => {
+      cancelled = true;
+      window.clearTimeout(id);
       document.removeEventListener("click", handleClick);
       document.removeEventListener("contextmenu", handleClick);
       document.removeEventListener("scroll", handleClick, true);
