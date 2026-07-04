@@ -3,14 +3,19 @@ import {
 } from "solid-js";
 import {
   store, openReview, openEditorFile, openFileHistory, toggleFileSelection, clearFileSelection,
-  bumpGitStatus, toggleExplorerCollapsed,
+  bumpGitStatus, toggleExplorerCollapsed, setFileClipboard, clearFileClipboard, setPendingPromptSeed,
+  addTerminal,
 } from "../lib/store";
 import {
   getFileTree, getGitStatus, injectFileRefs, createEntry, renameEntry, deleteEntry, searchPromptFiles,
+  duplicateEntry, copyEntry, moveEntry, gitStage, gitUnstage, gitDiscard, openTerminal,
   type FileEntry, type FileStatus,
 } from "../lib/ipc";
 import { Button, Spinner, toast, ContextMenu, MenuItem, MenuDivider, confirmDialog } from "./ui";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir, openPath } from "@tauri-apps/plugin-opener";
+import { openOmniSearchInScope } from "./OmniSearch";
+import { openAgentTaskDialog } from "./AgentTaskDialog";
+import { runAction } from "../lib/shortcuts";
 import { getFileIconName, getFolderIconName, iconPath as materialIconPath } from "../lib/fileIcons";
 
 const STATUS_STYLE: Record<string, { color: string; bg: string; label: string }> = {
@@ -25,6 +30,14 @@ function statusKey(s: string): string | null {
   if (s === "M") return "M";
   if (s === "D") return "D";
   return null;
+}
+
+/** Platform-aware label for the OS file manager ("Finder"/"Explorer"/"Files"). */
+function revealLabel(): string {
+  const platform = navigator.platform.toLowerCase();
+  if (platform.includes("mac")) return "Reveal in Finder";
+  if (platform.includes("win")) return "Reveal in Explorer";
+  return "Reveal in Files";
 }
 
 /** Material Icon Theme file icon for a filename (always resolves — falls
@@ -334,6 +347,219 @@ const FileTree: Component = () => {
     } catch (e) {
       toast(`Failed to delete: ${String(e)}`, "error");
     }
+  }
+
+  // ── Duplicate / cut / copy / paste ─────────────────────────────────────
+
+  /** Absolute paths the menu should act on: the whole selection when the
+   *  right-clicked row is part of a multi-selection, otherwise just it. */
+  function targetPaths(entry: FileEntry): string[] {
+    const rel = relPath(entry);
+    const root = store.fileTreePath;
+    if (store.selectedFiles.includes(rel) && store.selectedFiles.length > 1 && root) {
+      return store.selectedFiles.map((p) => `${root}/${p}`);
+    }
+    return [entry.path];
+  }
+
+  function isMultiTarget(entry: FileEntry): boolean {
+    return targetPaths(entry).length > 1;
+  }
+
+  /** Directory that "paste here" / "open in terminal" targets for an entry. */
+  function destDirFor(entry: FileEntry | null): string {
+    if (!entry || !entry.is_dir) {
+      return entry ? parentOf(entry.path) : (store.fileTreePath ?? "");
+    }
+    return entry.path;
+  }
+
+  async function handleDuplicate(entry: FileEntry) {
+    setMenu(null);
+    try {
+      const result = await duplicateEntry(entry.path);
+      await reloadDir(parentOf(entry.path));
+      bumpGitStatus();
+      setFocusedPath(result.path);
+    } catch (e) {
+      toast(`Failed to duplicate: ${String(e)}`, "error");
+    }
+  }
+
+  function handleCut(entry: FileEntry) {
+    setMenu(null);
+    setFileClipboard({ paths: targetPaths(entry), mode: "cut" });
+    toast(`Cut ${targetPaths(entry).length} item${targetPaths(entry).length === 1 ? "" : "s"}`, "info");
+  }
+
+  function handleCopy(entry: FileEntry) {
+    setMenu(null);
+    setFileClipboard({ paths: targetPaths(entry), mode: "copy" });
+    toast(`Copied ${targetPaths(entry).length} item${targetPaths(entry).length === 1 ? "" : "s"}`, "info");
+  }
+
+  async function handlePaste(destDir: string) {
+    setMenu(null);
+    const clipboard = store.fileClipboard;
+    if (!clipboard || clipboard.paths.length === 0) return;
+    const projectPath = store.currentProject?.path;
+    if (!projectPath) return;
+    let failures = 0;
+    for (const src of clipboard.paths) {
+      try {
+        if (clipboard.mode === "cut") await moveEntry(src, destDir);
+        else await copyEntry(src, destDir);
+      } catch (e) {
+        failures++;
+        console.error("Paste failed for", src, e);
+      }
+    }
+    await reloadDir(destDir);
+    bumpGitStatus();
+    const ok = clipboard.paths.length - failures;
+    if (clipboard.mode === "cut") clearFileClipboard();
+    if (failures > 0) {
+      toast(`Pasted ${ok}, ${failures} failed`, "error");
+    } else {
+      toast(`Pasted ${ok} item${ok === 1 ? "" : "s"}`, "success");
+    }
+  }
+
+  function handleCopyFilename(entry: FileEntry) {
+    setMenu(null);
+    void navigator.clipboard.writeText(entry.name).then(
+      () => toast("Copied filename", "success"),
+      () => toast("Failed to copy", "error"),
+    );
+  }
+
+  function handleCopyAsRef(entry: FileEntry) {
+    setMenu(null);
+    const paths = targetPaths(entry).map(relPathOf);
+    const ref = paths.map((p) => `@${p}`).join(" ");
+    setPendingPromptSeed({ text: ref });
+  }
+
+  // ── Open / reveal / search ─────────────────────────────────────────────
+
+  async function handleOpenInTerminal(entry: FileEntry) {
+    setMenu(null);
+    const projectPath = store.currentProject?.path;
+    if (!projectPath) return;
+    const cwd = entry.is_dir ? entry.path : parentOf(entry.path);
+    try {
+      const sessionId = await openTerminal(projectPath, cwd);
+      addTerminal({ sessionId, label: entry.is_dir ? entry.name : "Shell", kind: "shell" });
+    } catch (e) {
+      toast(`Failed to open terminal: ${String(e)}`, "error");
+    }
+  }
+
+  function handleOpenWith(entry: FileEntry) {
+    setMenu(null);
+    openPath(entry.path).catch((e) => toast(`Failed to open: ${String(e)}`, "error"));
+  }
+
+  function handleFindInFolder(entry: FileEntry) {
+    setMenu(null);
+    const scope = entry.is_dir ? relPath(entry) : relPathOf(parentOf(entry.path));
+    if (scope) openOmniSearchInScope(scope);
+    else runAction("omni-search");
+  }
+
+  // ── Git stage / unstage / discard ──────────────────────────────────────
+
+  function entryGitStatus(entry: FileEntry, statuses: FileStatus[]): FileStatus | null {
+    const rel = relPath(entry);
+    return statuses.find((s) => s.path === rel || s.path.startsWith(rel + "/")) ?? null;
+  }
+
+  async function handleStage(entry: FileEntry) {
+    setMenu(null);
+    const projectPath = store.currentProject?.path;
+    if (!projectPath) return;
+    const paths = targetPaths(entry).map(relPathOf);
+    try {
+      await gitStage(projectPath, paths);
+      bumpGitStatus();
+      toast(`Staged ${paths.length} item${paths.length === 1 ? "" : "s"}`, "success");
+    } catch (e) {
+      toast(`Failed to stage: ${String(e)}`, "error");
+    }
+  }
+
+  async function handleUnstage(entry: FileEntry) {
+    setMenu(null);
+    const projectPath = store.currentProject?.path;
+    if (!projectPath) return;
+    const paths = targetPaths(entry).map(relPathOf);
+    try {
+      await gitUnstage(projectPath, paths);
+      bumpGitStatus();
+      toast(`Unstaged ${paths.length} item${paths.length === 1 ? "" : "s"}`, "success");
+    } catch (e) {
+      toast(`Failed to unstage: ${String(e)}`, "error");
+    }
+  }
+
+  async function handleDiscard(entry: FileEntry, statuses: FileStatus[]) {
+    setMenu(null);
+    const projectPath = store.currentProject?.path;
+    if (!projectPath) return;
+    const st = entryGitStatus(entry, statuses);
+    const isUntracked = st?.status === "??";
+    const message = isMultiTarget(entry)
+      ? `Discard changes in ${targetPaths(entry).length} selected items?`
+      : isUntracked
+        ? `Delete untracked "${entry.name}"?`
+        : `Discard changes in "${entry.name}"?`;
+    const confirmed = await confirmDialog(message, "Discard");
+    if (!confirmed) return;
+    const paths = targetPaths(entry).map(relPathOf);
+    const tracked = isUntracked ? [] : paths;
+    const untracked = isUntracked ? paths : [];
+    try {
+      await gitDiscard(projectPath, tracked, untracked);
+      bumpGitStatus();
+      await reloadDir(parentOf(entry.path));
+    } catch (e) {
+      toast(`Failed to discard: ${String(e)}`, "error");
+    }
+  }
+
+  // ── AI actions ─────────────────────────────────────────────────────────
+
+  function seedAi(instruction: string, entry: FileEntry) {
+    setMenu(null);
+    const paths = targetPaths(entry).map(relPathOf);
+    const refs = paths.map((p) => `@${p}`).join(" ");
+    setPendingPromptSeed({ text: `${instruction} ${refs}` });
+  }
+
+  function handleRefactor(entry: FileEntry) {
+    setMenu(null);
+    const files = targetPaths(entry).map(relPathOf);
+    void openAgentTaskDialog({
+      title: "Refactor with AI",
+      files,
+      suggestions: [
+        "Extract this into smaller functions",
+        "Simplify and remove duplication",
+        "Add type safety and fix any type errors",
+        "Rename for clarity and update all call sites",
+      ],
+      placeholder: "Describe the refactor you want…",
+    });
+  }
+
+  function handleCustomAI(entry: FileEntry) {
+    setMenu(null);
+    const files = targetPaths(entry).map(relPathOf);
+    void openAgentTaskDialog({
+      title: "Custom AI task",
+      files,
+      placeholder: "Describe what the agent should do with these files…",
+    });
   }
 
   // ── Quick filter ─────────────────────────────────────────────────────────
@@ -934,46 +1160,113 @@ const FileTree: Component = () => {
       </div>
 
       {/* Context menu */}
-      <ContextMenu open={menu() !== null} onClose={() => setMenu(null)} x={menu()?.x ?? 0} y={menu()?.y ?? 0} width={210}>
+      <ContextMenu open={menu() !== null} onClose={() => setMenu(null)} x={menu()?.x ?? 0} y={menu()?.y ?? 0} width={224}>
         <Show when={menuEntry()}>
           {(entry) => {
-            const changed = () => !!statusFor(entry(), statuses());
-            const selected = () => store.selectedFiles.includes(relPath(entry()));
+            const multi = () => isMultiTarget(entry());
+            const st = () => entryGitStatus(entry(), statuses());
+            const hasChange = () => !!st();
+            const isUntracked = () => st()?.status === "??";
+            const isSelected = () => store.selectedFiles.includes(relPath(entry()));
+            const clipboard = () => store.fileClipboard;
+            const menuPad = { padding: "7px 9px" };
             return (
               <>
+                {/* File-only open/review/history/selection block */}
                 <Show when={!entry().is_dir}>
-                  <MenuItem onSelect={() => { setMenu(null); openFile(entry(), statuses()); }} style={{ padding: "7px 9px" }}>Open</MenuItem>
-                  <Show when={changed()}>
-                    <MenuItem onSelect={() => { setMenu(null); reviewFile(entry(), statuses()); }} style={{ padding: "7px 9px" }}>Review changes</MenuItem>
+                  <Show when={!multi()}>
+                    <MenuItem onSelect={() => { setMenu(null); openFile(entry(), statuses()); }} style={menuPad}>Open</MenuItem>
+                    <Show when={hasChange()}>
+                      <MenuItem onSelect={() => { setMenu(null); reviewFile(entry(), statuses()); }} style={menuPad}>Review changes</MenuItem>
+                    </Show>
+                    <MenuItem onSelect={() => { setMenu(null); openFileHistory(relPath(entry())); }} style={menuPad}>File history</MenuItem>
                   </Show>
-                  <MenuItem onSelect={() => { setMenu(null); openFileHistory(relPath(entry())); }} style={{ padding: "7px 9px" }}>File history</MenuItem>
-                  <MenuItem onSelect={() => { setMenu(null); toggleFileSelection(relPath(entry())); }} style={{ padding: "7px 9px" }}>
-                    {selected() ? "Remove from selection" : "Add to selection"}
+                  <MenuItem onSelect={() => { setMenu(null); toggleFileSelection(relPath(entry())); }} style={menuPad}>
+                    {isSelected() ? "Remove from selection" : "Add to selection"}
                   </MenuItem>
                   <MenuDivider />
                 </Show>
+
+                {/* Folder-only new/collapse block */}
                 <Show when={entry().is_dir}>
-                  <MenuItem onSelect={() => void startCreate(entry().path, "create-file")} style={{ padding: "7px 9px" }}>New File…</MenuItem>
-                  <MenuItem onSelect={() => void startCreate(entry().path, "create-folder")} style={{ padding: "7px 9px" }}>New Folder…</MenuItem>
-                  <Show when={expanded().has(entry().path)}>
-                    <MenuItem onSelect={() => { setMenu(null); void toggleDir(entry().path); }} style={{ padding: "7px 9px" }}>Collapse</MenuItem>
+                  <MenuItem onSelect={() => void startCreate(entry().path, "create-file")} style={menuPad}>New File…</MenuItem>
+                  <MenuItem onSelect={() => void startCreate(entry().path, "create-folder")} style={menuPad}>New Folder…</MenuItem>
+                  <Show when={!multi()}>
+                    <Show when={expanded().has(entry().path)}>
+                      <MenuItem onSelect={() => { setMenu(null); void toggleDir(entry().path); }} style={menuPad}>Collapse</MenuItem>
+                    </Show>
+                    <Show when={!expanded().has(entry().path)}>
+                      <MenuItem onSelect={() => { setMenu(null); void toggleDir(entry().path); }} style={menuPad}>Expand</MenuItem>
+                    </Show>
                   </Show>
                   <MenuDivider />
                 </Show>
-                <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(entry().path); }} style={{ padding: "7px 9px" }}>Copy path</MenuItem>
-                <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(relPath(entry())); }} style={{ padding: "7px 9px" }}>Copy relative path</MenuItem>
-                <MenuItem
-                  onSelect={() => {
-                    setMenu(null);
-                    revealItemInDir(entry().path).catch((e) => toast(`Failed to reveal: ${String(e)}`, "error"));
-                  }}
-                  style={{ padding: "7px 9px" }}
-                >
-                  Reveal in Finder
-                </MenuItem>
+
+                {/* Git stage/unstage/discard */}
+                <Show when={hasChange()}>
+                  <Show when={!isUntracked()}>
+                    <MenuItem onSelect={() => void handleStage(entry())} style={menuPad}>Stage changes</MenuItem>
+                    <MenuItem onSelect={() => void handleUnstage(entry())} style={menuPad}>Unstage changes</MenuItem>
+                  </Show>
+                  <MenuItem onSelect={() => void handleDiscard(entry(), statuses())} style={{ ...menuPad, color: "var(--status-del)" }}>
+                    {isUntracked() ? "Delete (untracked)" : "Discard changes"}
+                  </MenuItem>
+                  <MenuDivider />
+                </Show>
+
+                {/* File ops */}
+                <Show when={!multi()}>
+                  <MenuItem onSelect={() => void handleDuplicate(entry())} style={menuPad}>Duplicate</MenuItem>
+                </Show>
+                <MenuItem onSelect={() => handleCut(entry())} style={menuPad}>Cut</MenuItem>
+                <MenuItem onSelect={() => handleCopy(entry())} style={menuPad}>Copy</MenuItem>
+                <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(entry().path); }} style={menuPad}>Copy path</MenuItem>
+                <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(relPath(entry())); }} style={menuPad}>Copy relative path</MenuItem>
+                <Show when={!entry().is_dir && !multi()}>
+                  <MenuItem onSelect={() => handleCopyFilename(entry())} style={menuPad}>Copy filename</MenuItem>
+                </Show>
+                <MenuItem onSelect={() => handleCopyAsRef(entry())} style={menuPad}>Copy as @path ref</MenuItem>
+                <Show when={clipboard() && clipboard()!.paths.length > 0}>
+                  <MenuItem onSelect={() => void handlePaste(destDirFor(entry()))} style={menuPad}>
+                    Paste {clipboard()!.paths.length} item{clipboard()!.paths.length === 1 ? "" : "s"} here
+                  </MenuItem>
+                </Show>
                 <MenuDivider />
-                <MenuItem onSelect={() => startRename(entry())} style={{ padding: "7px 9px" }}>Rename</MenuItem>
-                <MenuItem onSelect={() => void handleDelete(entry())} style={{ padding: "7px 9px", color: "var(--status-del)" }}>Delete</MenuItem>
+
+                {/* Open / reveal / search */}
+                <MenuItem onSelect={() => void handleOpenInTerminal(entry())} style={menuPad}>Open in Terminal</MenuItem>
+                <Show when={!entry().is_dir && !multi()}>
+                  <MenuItem onSelect={() => handleOpenWith(entry())} style={menuPad}>Open With</MenuItem>
+                </Show>
+                <MenuItem
+                  onSelect={() => { setMenu(null); revealItemInDir(entry().path).catch((e) => toast(`Failed to reveal: ${String(e)}`, "error")); }}
+                  style={menuPad}
+                >
+                  {revealLabel()}
+                </MenuItem>
+                <Show when={!multi()}>
+                  <MenuItem onSelect={() => handleFindInFolder(entry())} style={menuPad}>Find in Folder…</MenuItem>
+                </Show>
+                <MenuDivider />
+
+                {/* AI actions */}
+                <Show when={!multi()}>
+                  <MenuItem onSelect={() => seedAi("Explain", entry())} style={menuPad}>Explain with AI</MenuItem>
+                  <MenuItem onSelect={() => seedAi("Generate unit tests for", entry())} style={menuPad}>Generate tests</MenuItem>
+                  <MenuItem onSelect={() => seedAi("Add documentation to", entry())} style={menuPad}>Document</MenuItem>
+                  <MenuItem onSelect={() => seedAi("Review and fix any lint, type, or test errors in", entry())} style={menuPad}>Fix issues</MenuItem>
+                </Show>
+                <MenuItem onSelect={() => void handleRefactor(entry())} style={menuPad}>
+                  {multi() ? `Refactor ${targetPaths(entry()).length} files with AI…` : "Refactor with AI…"}
+                </MenuItem>
+                <MenuItem onSelect={() => void handleCustomAI(entry())} style={menuPad}>Custom AI task…</MenuItem>
+                <MenuDivider />
+
+                {/* Rename / delete (single-target only) */}
+                <Show when={!multi()}>
+                  <MenuItem onSelect={() => startRename(entry())} style={menuPad}>Rename</MenuItem>
+                </Show>
+                <MenuItem onSelect={() => void handleDelete(entry())} style={{ ...menuPad, color: "var(--status-del)" }}>Delete</MenuItem>
               </>
             );
           }}
@@ -982,14 +1275,20 @@ const FileTree: Component = () => {
           <MenuItem onSelect={() => void startCreate(store.fileTreePath!, "create-file")} style={{ padding: "7px 9px" }}>New File…</MenuItem>
           <MenuItem onSelect={() => void startCreate(store.fileTreePath!, "create-folder")} style={{ padding: "7px 9px" }}>New Folder…</MenuItem>
           <MenuDivider />
+          <Show when={store.fileClipboard && store.fileClipboard!.paths.length > 0}>
+            <MenuItem onSelect={() => void handlePaste(store.fileTreePath!)} style={{ padding: "7px 9px" }}>
+              Paste {store.fileClipboard!.paths.length} item{store.fileClipboard!.paths.length === 1 ? "" : "s"} here
+            </MenuItem>
+            <MenuDivider />
+          </Show>
           <MenuItem
-            onSelect={() => {
-              setMenu(null);
-              revealItemInDir(store.fileTreePath!).catch((e) => toast(`Failed to reveal: ${String(e)}`, "error"));
-            }}
+            onSelect={() => { setMenu(null); revealItemInDir(store.fileTreePath!).catch((e) => toast(`Failed to reveal: ${String(e)}`, "error")); }}
             style={{ padding: "7px 9px" }}
           >
-            Reveal in Finder
+            {revealLabel()}
+          </MenuItem>
+          <MenuItem onSelect={() => { setMenu(null); runAction("omni-search"); }} style={{ padding: "7px 9px" }}>
+            Find in Project…
           </MenuItem>
           <MenuItem
             onSelect={() => {

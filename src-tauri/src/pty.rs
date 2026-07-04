@@ -305,12 +305,15 @@ pub fn spawn_shell_command(
 
 /// Spawn an interactive login shell (e.g. for a user-opened terminal tab),
 /// as opposed to `spawn_shell_command` which runs a one-off command via
-/// `sh -c` and exits when it completes.
+/// `sh -c` and exits when it completes. `cwd` overrides the shell's working
+/// directory when provided (e.g. "Open in Terminal" on a subfolder); the
+/// session's tracked `project_path` is unchanged.
 ///
 /// Returns `(session_id, receiver)`.
 pub fn spawn_interactive_shell(
     manager: &PtyManager,
     project_path: &str,
+    cwd: Option<&str>,
 ) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
     let session_id = Uuid::new_v4().to_string();
     let (tx, rx) = mpsc::channel::<PtyEvent>();
@@ -335,7 +338,7 @@ pub fn spawn_interactive_shell(
         cmd.env("TERM", "xterm-256color");
         cmd
     };
-    cmd.cwd(project_path);
+    cmd.cwd(cwd.unwrap_or(project_path));
 
     let child = pair
         .slave

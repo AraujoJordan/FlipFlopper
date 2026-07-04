@@ -658,8 +658,9 @@ fn open_terminal(
     app: tauri::AppHandle,
     state: State<'_, PtyManager>,
     project_path: String,
+    cwd: Option<String>,
 ) -> Result<String, String> {
-    let (session_id, rx) = pty::spawn_interactive_shell(&state, &project_path)?;
+    let (session_id, rx) = pty::spawn_interactive_shell(&state, &project_path, cwd.as_deref())?;
     bridge_pty(app, session_id.clone(), rx);
     Ok(session_id)
 }
@@ -741,6 +742,21 @@ fn rename_entry(path: String, new_name: String) -> Result<FileEntry, String> {
 #[tauri::command]
 fn delete_entry(path: String) -> Result<(), String> {
     project::delete_entry(&path)
+}
+
+#[tauri::command]
+fn duplicate_entry(path: String) -> Result<FileEntry, String> {
+    project::duplicate_entry(&path)
+}
+
+#[tauri::command]
+fn copy_entry(src_path: String, dest_dir: String) -> Result<FileEntry, String> {
+    project::copy_entry_into(&src_path, &dest_dir)
+}
+
+#[tauri::command]
+fn move_entry(src_path: String, dest_dir: String) -> Result<FileEntry, String> {
+    project::move_entry_into(&src_path, &dest_dir)
 }
 
 // ════════════════════════════════════════════════
@@ -971,6 +987,46 @@ fn git_checkout_commit(project_path: String, sha: String) -> Result<(), String> 
 #[tauri::command]
 fn git_checkout_previous(project_path: String) -> Result<(), String> {
     git::checkout_previous(&project_path)
+}
+
+#[tauri::command]
+fn commits_ahead_of_remote(project_path: String) -> Result<Vec<CommitEntry>, String> {
+    git::commits_ahead_of_remote(&project_path)
+}
+
+#[tauri::command]
+fn squash_unpushed(project_path: String, message: String) -> Result<(), String> {
+    git::squash_unpushed(&project_path, &message)
+}
+
+/// Ask an installed agent with a headless print mode to summarize the
+/// commits/diff not yet on the remote and propose a one-line commit subject.
+/// Used by the squash-before-push dialog's "Generate with AI" button.
+#[tauri::command]
+async fn generate_commit_message(project_path: String, agent_id: String) -> Result<String, String> {
+    let def = agents::find_agent(&agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
+    let diff = git::commit_range_diff(&project_path)?;
+    if diff.trim().is_empty() {
+        return Err("Nothing to summarize — no unpushed changes.".to_string());
+    }
+    let prompt = format!(
+        "Write ONE concise imperative git commit subject line (optionally with a \
+scope prefix like `feat(x):`), at most about 70 characters, summarizing the \
+following changes. Output ONLY the subject line: no quotes, no backticks, no \
+body, no explanation.\n\n{diff}"
+    );
+    let raw = agents::run_headless(def, &project_path, &prompt).await?;
+    let cleaned = raw
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .to_string();
+    if cleaned.is_empty() {
+        return Err(format!("{} did not return a commit message.", def.name));
+    }
+    Ok(cleaned)
 }
 
 // ════════════════════════════════════════════════
@@ -1233,6 +1289,9 @@ pub fn run() {
             create_entry,
             rename_entry,
             delete_entry,
+            duplicate_entry,
+            copy_entry,
+            move_entry,
             // Editor
             read_file_text,
             write_file_text,
@@ -1269,6 +1328,9 @@ pub fn run() {
             git_push,
             git_checkout_commit,
             git_checkout_previous,
+            commits_ahead_of_remote,
+            squash_unpushed,
+            generate_commit_message,
             // Tools
             get_tool_catalog,
             install_tool,

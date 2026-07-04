@@ -350,6 +350,192 @@ pub fn delete_entry(path: &str) -> Result<(), String> {
     }
 }
 
+// ────────────────────────────────────────────────
+// Duplicate / copy / move (cut-copy-paste support)
+// ────────────────────────────────────────────────
+
+/// Split a filename into `(stem, Option<extension>)` where the extension
+/// keeps its leading dot. Folders are treated as having no extension.
+/// A leading-dot file (`.gitignore`) is treated as all-stem.
+fn split_name_ext(name: &str, is_dir: bool) -> (String, Option<String>) {
+    if is_dir {
+        return (name.to_string(), None);
+    }
+    match name.rfind('.') {
+        Some(idx) if idx > 0 => (name[..idx].to_string(), Some(name[idx..].to_string())),
+        _ => (name.to_string(), None),
+    }
+}
+
+/// Find a non-colliding name inside `dest_dir` for `desired_name`.
+/// Mirrors Finder: `foo.txt` → `foo copy.txt` → `foo copy 2.txt` → …
+/// Returns the original name unchanged if nothing collides.
+fn unique_name(dest_dir: &Path, desired_name: &str, is_dir: bool) -> String {
+    if !dest_dir.join(desired_name).exists() {
+        return desired_name.to_string();
+    }
+    let (stem, ext) = split_name_ext(desired_name, is_dir);
+    for attempt in 0..1000u32 {
+        let suffix = if attempt == 0 {
+            " copy".to_string()
+        } else {
+            format!(" copy {}", attempt + 1)
+        };
+        let candidate = match &ext {
+            Some(e) => format!("{stem}{suffix}{e}"),
+            None => format!("{stem}{suffix}"),
+        };
+        if !dest_dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{desired_name}-copy")
+}
+
+/// Recursively copy a file or directory tree from `src` to `dest`.
+/// `dest` must not exist (the caller resolves a unique name first).
+fn copy_tree(src: &Path, dest: &Path) -> Result<(), String> {
+    if src.is_dir() {
+        fs::create_dir_all(dest).map_err(|e| format!("Failed to create folder: {e}"))?;
+        let mut stack: Vec<(PathBuf, PathBuf)> = vec![(src.to_path_buf(), dest.to_path_buf())];
+        while let Some((from, to)) = stack.pop() {
+            let read_dir = match fs::read_dir(&from) {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Failed to read folder: {e}")),
+            };
+            for entry in read_dir {
+                let Ok(entry) = entry else { continue };
+                let entry_path = entry.path();
+                let dest_child = to.join(entry.file_name());
+                if entry_path.is_dir() {
+                    fs::create_dir_all(&dest_child)
+                        .map_err(|e| format!("Failed to create folder: {e}"))?;
+                    stack.push((entry_path, dest_child));
+                } else {
+                    fs::copy(&entry_path, &dest_child)
+                        .map_err(|e| format!("Failed to copy file: {e}"))?;
+                }
+            }
+        }
+        Ok(())
+    } else {
+        fs::copy(src, dest)
+            .map_err(|e| format!("Failed to copy file: {e}"))
+            .map(|_| ())
+    }
+}
+
+/// Duplicate a file or folder in place, appending " copy" (then " copy 2", …)
+/// on collisions, mirroring Finder/macOS.
+pub fn duplicate_entry(path: &str) -> Result<FileEntry, String> {
+    let source = PathBuf::from(path);
+    if !source.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+    let parent = source
+        .parent()
+        .ok_or_else(|| "Cannot duplicate the root directory".to_string())?;
+    let original_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid file name".to_string())?;
+    let is_dir = source.is_dir();
+    let new_name = unique_name(parent, original_name, is_dir);
+    let dest = parent.join(&new_name);
+    copy_tree(&source, &dest)?;
+    Ok(FileEntry {
+        name: new_name,
+        path: dest.to_string_lossy().to_string(),
+        is_dir,
+    })
+}
+
+/// Copy a file or folder into `dest_dir`. Keeps the source basename, or falls
+/// back to a " copy" / " copy 2" variant if that name is already taken.
+pub fn copy_entry_into(path: &str, dest_dir: &str) -> Result<FileEntry, String> {
+    let source = PathBuf::from(path);
+    if !source.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+    let dest = PathBuf::from(dest_dir);
+    if !dest.is_dir() {
+        return Err(format!("Not a directory: {dest_dir}"));
+    }
+    let original_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid file name".to_string())?;
+    let is_dir = source.is_dir();
+    let new_name = unique_name(&dest, original_name, is_dir);
+    let dest_path = dest.join(&new_name);
+    copy_tree(&source, &dest_path)?;
+    Ok(FileEntry {
+        name: new_name,
+        path: dest_path.to_string_lossy().to_string(),
+        is_dir,
+    })
+}
+
+/// Move a file or folder into `dest_dir`. Rejects moving a folder into itself
+/// or one of its descendants. A no-op when the source already lives directly
+/// inside `dest_dir`. Falls back to copy+delete for cross-device renames.
+pub fn move_entry_into(path: &str, dest_dir: &str) -> Result<FileEntry, String> {
+    let source = PathBuf::from(path);
+    if !source.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+    let dest = PathBuf::from(dest_dir);
+    if !dest.is_dir() {
+        return Err(format!("Not a directory: {dest_dir}"));
+    }
+    let canonical_source = source.canonicalize().unwrap_or_else(|_| source.clone());
+    let canonical_dest = dest.canonicalize().unwrap_or_else(|_| dest.clone());
+    if canonical_source == canonical_dest || canonical_dest.starts_with(&canonical_source) {
+        return Err("Cannot move a folder into itself".to_string());
+    }
+
+    let original_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid file name".to_string())?;
+    let is_dir = source.is_dir();
+
+    // No-op when the source is already directly inside the destination.
+    if source
+        .parent()
+        .and_then(|p| p.canonicalize().ok())
+        .as_ref()
+        == Some(&canonical_dest)
+    {
+        return Ok(FileEntry {
+            name: original_name.to_string(),
+            path: source.to_string_lossy().to_string(),
+            is_dir,
+        });
+    }
+
+    let new_name = unique_name(&dest, original_name, is_dir);
+    let dest_path = dest.join(&new_name);
+    match fs::rename(&source, &dest_path) {
+        Ok(()) => {}
+        Err(_) => {
+            copy_tree(&source, &dest_path)?;
+            if is_dir {
+                fs::remove_dir_all(&source)
+                    .map_err(|e| format!("Failed to remove source after move: {e}"))?;
+            } else {
+                fs::remove_file(&source)
+                    .map_err(|e| format!("Failed to remove source after move: {e}"))?;
+            }
+        }
+    }
+    Ok(FileEntry {
+        name: new_name,
+        path: dest_path.to_string_lossy().to_string(),
+        is_dir,
+    })
+}
+
 /// Search project files and directories for prompt autocomplete.
 /// Bare queries search the project recursively. Explicit filesystem queries
 /// (`~/`, `/...`, `../...`, Windows absolute paths) browse that location.

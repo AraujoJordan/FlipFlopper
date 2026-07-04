@@ -84,6 +84,12 @@ export interface AppStore {
   pendingPromptInsert: { path: string; startLine: number; endLine: number } | null;
   /** Live editor selection state — drives the "+" button visibility. */
   editorSelectionInfo: { path: string; startLine: number; endLine: number; hasSelection: boolean } | null;
+  /** Clipboard for cut/copy/paste of file-tree entries (absolute paths). */
+  fileClipboard: { paths: string[]; mode: "cut" | "copy" } | null;
+  /** One-shot channel: external components seed the prompt composer with a
+   *  ready-made instruction (e.g. "Explain @src/foo.ts"). The composer
+   *  appends/focuses it as editable text and clears this. */
+  pendingPromptSeed: { text: string } | null;
   yoloMode: boolean;
   explorerCollapsed: boolean;
   gitPanelCollapsed: boolean;
@@ -163,6 +169,8 @@ const initial: AppStore = {
   historyFilterPath: null,
   pendingPromptInsert: null,
   editorSelectionInfo: null,
+  fileClipboard: null,
+  pendingPromptSeed: null,
   yoloMode: readYoloMode(),
   explorerCollapsed: getExplorerCollapsedForMode("agent"),
   gitPanelCollapsed: getGitPanelCollapsedForMode("agent"),
@@ -623,6 +631,25 @@ export function setPendingPromptInsert(info: { path: string; startLine: number; 
  *  the "+" button visibility in the editor header. */
 export function setEditorSelectionInfo(info: { path: string; startLine: number; endLine: number; hasSelection: boolean } | null) {
   setStore("editorSelectionInfo", info);
+}
+
+// ── File-tree clipboard (cut / copy / paste) ─────────────────────────────────
+
+export function setFileClipboard(clipboard: { paths: string[]; mode: "cut" | "copy" } | null) {
+  setStore("fileClipboard", clipboard);
+}
+
+export function clearFileClipboard() {
+  setStore("fileClipboard", null);
+}
+
+// ── External → prompt seed channel ───────────────────────────────────────────
+
+/** Seed the prompt composer with a ready-made instruction (e.g. AI quick
+ *  actions from the file-tree context menu: "Explain @src/foo.ts"). The
+ *  composer appends/focuses it as editable text and clears this. */
+export function setPendingPromptSeed(seed: { text: string } | null) {
+  setStore("pendingPromptSeed", seed);
 }
 
 const inFlightOpens = new Set<string>();

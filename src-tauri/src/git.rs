@@ -217,12 +217,36 @@ pub fn auto_commit(project_path: &str, message: &str) -> Result<CommitResult, St
     })
 }
 
+/// Commit every pending change on the current branch before leaving it, so a
+/// branch switch never carries uncommitted work onto (or loses it against) the
+/// target branch. Unlike `auto_commit`, this intentionally has no main/master
+/// guard: switching should never drop work. Returns `Ok(true)` when a commit
+/// was created, `Ok(false)` when the tree was already clean.
+pub fn commit_before_switch(project_path: &str) -> Result<bool, String> {
+    let status = get_status(project_path)?;
+    if status.is_empty() {
+        return Ok(false);
+    }
+    let branch = git(project_path, &["branch", "--show-current"])?;
+    let label = if branch.is_empty() {
+        "detached HEAD".to_string()
+    } else {
+        branch
+    };
+    let message = format!("wip: auto-save on {label}");
+    git(project_path, &["add", "-A"])?;
+    git(project_path, &["commit", "-m", &message])?;
+    Ok(true)
+}
+
 /// Create and switch to `branch_name`; noop if already on it.
 pub fn ensure_work_branch(project_path: &str, branch_name: &str) -> Result<String, String> {
     let current = git(project_path, &["branch", "--show-current"])?;
     if current == branch_name {
         return Ok(current);
     }
+    // Commit any pending work to the current branch before leaving it.
+    commit_before_switch(project_path)?;
     // Check if branch exists already
     let branches = git(project_path, &["branch", "--list", branch_name])?;
     if branches.is_empty() {
@@ -253,31 +277,14 @@ pub struct CommitEntry {
     pub date_iso: String,
 }
 
-/// Return the last `limit` commits, newest first. Returns empty vec when the
-/// repo has no commits yet (swallows the "does not have any commits" error).
-/// When `file` is given, scopes the log to that path and follows renames.
-pub fn get_log(
-    project_path: &str,
-    limit: u32,
-    file: Option<&str>,
-) -> Result<Vec<CommitEntry>, String> {
-    let fmt = "%H\x1f%h\x1f%s\x1f%cr\x1f%an\x1f%cI";
-    let n = limit.to_string();
-    let mut args: Vec<&str> = vec!["log", "-n", &n];
-    let pretty = format!("--pretty=format:{fmt}");
-    args.push(&pretty);
-    if let Some(p) = file {
-        args.push("--follow");
-        args.push("--");
-        args.push(p);
-    }
-    let out = match git(project_path, &args) {
-        Ok(o) => o,
-        Err(e) if e.contains("does not have any commits") => return Ok(vec![]),
-        Err(e) => return Err(e),
-    };
-    Ok(out
-        .lines()
+/// `%H\x1f%h\x1f%s\x1f%cr\x1f%an\x1f%cI` — shared pretty-format used by every
+/// `git log` call that feeds a `CommitEntry` list.
+const LOG_FMT: &str = "%H\x1f%h\x1f%s\x1f%cr\x1f%an\x1f%cI";
+
+/// Parse lines produced by `--pretty=format:{LOG_FMT}` into `CommitEntry`s.
+/// Malformed lines are dropped rather than failing the whole call.
+fn parse_log_lines(out: &str) -> Vec<CommitEntry> {
+    out.lines()
         .filter(|l| !l.is_empty())
         .filter_map(|line| {
             let parts: Vec<&str> = line.splitn(6, '\x1f').collect();
@@ -294,7 +301,139 @@ pub fn get_log(
                 None
             }
         })
-        .collect())
+        .collect()
+}
+
+/// Return the last `limit` commits, newest first. Returns empty vec when the
+/// repo has no commits yet (swallows the "does not have any commits" error).
+/// When `file` is given, scopes the log to that path and follows renames.
+pub fn get_log(
+    project_path: &str,
+    limit: u32,
+    file: Option<&str>,
+) -> Result<Vec<CommitEntry>, String> {
+    let n = limit.to_string();
+    let mut args: Vec<&str> = vec!["log", "-n", &n];
+    let pretty = format!("--pretty=format:{LOG_FMT}");
+    args.push(&pretty);
+    if let Some(p) = file {
+        args.push("--follow");
+        args.push("--");
+        args.push(p);
+    }
+    let out = match git(project_path, &args) {
+        Ok(o) => o,
+        Err(e) if e.contains("does not have any commits") => return Ok(vec![]),
+        Err(e) => return Err(e),
+    };
+    Ok(parse_log_lines(&out))
+}
+
+/// Resolve the ref that "unpushed commits" should be measured against:
+/// the branch's upstream if it has one, else the first of `origin/HEAD`,
+/// `origin/main`, `origin/master` that exists. `None` means there is nothing
+/// on the remote to compare against yet (brand-new repo with no remote
+/// branches at all).
+pub fn unpushed_base(project_path: &str) -> Result<Option<String>, String> {
+    if let Ok(upstream) = git(
+        project_path,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    ) {
+        return Ok(Some(upstream));
+    }
+    for candidate in ["origin/HEAD", "origin/main", "origin/master"] {
+        if git_output(project_path, &["rev-parse", "--verify", "--quiet", candidate])
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(Some(candidate.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// List the commits on the current branch that are not yet on the remote
+/// (newest first). See `unpushed_base` for how the comparison point is
+/// chosen; when there is no remote ref at all, every commit on HEAD counts.
+pub fn commits_ahead_of_remote(project_path: &str) -> Result<Vec<CommitEntry>, String> {
+    let base = unpushed_base(project_path)?;
+    let pretty = format!("--pretty=format:{LOG_FMT}");
+    let range = base.as_ref().map(|b| format!("{b}..HEAD"));
+    let mut args: Vec<&str> = vec!["log", &pretty];
+    if let Some(r) = &range {
+        args.push(r);
+    } else {
+        args.push("HEAD");
+    }
+    let out = match git(project_path, &args) {
+        Ok(o) => o,
+        Err(e) if e.contains("does not have any commits") => return Ok(vec![]),
+        Err(e) => return Err(e),
+    };
+    Ok(parse_log_lines(&out))
+}
+
+/// Squash every commit not yet on the remote into a single new commit on top
+/// of `unpushed_base`. Refuses on main/master (mirrors `auto_commit`'s
+/// guard), on a dirty working tree, and when there is nothing to squash.
+/// Never touches history already on origin — no force-push is ever needed
+/// after this.
+pub fn squash_unpushed(project_path: &str, message: &str) -> Result<(), String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("Commit message cannot be empty.".to_string());
+    }
+
+    let branch = git(project_path, &["branch", "--show-current"])?;
+    if branch == "main" || branch == "master" {
+        return Err("Squash refused: on main/master. Checkout a work branch first.".to_string());
+    }
+
+    if !get_status(project_path)?.is_empty() {
+        return Err("Squash refused: commit or stash your working tree changes first.".to_string());
+    }
+
+    let base = unpushed_base(project_path)?
+        .ok_or_else(|| "Squash refused: no remote branch to compare against yet.".to_string())?;
+
+    let ahead = commits_ahead_of_remote(project_path)?;
+    if ahead.len() < 2 {
+        return Err("Nothing to squash: fewer than 2 unpushed commits.".to_string());
+    }
+
+    git(project_path, &["reset", "--soft", &base])?;
+    git(project_path, &["commit", "-m", message])?;
+    Ok(())
+}
+
+/// Diff + a short log header for every commit not yet on the remote, capped
+/// to a sane size so it can be handed to an AI agent as context. Used only to
+/// build the commit-message-generation prompt.
+pub fn commit_range_diff(project_path: &str) -> Result<String, String> {
+    const MAX_BYTES: usize = 60_000;
+
+    let base = unpushed_base(project_path)?;
+    // Git's well-known empty-tree hash: when there's no remote ref at all yet
+    // (brand-new repo, nothing published anywhere), diff/log the whole branch
+    // against "nothing" instead of guessing at a base commit.
+    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    let base = base.unwrap_or_else(|| EMPTY_TREE.to_string());
+    let range_arg = format!("{base}..HEAD");
+
+    let log_header = git(project_path, &["log", "--oneline", &range_arg]).unwrap_or_default();
+    let diff = git(project_path, &["diff", &range_arg]).unwrap_or_default();
+
+    let mut combined = format!("Commits:\n{log_header}\n\nDiff:\n{diff}");
+    if combined.len() > MAX_BYTES {
+        combined.truncate(MAX_BYTES);
+        combined.push_str("\n… (truncated)");
+    }
+    Ok(combined)
 }
 
 /// Rename a commit message on the current branch. Refuses on main/master and
@@ -615,8 +754,10 @@ pub fn get_recent_branches(project_path: &str, limit: usize) -> Result<Vec<Strin
     Ok(branches)
 }
 
-/// Switch to an existing branch.
+/// Switch to an existing branch, committing any pending work first so nothing
+/// is carried onto the target branch or lost.
 pub fn switch_branch(project_path: &str, branch_name: &str) -> Result<(), String> {
+    commit_before_switch(project_path)?;
     git(project_path, &["switch", branch_name])?;
     Ok(())
 }

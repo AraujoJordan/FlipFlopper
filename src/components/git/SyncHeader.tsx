@@ -1,9 +1,10 @@
 import { Component, Show, createSignal } from "solid-js";
 import type { Resource } from "solid-js";
 import { store, bumpGitStatus, toggleGitPanelCollapsed, updateCurrentBranch } from "../../lib/store";
-import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, type SyncStatus } from "../../lib/ipc";
+import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, commitsAheadOfRemote, type SyncStatus } from "../../lib/ipc";
 import { Button, Spinner, toast } from "../ui";
 import { openConflictDialog } from "./ConflictFixDialog";
+import { openSquashPushDialog } from "./SquashPushDialog";
 
 type BusyOp = "fetch" | "pull" | "push" | null;
 
@@ -35,7 +36,35 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
     await gitFetch(store.currentProject!.path);
     return "Fetched";
   });
-  const doPush = () => run("push", async () => (await gitPush(store.currentProject!.path)) || "Pushed");
+
+  // Push gets its own handler (not the generic `run`) because it may need to
+  // open the squash dialog instead of pushing immediately.
+  async function doPush() {
+    const project = store.currentProject;
+    if (!project || busyOp()) return;
+    const branch = s()?.branch ?? "";
+    const isPublish = !upstream();
+    setBusyOp("push");
+    try {
+      // Squashing is refused on main/master server-side anyway (mirrors the
+      // rollback/rename guards), so skip the dialog there and push directly.
+      if (branch !== "main" && branch !== "master") {
+        const commits = await commitsAheadOfRemote(project.path);
+        if ((isPublish && commits.length >= 1) || commits.length >= 2) {
+          openSquashPushDialog({ commits, isPublish });
+          return;
+        }
+      }
+      const msg = await gitPush(project.path);
+      bumpGitStatus();
+      await updateCurrentBranch();
+      toast(msg || "Pushed", "success");
+    } catch (e) {
+      toast(String(e), "error");
+    } finally {
+      setBusyOp(null);
+    }
+  }
 
   // Pull gets its own handler (not the generic `run`) because a conflicted
   // merge isn't a thrown error — it's a structured outcome that should open

@@ -1,5 +1,5 @@
 import { Component, createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { store, addTab, cycleAgentModeOptimistic, setPendingPromptInsert, lastUsableAgent } from "../lib/store";
+import { store, addTab, cycleAgentModeOptimistic, setPendingPromptInsert, setPendingPromptSeed, lastUsableAgent } from "../lib/store";
 import {
   listPromptSkills,
   pickPromptFile,
@@ -179,6 +179,21 @@ const PromptComposer: Component = () => {
       ? `${pending.startLine}`
       : `${pending.startLine}-${pending.endLine}`;
     insertAtCaretNoFocus(`@${pending.path}:${lineSpec} `);
+  });
+
+  // External → prompt seed: file-tree AI quick actions (Explain, Generate
+  // tests, …) drop a ready-made instruction here. Append it on its own line
+  // (so existing drafts aren't clobbered) and focus the composer so the user
+  // can review and hit Enter.
+  createEffect(() => {
+    const seed = store.pendingPromptSeed;
+    if (!seed) return;
+    setPendingPromptSeed(null);
+    const next = value().length === 0 ? seed.text : `${value()}\n${seed.text}`;
+    setValue(next);
+    setDismissedTokenKey(null);
+    const caret = next.length;
+    focusAt(caret);
   });
 
   const completionToken = createMemo(() => activeCompletionToken(value(), caretPosition()));

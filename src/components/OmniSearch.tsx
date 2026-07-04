@@ -1,7 +1,7 @@
 import { Component, For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { searchProjectText, searchPromptFiles, type FileEntry, type TextMatch } from "../lib/ipc";
 import { openEditorFile, store } from "../lib/store";
-import { registerShortcutHandler } from "../lib/shortcuts";
+import { registerShortcutHandler, runAction } from "../lib/shortcuts";
 
 type SearchItem =
   | { kind: "file"; file: FileEntry }
@@ -77,6 +77,16 @@ export function openUsages(symbol: string, items: UsageItem[]) {
   setUsagesState({ symbol, items: items.slice() });
 }
 
+// ── Scoped open (consumed by FileTree "Find in Folder…") ─────────────────────
+const [pendingScope, setPendingScope] = createSignal<string | null>(null);
+
+/** Open OmniSearch restricted to a project-relative folder path. Clears any
+ *  prior usages popup. The scope is consumed on open and shown as a chip. */
+export function openOmniSearchInScope(scope: string) {
+  setPendingScope(scope);
+  runAction("omni-search");
+}
+
 const OmniSearch: Component = () => {
   let inputRef: HTMLInputElement | undefined;
   let dialogRef: HTMLDivElement | undefined;
@@ -91,6 +101,7 @@ const OmniSearch: Component = () => {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [scope, setScope] = createSignal<string | null>(null);
 
   const visible = createMemo(() => open() || usagesState() !== null);
 
@@ -119,12 +130,17 @@ const OmniSearch: Component = () => {
     setSelectedIndex(0);
     setError(null);
     setLoading(false);
+    setScope(null);
+    setPendingScope(null);
   }
 
   onMount(() => {
     const unregister = registerShortcutHandler("omni-search", () => {
       if (store.currentProject) {
         setUsagesState(null);
+        // Pick up a pending scope (set by openOmniSearchInScope) — or clear it.
+        setScope(pendingScope());
+        setPendingScope(null);
         setOpen(true);
       }
     });
@@ -182,8 +198,16 @@ const OmniSearch: Component = () => {
         ) {
           return;
         }
-        setFiles(fileResults.filter((entry) => !entry.is_dir));
-        setMatches(matchResults);
+        // Restrict to a folder scope when set (e.g. "Find in Folder…").
+        const sc = scope();
+        if (sc) {
+          const prefix = sc.endsWith("/") ? sc : `${sc}/`;
+          setFiles(fileResults.filter((entry) => !entry.is_dir && (entry.name === sc || entry.name.startsWith(prefix))));
+          setMatches(matchResults.filter((m) => m.rel_path === sc || m.rel_path.startsWith(prefix)));
+        } else {
+          setFiles(fileResults.filter((entry) => !entry.is_dir));
+          setMatches(matchResults);
+        }
         setError(null);
       } catch (err) {
         if (seq !== searchSeq) return;
@@ -319,9 +343,44 @@ const OmniSearch: Component = () => {
           <Show
             when={usagesState()}
             fallback={
-              <div style={{
-                display: "flex",
-                "align-items": "center",
+              <div style={{ display: "flex", "flex-direction": "column" }}>
+                <Show when={scope()}>
+                  {(sc) => (
+                    <div style={{
+                      display: "flex", "align-items": "center", gap: "8px",
+                      padding: "7px 10px",
+                      "border-bottom": "1px solid var(--border-muted)",
+                      "font-size": "11px", color: "var(--fg-subtle)",
+                    }}>
+                      <span>Scope</span>
+                      <code style={{
+                        "font-family": "'JetBrains Mono', monospace",
+                        color: "#79c0ff",
+                        background: "rgba(88,166,255,.14)",
+                        padding: "2px 7px", "border-radius": "5px",
+                        "font-size": "11px",
+                        overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
+                      }}>
+                        {sc()}
+                      </code>
+                      <button
+                        type="button"
+                        onclick={() => setScope(null)}
+                        title="Search whole project"
+                        style={{
+                          "margin-left": "auto", color: "var(--fg-subtle)",
+                          "font-size": "10.5px", cursor: "pointer",
+                          "text-decoration": "underline", "text-underline-offset": "2px",
+                        }}
+                      >
+                        Clear scope
+                      </button>
+                    </div>
+                  )}
+                </Show>
+                <div style={{
+                  display: "flex",
+                  "align-items": "center",
                 gap: "8px",
                 padding: "10px",
                 border: "0 solid var(--border-muted)",
@@ -330,7 +389,7 @@ const OmniSearch: Component = () => {
                 <input
                   ref={inputRef}
                   value={query()}
-                  placeholder="Search files and text"
+                  placeholder={scope() ? "Search in this folder" : "Search files and text"}
                   onInput={(e) => setQuery(e.currentTarget.value)}
                   style={{
                     flex: 1,
@@ -382,6 +441,7 @@ const OmniSearch: Component = () => {
                 </button>
                 <div style={{ color: "var(--fg-subtle)", "font-size": "11px", "white-space": "nowrap" }}>
                   {shortcutHint}
+                </div>
                 </div>
               </div>
             }

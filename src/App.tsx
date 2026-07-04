@@ -49,6 +49,8 @@ import TerminalPanel from "./components/TerminalPanel";
 import FileTree from "./components/FileTree";
 import GitPanel from "./components/git/GitPanel";
 import { ConflictFixDialogHost } from "./components/git/ConflictFixDialog";
+import { SquashPushDialogHost } from "./components/git/SquashPushDialog";
+import AgentTaskDialogHost from "./components/AgentTaskDialog";
 import DiffPane from "./components/DiffPane";
 import EditorPane from "./components/EditorPane";
 import OmniSearch from "./components/OmniSearch";
@@ -988,7 +990,9 @@ const App: Component = () => {
       <ToastHost />
       <OmniSearch />
       <ConfirmHost />
+      <AgentTaskDialogHost />
       <ConflictFixDialogHost />
+      <SquashPushDialogHost />
     </div>
   );
 };

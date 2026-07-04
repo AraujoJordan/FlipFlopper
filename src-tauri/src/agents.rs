@@ -16,6 +16,10 @@ pub struct AgentDef {
     /// Args appended when FlipFlopper starts this agent in YOLO mode.
     pub yolo_launch_args: &'static [&'static str],
     pub icon: &'static str,
+    /// Args that run this agent non-interactively: `binary <headless_args...>
+    /// <prompt>` should print a single text answer to stdout and exit.
+    /// `None` means the agent has no known print/exec mode.
+    pub headless_args: Option<&'static [&'static str]>,
 }
 
 /// Runtime view of an agent (includes whether it's installed)
@@ -29,6 +33,10 @@ pub struct AgentInfo {
     pub version: Option<String>,
     pub binary_path: Option<String>,
     pub yolo_supported: bool,
+    /// True when this agent has a known non-interactive print/exec mode
+    /// (see `AgentDef::headless_args`), so headless helpers like AI-generated
+    /// commit messages can offer it.
+    pub headless_supported: bool,
 }
 
 /// Static registry of all supported CLI agents.
@@ -42,6 +50,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &["--dangerously-skip-permissions"],
         icon: "/agents/claude.png",
+        headless_args: Some(&["-p"]),
     },
     AgentDef {
         id: "codex",
@@ -52,6 +61,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &["--yolo"],
         icon: "/agents/codex.png",
+        headless_args: Some(&["exec"]),
     },
     AgentDef {
         id: "cursor",
@@ -62,6 +72,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &[],
         icon: "/agents/cursor.png",
+        headless_args: None,
     },
     AgentDef {
         id: "opencode",
@@ -72,6 +83,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &["--auto"],
         icon: "/agents/opencode.png",
+        headless_args: None,
     },
     AgentDef {
         id: "aider",
@@ -82,6 +94,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &[],
         icon: "/agents/aider.png",
+        headless_args: None,
     },
     AgentDef {
         id: "goose",
@@ -92,6 +105,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &[],
         icon: "/agents/goose.png",
+        headless_args: None,
     },
     AgentDef {
         id: "agy",
@@ -102,6 +116,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &[],
         icon: "/agents/agy.png",
+        headless_args: None,
     },
     AgentDef {
         id: "cline",
@@ -112,6 +127,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &[],
         icon: "/agents/cline.png",
+        headless_args: None,
     },
     AgentDef {
         id: "qwen",
@@ -122,6 +138,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &[],
         icon: "/agents/qwen.png",
+        headless_args: None,
     },
     AgentDef {
         id: "plandex",
@@ -132,6 +149,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &[],
         icon: "/agents/plandex.png",
+        headless_args: None,
     },
     AgentDef {
         id: "droid",
@@ -142,6 +160,7 @@ pub static AGENTS: &[AgentDef] = &[
         launch_args: &[],
         yolo_launch_args: &[],
         icon: "/agents/droid.png",
+        headless_args: None,
     },
 ];
 
@@ -221,6 +240,7 @@ pub fn list_agents() -> Vec<AgentInfo> {
                         version,
                         binary_path,
                         yolo_supported: !def.yolo_launch_args.is_empty(),
+                        headless_supported: def.headless_args.is_some(),
                     }
                 })
             })
@@ -233,4 +253,44 @@ pub fn list_agents() -> Vec<AgentInfo> {
 /// Look up a def by id.
 pub fn find_agent(id: &str) -> Option<&'static AgentDef> {
     AGENTS.iter().find(|a| a.id == id)
+}
+
+/// Run `def`'s non-interactive print/exec mode with `prompt` and capture its
+/// stdout. Used for one-shot helpers (e.g. AI-generated commit messages) that
+/// need a text answer back, not an interactive terminal session.
+pub async fn run_headless(def: &AgentDef, project_path: &str, prompt: &str) -> Result<String, String> {
+    let headless_args = def
+        .headless_args
+        .ok_or_else(|| format!("Agent '{}' has no non-interactive mode.", def.name))?;
+    let binary = launch_binary(def).ok_or_else(|| {
+        format!("Agent '{}' binary not found on PATH. Install it first.", def.name)
+    })?;
+
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.args(headless_args)
+        .arg(prompt)
+        .current_dir(project_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to run {}: {e}", def.name))?;
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(90), child.wait_with_output())
+        .await
+        .map_err(|_| format!("{} timed out generating a response.", def.name))?
+        .map_err(|e| format!("{} exited with an error: {e}", def.name))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Ok(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        format!("{} produced no output.", def.name)
+    } else {
+        stderr
+    })
 }

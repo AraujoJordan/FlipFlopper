@@ -12,6 +12,7 @@ export interface AgentInfo {
   version: string | null;
   binary_path: string | null;
   yolo_supported: boolean;
+  headless_supported: boolean;
 }
 
 export interface SessionInfo {
@@ -136,8 +137,8 @@ export const ptyKill = (sessionId: string): Promise<void> =>
 export const listSessions = (): Promise<SessionInfo[]> =>
   invoke("list_sessions");
 
-export const openTerminal = (projectPath: string): Promise<string> =>
-  invoke("open_terminal", { projectPath });
+export const openTerminal = (projectPath: string, cwd?: string): Promise<string> =>
+  invoke("open_terminal", { projectPath, cwd: cwd ?? null });
 
 export const onPtyOutput = (sessionId: string, cb: (data: string) => void): Promise<UnlistenFn> =>
   listen<string>(`pty://${sessionId}`, (e) => cb(e.payload));
@@ -191,6 +192,15 @@ export const renameEntry = (path: string, newName: string): Promise<FileEntry> =
 
 export const deleteEntry = (path: string): Promise<void> =>
   invoke("delete_entry", { path });
+
+export const duplicateEntry = (path: string): Promise<FileEntry> =>
+  invoke("duplicate_entry", { path });
+
+export const copyEntry = (srcPath: string, destDir: string): Promise<FileEntry> =>
+  invoke("copy_entry", { srcPath, destDir });
+
+export const moveEntry = (srcPath: string, destDir: string): Promise<FileEntry> =>
+  invoke("move_entry", { srcPath, destDir });
 
 export const pickProjectFolder = (): Promise<string | null> =>
   invoke("pick_project_folder");
@@ -383,6 +393,15 @@ export const gitCheckoutCommit = (projectPath: string, sha: string): Promise<voi
 
 export const gitCheckoutPrevious = (projectPath: string): Promise<void> =>
   invoke("git_checkout_previous", { projectPath });
+
+export const commitsAheadOfRemote = (projectPath: string): Promise<CommitEntry[]> =>
+  invoke("commits_ahead_of_remote", { projectPath });
+
+export const squashUnpushed = (projectPath: string, message: string): Promise<void> =>
+  invoke("squash_unpushed", { projectPath, message });
+
+export const generateCommitMessage = (projectPath: string, agentId: string): Promise<string> =>
+  invoke("generate_commit_message", { projectPath, agentId });
 
 // ── Native diff review ───────────────────────────────────────────────────────
 
