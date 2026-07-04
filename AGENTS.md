@@ -11,7 +11,9 @@ Vite + TypeScript for the UI.
 
 The current source tree is a Tauri/Solid app. Older commits and some stale docs
 mention a libui rewrite, `cli-continues`, `diffx`, `Sidebar`, `ToolInstaller`,
-and `PreviewPane`; those are not the active implementation in `src/`.
+and a `PreviewPane`; those are not the active implementation in `src/`. (Note:
+the current `PreviewPanel.tsx` UI-preview split is unrelated to that old
+`PreviewPane`.)
 
 Currently implemented:
 
@@ -32,6 +34,13 @@ Currently implemented:
   agent with seeded context where the target CLI supports it.
 - Tool catalog and install-command backend; no dedicated current
   `ToolInstaller.tsx` panel exists.
+- Android-Studio-style UI preview split inside the editor: when the open file
+  has previews (Compose/SwiftUI/Flutter `@Preview`/`#Preview` annotations, or
+  snapshot/screenshot images from Paparazzi, Roborazzi, Compose Screenshot
+  Testing, swift-snapshot-testing, Flutter goldens, jest/Playwright/Cypress,
+  or a `screenshots/` folder), a "Preview" toggle appears in the editor header
+  and opens a side panel with a live iframe (Flutter widget previewer, web dev
+  server, Storybook), a snapshot image grid, or a "record snapshots" action.
 
 Known gaps / current quirks:
 
@@ -101,6 +110,8 @@ src/
     PromptComposer.tsx       bottom prompt input, PTY send / auto-commit path
     CommitTimeline.tsx       recent commits, working-tree review button
     DiffPane.tsx             native unified/split diff overlay
+    EditorPane.tsx           CodeMirror editor, tabs, and preview split host
+    PreviewPanel.tsx         UI preview side panel (live iframe / snapshot grid)
 
 src-tauri/src/
   lib.rs                     Tauri builder, command registry, event bridge
@@ -110,6 +121,9 @@ src-tauri/src/
   project.rs                 AGENTS.md/.agents scaffolding, recents, file tree
   git.rs                     shell-based status, commit, log, rename, rollback
   review.rs                  git diff parser for native review pane
+  preview.rs                 UI-preview detection, snapshot matching, image data URLs
+  runner.rs                  run/validation target detection; ProjectFacts
+  editor.rs                  file read/write with in-project path safety
   tools.rs                   tool catalog, package manager detection, installs
   handoff.rs                 in-house session parser and handoff launcher
 

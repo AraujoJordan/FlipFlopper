@@ -21,7 +21,7 @@ pub struct FileContent {
 
 /// Resolve `rel_path` inside `project_path`, rejecting anything that escapes
 /// the project root (absolute paths, `..` traversal, symlinks pointing out).
-fn resolve_in_project(project_path: &str, rel_path: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve_in_project(project_path: &str, rel_path: &str) -> Result<PathBuf, String> {
     if Path::new(rel_path).is_absolute() {
         return Err("Path must be relative to the project root".into());
     }

@@ -1,12 +1,11 @@
 import { Component, createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { store, bumpGitStatus, cycleAgentModeOptimistic } from "../lib/store";
+import { store, addTab, cycleAgentModeOptimistic, setPendingPromptInsert, lastUsableAgent } from "../lib/store";
 import {
-  autoCommit,
-  ensureWorkBranch,
   listPromptSkills,
   pickPromptFile,
   ptyInput,
   searchPromptFiles,
+  spawnAgent,
   type FileEntry,
   type PromptSkill,
 } from "../lib/ipc";
@@ -160,9 +159,27 @@ const PromptComposer: Component = () => {
   const placeholder = () => {
     const tab = activeTab();
     if (tab) return `Prompt ${tab.label}`;
-    if (store.currentProject) return "No agent running - enter commit message";
+    const project = store.currentProject;
+    if (project) {
+      const agent = lastUsableAgent(project.path, store.agents, store.yoloMode);
+      return agent ? `Prompt ${agent.name}` : "Install or start an agent";
+    }
     return "Open a project or start an agent";
   };
+
+  // Editor → prompt insert: when the user clicks "+" in the editor header,
+  // insert an `@path:range ` token at the textarea cursor (without stealing
+  // focus from the editor). Tokens accumulate inline as editable text.
+  createEffect(() => {
+    const pending = store.pendingPromptInsert;
+    if (!pending) return;
+    setPendingPromptInsert(null);
+
+    const lineSpec = pending.startLine === pending.endLine
+      ? `${pending.startLine}`
+      : `${pending.startLine}-${pending.endLine}`;
+    insertAtCaretNoFocus(`@${pending.path}:${lineSpec} `);
+  });
 
   const completionToken = createMemo(() => activeCompletionToken(value(), caretPosition()));
   const completionTokenKey = createMemo(() => {
@@ -282,6 +299,17 @@ const PromptComposer: Component = () => {
     focusAt(caret);
   }
 
+  /** Insert text at the textarea cursor without focusing the textarea — used
+   *  when the editor triggers an insert so the user stays in the editor. */
+  function insertAtCaretNoFocus(text: string) {
+    const start = textareaRef?.selectionStart ?? value().length;
+    const end = textareaRef?.selectionEnd ?? start;
+    const next = `${value().slice(0, start)}${text}${value().slice(end)}`;
+    setValue(next);
+    setCaretPosition(start + text.length);
+    setDismissedTokenKey(null);
+  }
+
   function applyCompletion(item: CompletionItem) {
     const token = completionToken();
     if (!token) return;
@@ -311,34 +339,6 @@ const PromptComposer: Component = () => {
     insertAtCaret(`@${ref} `);
   }
 
-  async function commitWithRetry(projectPath: string, text: string): Promise<boolean> {
-    try {
-      const result = await autoCommit(projectPath, text);
-      toast(`Committed ${result.sha.slice(0, 7)}`, "success");
-      bumpGitStatus();
-      return true;
-    } catch (e) {
-      const message = String(e);
-      if (message.includes("main/master")) {
-        toast(message, "error", {
-          sticky: true,
-          actionLabel: "Create work branch & retry",
-          onAction: async () => {
-            try {
-              await ensureWorkBranch(projectPath, "flipflopper/work");
-              await commitWithRetry(projectPath, text);
-            } catch (retryErr) {
-              toast(`Failed to switch branch: ${String(retryErr)}`, "error");
-            }
-          },
-        });
-      } else {
-        toast(message, "error");
-      }
-      return false;
-    }
-  }
-
   async function send() {
     const text = value().trim();
     if (!text || sending()) return;
@@ -347,14 +347,24 @@ const PromptComposer: Component = () => {
     setSending(true);
 
     try {
+      let sessionId: string;
       if (tab) {
-        await ptyInput(tab.sessionId, text + "\r");
-      } else if (store.currentProject) {
-        const committed = await commitWithRetry(store.currentProject.path, text);
-        if (!committed) return;
+        sessionId = tab.sessionId;
       } else {
-        return;
+        const project = store.currentProject;
+        if (!project) return;
+
+        const agent = lastUsableAgent(project.path, store.agents, store.yoloMode);
+        if (!agent) {
+          toast("No installed agent available", "error");
+          return;
+        }
+
+        sessionId = await spawnAgent(agent.id, project.path, store.yoloMode);
+        addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
       }
+
+      await ptyInput(sessionId, `${text}\r`);
       setValue("");
       setCaretPosition(0);
       setDismissedTokenKey(null);
@@ -629,14 +639,14 @@ const PromptComposer: Component = () => {
           )}
         </Show>
 
-        <Show when={!activeTab()}>
+        <Show when={!activeTab() && store.currentProject}>
           <span style={{
             "font-family": "'JetBrains Mono', monospace",
             "font-size": "10.5px", color: "var(--fg-subtle)",
             border: "1px solid #262a35", "border-radius": "6px",
             padding: "3px 8px", flex: "0 0 auto",
           }}>
-            Commit
+            Agent
           </span>
         </Show>
 

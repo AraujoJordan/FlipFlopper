@@ -15,6 +15,7 @@ export interface Tab {
   label: string;
   agentId: string;
   agentIcon: string;
+  isClosing?: boolean;
 }
 
 export type TerminalKind = "run" | "validate" | "install" | "shell";
@@ -50,6 +51,7 @@ export interface EditorFile {
   modifiedMs: number;
   /** binary or too-large → placeholder buffer, not editable */
   binary: boolean;
+  isClosing?: boolean;
 }
 
 export interface AppStore {
@@ -71,11 +73,17 @@ export interface AppStore {
   validationSessionId: string | null;
   /** bumped after saves so git-status consumers refetch */
   gitStatusVersion: number;
+  fileTreeVersion: number;
   currentBranch: string;
-  pendingLineFocus: { path: string; line: number } | null;
+  pendingLineFocus: { path: string; line: number; character?: number } | null;
   gitPanelTab: "changes" | "history";
   /** project-relative path to scope the History tab log to, or null for repo-wide */
   historyFilterPath: string | null;
+  /** One-shot channel: editor sets this when the user clicks "+", the
+   *  PromptComposer inserts the token into the textarea and clears it. */
+  pendingPromptInsert: { path: string; startLine: number; endLine: number } | null;
+  /** Live editor selection state — drives the "+" button visibility. */
+  editorSelectionInfo: { path: string; startLine: number; endLine: number; hasSelection: boolean } | null;
   yoloMode: boolean;
   explorerCollapsed: boolean;
   gitPanelCollapsed: boolean;
@@ -148,10 +156,13 @@ const initial: AppStore = {
   runSessionId: null,
   validationSessionId: null,
   gitStatusVersion: 0,
+  fileTreeVersion: 0,
   currentBranch: "",
   pendingLineFocus: null,
   gitPanelTab: "changes",
   historyFilterPath: null,
+  pendingPromptInsert: null,
+  editorSelectionInfo: null,
   yoloMode: readYoloMode(),
   explorerCollapsed: getExplorerCollapsedForMode("agent"),
   gitPanelCollapsed: getGitPanelCollapsedForMode("agent"),
@@ -206,6 +217,7 @@ export const CONTINUE_AGENT_IDS = new Set([
 
 const CONTINUE_TARGET_KEY = "flipflopper:continue-targets";
 const CONTINUE_USAGE_KEY = "flipflopper:continue-agent-usage";
+const LAST_AGENT_KEY = "flipflopper:last-agent-targets";
 const RUN_TARGET_KEY = "flipflopper:run-targets";
 const VALIDATION_TARGET_KEY = "flipflopper:validation-targets";
 
@@ -277,6 +289,26 @@ export function recordContinueAgentUse(projectPath: string, agentId: string) {
   writeJsonRecord(CONTINUE_USAGE_KEY, usage);
 }
 
+export function readLastAgentTargets(): Record<string, string> {
+  return readJsonRecord<Record<string, string>>(LAST_AGENT_KEY, {});
+}
+
+export function writeLastAgentTarget(projectPath: string, agentId: string) {
+  const targets = readLastAgentTargets();
+  targets[projectPath] = agentId;
+  writeJsonRecord(LAST_AGENT_KEY, targets);
+}
+
+export function recordLastAgentUse(projectPath: string, agentId: string) {
+  writeLastAgentTarget(projectPath, agentId);
+}
+
+export function lastUsableAgent(projectPath: string, agents: AgentInfo[], yoloMode: boolean): AgentInfo | null {
+  const lastId = readLastAgentTargets()[projectPath];
+  const installed = agents.filter((agent) => agent.installed && (!yoloMode || agent.yolo_supported));
+  return installed.find((agent) => agent.id === lastId) ?? installed[0] ?? null;
+}
+
 export function rankContinueCandidates(
   projectPath: string,
   fromAgentId: string,
@@ -310,6 +342,8 @@ export function rankContinueCandidates(
 // ── Tab helpers ───────────────────────────────────────────────────────────────
 
 export function addTab(tab: Tab) {
+  const projectPath = store.currentProject?.path;
+  if (projectPath) recordLastAgentUse(projectPath, tab.agentId);
   setStore("tabs", (t) => [...t, tab]);
   setStore("activeTabId", tab.sessionId);
   showAgent();
@@ -351,16 +385,32 @@ export function sniffAgentMode(sessionId: string, rawChunk: string) {
 }
 
 export function removeTab(sessionId: string) {
-  clearAgentMode(sessionId);
-  setStore("tabs", (t) => t.filter((x) => x.sessionId !== sessionId));
-  setStore("activeTabId", (cur) => {
-    if (cur !== sessionId) return cur;
-    const remaining = store.tabs.filter((x) => x.sessionId !== sessionId);
-    return remaining.length > 0 ? remaining[remaining.length - 1].sessionId : null;
-  });
+  const tab = store.tabs.find((x) => x.sessionId === sessionId);
+  if (!tab) return;
+
+  if (!tab.isClosing) {
+    // Switch active tab immediately if closing active tab, ignoring this closing tab
+    setStore("activeTabId", (cur) => {
+      if (cur !== sessionId) return cur;
+      const remaining = store.tabs.filter((x) => x.sessionId !== sessionId && !x.isClosing);
+      return remaining.length > 0 ? remaining[remaining.length - 1].sessionId : null;
+    });
+
+    // Mark tab as closing
+    setStore("tabs", (t) => t.map((x) => x.sessionId === sessionId ? { ...x, isClosing: true } : x));
+
+    // Delay the actual removal to let the animation play
+    setTimeout(() => {
+      clearAgentMode(sessionId);
+      setStore("tabs", (t) => t.filter((x) => x.sessionId !== sessionId));
+    }, 150);
+  }
 }
 
 export function setActiveTab(sessionId: string) {
+  const tab = store.tabs.find((x) => x.sessionId === sessionId);
+  const projectPath = store.currentProject?.path;
+  if (tab && projectPath) recordLastAgentUse(projectPath, tab.agentId);
   setStore("activeTabId", sessionId);
   showAgent();
 }
@@ -550,10 +600,42 @@ export async function flushEditorSave(path: string) {
   await editorSaveFlush.get(path)?.();
 }
 
+export async function flushAllEditorSaves() {
+  for (const flush of editorSaveFlush.values()) {
+    try {
+      await flush();
+    } catch (e) {
+      console.error("Failed to flush editor save:", e);
+    }
+  }
+}
+
+
+// ── Editor → Prompt insert channel ───────────────────────────────────────────
+
+/** Set by the editor when the user clicks "+". The PromptComposer watches this
+ *  and inserts `@path:range ` at the textarea cursor. */
+export function setPendingPromptInsert(info: { path: string; startLine: number; endLine: number } | null) {
+  setStore("pendingPromptInsert", info);
+}
+
+/** Live editor selection — updated on every CodeMirror selectionSet. Drives
+ *  the "+" button visibility in the editor header. */
+export function setEditorSelectionInfo(info: { path: string; startLine: number; endLine: number; hasSelection: boolean } | null) {
+  setStore("editorSelectionInfo", info);
+}
+
 const inFlightOpens = new Set<string>();
 
-/** Open a file in the editor (or focus its tab if already open). */
-export async function openEditorFile(relPath: string, name: string, lineNo?: number) {
+/** Open a file in the editor (or focus its tab if already open).
+ *  `character` is an optional 0-based UTF-16 column on `lineNo`; when present
+ *  the cursor lands on that column so highlight-selection-matches fires. */
+export async function openEditorFile(
+  relPath: string,
+  name: string,
+  lineNo?: number,
+  character?: number,
+) {
   const project = store.currentProject;
   if (!project) return;
 
@@ -564,7 +646,7 @@ export async function openEditorFile(relPath: string, name: string, lineNo?: num
   if (existing) {
     setStore("activeEditorPath", existing.path);
     if (lineNo !== undefined) {
-      setStore("pendingLineFocus", { path: existing.path, line: lineNo });
+      setStore("pendingLineFocus", { path: existing.path, line: lineNo, character });
     }
     showCode();
     return;
@@ -596,7 +678,7 @@ export async function openEditorFile(relPath: string, name: string, lineNo?: num
     const finalPath = doubleCheck ? doubleCheck.path : relPath;
     setStore("activeEditorPath", finalPath);
     if (lineNo !== undefined) {
-      setStore("pendingLineFocus", { path: finalPath, line: lineNo });
+      setStore("pendingLineFocus", { path: finalPath, line: lineNo, character });
     }
     showCode();
   } catch (e) {
@@ -610,6 +692,8 @@ export async function openEditorFile(relPath: string, name: string, lineNo?: num
 export async function closeEditorFile(path: string) {
   const file = store.editorFiles.find((f) => f.path === path);
   if (!file) return;
+  if (file.isClosing) return;
+
   await flushEditorSave(path);
   const stillDirty = store.editorFiles.find((f) => f.path === path)?.dirty;
   if (stillDirty) {
@@ -617,13 +701,24 @@ export async function closeEditorFile(path: string) {
     if (!confirmed) return;
   }
 
-  const remaining = store.editorFiles.filter((f) => f.path !== path);
-  setStore("editorFiles", remaining);
+  // Switch active editor path immediately if closing active editor tab, ignoring this closing tab
   setStore("activeEditorPath", (cur) => {
     if (cur !== path) return cur;
-    return remaining.length > 0 ? remaining[remaining.length - 1].path : null;
+    const remainingNonClosing = store.editorFiles.filter((f) => f.path !== path && !f.isClosing);
+    return remainingNonClosing.length > 0 ? remainingNonClosing[remainingNonClosing.length - 1].path : null;
   });
-  if (remaining.length === 0) setStore("editorOpen", false);
+
+  // Mark file as closing
+  setStore("editorFiles", (files) =>
+    files.map((f) => f.path === path ? { ...f, isClosing: true } : f)
+  );
+
+  // Delay the actual removal to let the animation play
+  setTimeout(() => {
+    const remaining = store.editorFiles.filter((f) => f.path !== path);
+    setStore("editorFiles", remaining);
+    if (remaining.length === 0) setStore("editorOpen", false);
+  }, 150);
 }
 
 export function setActiveEditorFile(path: string) {
@@ -656,6 +751,36 @@ export function refreshEditorBaseline(path: string, content: string, modifiedMs:
 /** Nudge git-status consumers (file tree badges) to refetch. */
 export function bumpGitStatus() {
   setStore("gitStatusVersion", (v) => v + 1);
+}
+
+/** Nudge file tree consumers to refetch directories. */
+export function bumpFileTree() {
+  setStore("fileTreeVersion", (v) => v + 1);
+}
+
+// ── Editor reload registry ────────────────────────────────────────────────────
+// Each EditorBuffer registers its reloadFromDisk so branch-switch can call it
+// directly — no reactive indirection, just a straight function call.
+
+const editorReloadCallbacks = new Map<string, () => Promise<void>>();
+
+export function registerEditorReload(path: string, reload: () => Promise<void>) {
+  editorReloadCallbacks.set(path, reload);
+}
+
+export function unregisterEditorReload(path: string) {
+  editorReloadCallbacks.delete(path);
+}
+
+/** Reload every open editor buffer from disk (e.g. after a branch switch). */
+export async function refreshOpenedFiles() {
+  for (const reload of editorReloadCallbacks.values()) {
+    try {
+      await reload();
+    } catch (e) {
+      console.error("Failed to reload editor file:", e);
+    }
+  }
 }
 
 // ── Git branch helpers ─────────────────────────────────────────────────────────

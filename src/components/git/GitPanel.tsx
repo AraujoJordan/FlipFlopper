@@ -116,7 +116,6 @@ const GitPanel: Component = () => {
           <circle cx="18" cy="12" r="2.4" />
           <path d="M6 8.4V15.6M8.2 6.8A6 6 0 0 0 15.8 10.8" />
         </svg>
-        <span class="panel-rail-label">Source Control</span>
         <Show when={changedCount() > 0}>
           <span style={{
             "font-family": "var(--font-mono)",

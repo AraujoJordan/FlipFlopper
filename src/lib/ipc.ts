@@ -293,6 +293,14 @@ export const lspDefinition = (
 ): Promise<LspDefinition | null> =>
   invoke("lsp_definition", { projectPath, relPath, line, character });
 
+export const lspReferences = (
+  projectPath: string,
+  relPath: string,
+  line: number,
+  character: number,
+): Promise<LspDefinition[]> =>
+  invoke("lsp_references", { projectPath, relPath, line, character });
+
 export const lspDiagnostics = (
   projectPath: string,
   relPath: string,
@@ -321,6 +329,13 @@ export const ensureWorkBranch = (projectPath: string, branch: string): Promise<s
 
 export const getCurrentBranch = (projectPath: string): Promise<string> =>
   invoke("get_current_branch", { projectPath });
+
+export const getRecentBranches = (projectPath: string, limit: number): Promise<string[]> =>
+  invoke("get_recent_branches", { projectPath, limit });
+
+export const gitSwitchBranch = (projectPath: string, branchName: string): Promise<void> =>
+  invoke("git_switch_branch", { projectPath, branchName });
+
 
 export const getGitLog = (projectPath: string, limit: number, path?: string): Promise<CommitEntry[]> =>
   invoke("get_git_log", { projectPath, limit, path: path ?? null });
@@ -429,6 +444,71 @@ export const detectValidationTargets = (projectPath: string): Promise<Validation
 
 export const validateProject = (projectPath: string, targetId?: string): Promise<string> =>
   invoke("validate_project", { projectPath, targetId: targetId ?? null });
+
+// ── Preview ──────────────────────────────────────────────────────────────────
+
+export interface PreviewTarget {
+  name: string;
+  line: number;
+  label: string | null;
+}
+
+export interface PreviewImage {
+  rel_path: string;
+  label: string;
+  target_name: string | null;
+  modified_ms: number;
+  size: number;
+}
+
+export interface LivePreviewSpec {
+  id: string;
+  label: string;
+  /** null → the frontend reuses the existing Run flow (web dev server). */
+  command: string | null;
+}
+
+export interface RecordAction {
+  id: string;
+  label: string;
+  command: string;
+}
+
+export interface ComposeState {
+  module_rel: string;
+  screenshot_setup: "paparazzi" | "roborazzi" | "compose-screenshot" | null;
+  setup_url: string | null;
+  package: string | null;
+}
+
+export interface PreviewInfo {
+  /** "compose" | "swift" | "flutter" | "react-native" | "web" | "generic" | "none" */
+  kind: string;
+  targets: PreviewTarget[];
+  images: PreviewImage[];
+  live: LivePreviewSpec | null;
+  record: RecordAction | null;
+  compose: ComposeState | null;
+}
+
+export const detectPreview = (projectPath: string, relPath: string): Promise<PreviewInfo> =>
+  invoke("detect_preview", { projectPath, relPath });
+
+export const readPreviewImage = (projectPath: string, relPath: string): Promise<string> =>
+  invoke("read_preview_image", { projectPath, relPath });
+
+export const startPreviewSession = (
+  projectPath: string,
+  relPath: string,
+  previewId: string,
+): Promise<string> =>
+  invoke("start_preview_session", { projectPath, relPath, previewId });
+
+export const getSessionUrl = (sessionId: string): Promise<string | null> =>
+  invoke("get_session_url", { sessionId });
+
+export const onPreviewUrl = (sessionId: string, cb: (url: string) => void): Promise<UnlistenFn> =>
+  listen<string>(`preview-url://${sessionId}`, (e) => cb(e.payload));
 
 // ── Handoff ──────────────────────────────────────────────────────────────────
 

@@ -51,12 +51,12 @@ struct PackageJson {
 }
 
 #[derive(Debug, Clone)]
-struct JsPackageManager {
-    pm_run: String,
+pub(crate) struct JsPackageManager {
+    pub(crate) pm_run: String,
 }
 
 #[derive(Debug, Clone)]
-struct ProjectFacts {
+pub(crate) struct ProjectFacts {
     root: PathBuf,
     root_entries: Vec<PathBuf>,
     package: Option<PackageJson>,
@@ -67,7 +67,7 @@ struct ProjectFacts {
 }
 
 impl ProjectFacts {
-    fn new(root: PathBuf) -> Self {
+    pub(crate) fn new(root: PathBuf) -> Self {
         let root_entries = fs::read_dir(&root)
             .ok()
             .into_iter()
@@ -103,15 +103,15 @@ impl ProjectFacts {
         }
     }
 
-    fn exists(&self, rel: &str) -> bool {
+    pub(crate) fn exists(&self, rel: &str) -> bool {
         self.root.join(rel).exists()
     }
 
-    fn is_dir(&self, rel: &str) -> bool {
+    pub(crate) fn is_dir(&self, rel: &str) -> bool {
         self.root.join(rel).is_dir()
     }
 
-    fn file_contains(&self, rel: &str, needle: &str) -> bool {
+    pub(crate) fn file_contains(&self, rel: &str, needle: &str) -> bool {
         read_small_string(&self.root.join(rel))
             .map(|content| content.contains(needle))
             .unwrap_or(false)
@@ -134,7 +134,7 @@ impl ProjectFacts {
             .find_map(|ext| self.first_root_file_with_ext(ext))
     }
 
-    fn root_dirs(&self) -> Vec<PathBuf> {
+    pub(crate) fn root_dirs(&self) -> Vec<PathBuf> {
         self.root_entries
             .iter()
             .filter(|path| path.is_dir())
@@ -142,20 +142,20 @@ impl ProjectFacts {
             .collect()
     }
 
-    fn has_pkg_dep(&self, name: &str) -> bool {
+    pub(crate) fn has_pkg_dep(&self, name: &str) -> bool {
         self.package
             .as_ref()
             .map(|pkg| pkg.deps.contains(name))
             .unwrap_or(false)
     }
 
-    fn pkg_script(&self, name: &str) -> Option<&str> {
+    pub(crate) fn pkg_script(&self, name: &str) -> Option<&str> {
         self.package
             .as_ref()
             .and_then(|pkg| pkg.scripts.get(name).map(String::as_str))
     }
 
-    fn preferred_pkg_script(&self) -> Option<&'static str> {
+    pub(crate) fn preferred_pkg_script(&self) -> Option<&'static str> {
         ["dev", "start", "serve"]
             .iter()
             .copied()
@@ -169,7 +169,7 @@ impl ProjectFacts {
             .unwrap_or(false)
     }
 
-    fn js_package_manager(&self) -> JsPackageManager {
+    pub(crate) fn js_package_manager(&self) -> JsPackageManager {
         if self.exists("bun.lockb") || self.exists("bun.lock") {
             return js_pm("bun");
         }
@@ -256,7 +256,7 @@ impl ProjectFacts {
         }
     }
 
-    fn gradle_command(&self) -> Option<&'static str> {
+    pub(crate) fn gradle_command(&self) -> Option<&'static str> {
         if tools::current_os() == "windows" && self.exists("gradlew.bat") {
             Some("gradlew.bat")
         } else if self.exists("gradlew") {
@@ -280,7 +280,7 @@ impl ProjectFacts {
         }
     }
 
-    fn gradle_text(&self) -> String {
+    pub(crate) fn gradle_text(&self) -> String {
         [
             "build.gradle",
             "build.gradle.kts",
@@ -293,7 +293,7 @@ impl ProjectFacts {
         .join("\n")
     }
 
-    fn module_gradle_text(&self, module_dir: &Path) -> String {
+    pub(crate) fn module_gradle_text(&self, module_dir: &Path) -> String {
         ["build.gradle", "build.gradle.kts"]
             .iter()
             .filter_map(|path| read_small_string(&module_dir.join(path)))

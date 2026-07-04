@@ -249,6 +249,34 @@ pub fn definition(
     Ok(parse_definition(project_path, result))
 }
 
+pub fn references(
+    manager: &LspManager,
+    project_path: &str,
+    rel_path: &str,
+    line: u64,
+    character: u64,
+) -> Result<Vec<LspDefinition>, String> {
+    let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
+        return Ok(Vec::new());
+    };
+    let sessions = manager.sessions.lock().unwrap();
+    let session = sessions
+        .get(&key)
+        .ok_or_else(|| "Language server session disappeared".to_string())?;
+    let uri = file_uri(&absolute_path(project_path, rel_path)?);
+    let result = request(
+        manager,
+        session,
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+            "context": { "includeDeclaration": true }
+        }),
+    )?;
+    Ok(parse_references(project_path, result))
+}
+
 pub fn diagnostics(
     manager: &LspManager,
     project_path: &str,
@@ -364,7 +392,8 @@ fn spawn_session(
                     "synchronization": { "didSave": false },
                     "completion": { "completionItem": { "snippetSupport": false } },
                     "hover": { "contentFormat": ["markdown", "plaintext"] },
-                    "definition": {}
+                    "definition": {},
+                    "references": {}
                 }
             }
         }),
@@ -724,6 +753,30 @@ fn parse_definition(project_path: &str, result: Value) -> Option<LspDefinition> 
         line: start.get("line")?.as_u64()?,
         character: start.get("character")?.as_u64()?,
     })
+}
+
+fn parse_references(project_path: &str, result: Value) -> Vec<LspDefinition> {
+    let locations = result.as_array().cloned().unwrap_or_default();
+    locations
+        .into_iter()
+        .filter_map(|value| {
+            let uri = value
+                .get("uri")
+                .or_else(|| value.get("targetUri"))?
+                .as_str()?;
+            let range = value
+                .get("range")
+                .or_else(|| value.get("targetSelectionRange"))
+                .or_else(|| value.get("targetRange"))?;
+            let start = range.get("start")?;
+            let path = uri_to_rel_path(project_path, uri)?;
+            Some(LspDefinition {
+                path,
+                line: start.get("line")?.as_u64()?,
+                character: start.get("character")?.as_u64()?,
+            })
+        })
+        .collect()
 }
 
 fn parse_diagnostic(value: &Value) -> Option<LspDiagnostic> {

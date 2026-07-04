@@ -3,6 +3,7 @@ mod editor;
 mod git;
 mod handoff;
 mod lsp;
+mod preview;
 mod project;
 mod pty;
 mod review;
@@ -57,37 +58,64 @@ struct NativeMenuState {
     git_panel_tab: String,
 }
 
-// Bridge a PtyEvent receiver to Tauri events on the given session_id.
-fn bridge_pty(app: tauri::AppHandle, session_id: String, rx: std::sync::mpsc::Receiver<PtyEvent>) {
-    bridge_pty_with_browser(app, session_id, rx, false);
+/// How the PTY bridge treats the first local URL it sees in a session's output.
+#[derive(Clone, Copy, PartialEq)]
+enum UrlAction {
+    /// Ignore URLs entirely (interactive agents, validation, etc.).
+    Ignore,
+    /// Capture the URL into `SessionUrls` and emit `preview-url://{id}`.
+    Capture,
+    /// Capture, emit, and also open it in the system browser.
+    CaptureAndOpen,
 }
 
-fn bridge_pty_with_browser(
+/// Captured local dev-server / preview URLs keyed by PTY session id.
+#[derive(Default)]
+struct SessionUrls(std::sync::Mutex<std::collections::HashMap<String, String>>);
+
+// Bridge a PtyEvent receiver to Tauri events on the given session_id.
+fn bridge_pty(app: tauri::AppHandle, session_id: String, rx: std::sync::mpsc::Receiver<PtyEvent>) {
+    bridge_pty_with_url(app, session_id, rx, UrlAction::Ignore);
+}
+
+fn bridge_pty_with_url(
     app: tauri::AppHandle,
     session_id: String,
     rx: std::sync::mpsc::Receiver<PtyEvent>,
-    auto_open_browser: bool,
+    url_action: UrlAction,
 ) {
     std::thread::spawn(move || {
-        let mut browser_opened = false;
+        let mut url_captured = false;
         let mut recent_output = String::new();
         for event in rx {
             match event {
                 PtyEvent::Data(data) => {
-                    if auto_open_browser && !browser_opened {
+                    if url_action != UrlAction::Ignore && !url_captured {
                         recent_output.push_str(&data);
                         if recent_output.len() > 8192 {
                             let kept = recent_output.chars().rev().take(4096).collect::<String>();
                             recent_output = kept.chars().rev().collect();
                         }
                         if let Some(url) = find_local_browser_url(&recent_output) {
-                            browser_opened = true;
-                            let _ = open_browser_url(&url);
+                            url_captured = true;
+                            if let Some(urls) = app.try_state::<SessionUrls>() {
+                                urls.0
+                                    .lock()
+                                    .unwrap()
+                                    .insert(session_id.clone(), url.clone());
+                            }
+                            let _ = app.emit(&format!("preview-url://{session_id}"), url.clone());
+                            if url_action == UrlAction::CaptureAndOpen {
+                                let _ = open_browser_url(&url);
+                            }
                         }
                     }
                     let _ = app.emit(&format!("pty://{session_id}"), data);
                 }
                 PtyEvent::Exit => {
+                    if let Some(urls) = app.try_state::<SessionUrls>() {
+                        urls.0.lock().unwrap().remove(&session_id);
+                    }
                     let _ = app.emit(&format!("pty-exit://{session_id}"), ());
                     break;
                 }
@@ -170,7 +198,9 @@ fn check_menu_item(
     tauri::menu::CheckMenuItem::with_id(handle, id, label, true, checked, accelerator)
 }
 
-fn separator(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::PredefinedMenuItem<tauri::Wry>> {
+fn separator(
+    handle: &tauri::AppHandle,
+) -> tauri::Result<tauri::menu::PredefinedMenuItem<tauri::Wry>> {
     tauri::menu::PredefinedMenuItem::separator(handle)
 }
 
@@ -183,8 +213,18 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
         "Project",
         true,
         &[
-            &menu_item(handle, MENU_OPEN_PROJECT, "Open Project...", Some("CmdOrCtrl+O"))?,
-            &menu_item(handle, MENU_REVEAL_PROJECT, reveal_project_label(), None::<&str>)?,
+            &menu_item(
+                handle,
+                MENU_OPEN_PROJECT,
+                "Open Project...",
+                Some("CmdOrCtrl+O"),
+            )?,
+            &menu_item(
+                handle,
+                MENU_REVEAL_PROJECT,
+                reveal_project_label(),
+                None::<&str>,
+            )?,
             &separator(handle)?,
             &menu_item(handle, MENU_CLOSE_PROJECT, "Close Project", None::<&str>)?,
         ],
@@ -196,9 +236,24 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
         "Agent",
         true,
         &[
-            &menu_item(handle, MENU_NEW_AGENT, "New Agent Session", Some("CmdOrCtrl+T"))?,
-            &menu_item(handle, MENU_FOCUS_PROMPT, "Focus Prompt", Some("CmdOrCtrl+K"))?,
-            &menu_item(handle, MENU_CLOSE_AGENT, "Close Agent Session", Some("CmdOrCtrl+W"))?,
+            &menu_item(
+                handle,
+                MENU_NEW_AGENT,
+                "New Agent Session",
+                Some("CmdOrCtrl+T"),
+            )?,
+            &menu_item(
+                handle,
+                MENU_FOCUS_PROMPT,
+                "Focus Prompt",
+                Some("CmdOrCtrl+K"),
+            )?,
+            &menu_item(
+                handle,
+                MENU_CLOSE_AGENT,
+                "Close Agent Session",
+                Some("CmdOrCtrl+W"),
+            )?,
             &separator(handle)?,
             &check_menu_item(handle, MENU_YOLO_MODE, "YOLO Mode", false, None::<&str>)?,
         ],
@@ -210,15 +265,57 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
         "View",
         true,
         &[
-            &check_menu_item(handle, MENU_WORKSPACE_CODE, "Code", false, Some("CmdOrCtrl+1"))?,
-            &check_menu_item(handle, MENU_WORKSPACE_AGENT, "AI Agent", true, Some("CmdOrCtrl+2"))?,
-            &check_menu_item(handle, MENU_WORKSPACE_REVIEW, "Review", false, Some("CmdOrCtrl+3"))?,
+            &check_menu_item(
+                handle,
+                MENU_WORKSPACE_CODE,
+                "Code",
+                false,
+                Some("CmdOrCtrl+1"),
+            )?,
+            &check_menu_item(
+                handle,
+                MENU_WORKSPACE_AGENT,
+                "AI Agent",
+                true,
+                Some("CmdOrCtrl+2"),
+            )?,
+            &check_menu_item(
+                handle,
+                MENU_WORKSPACE_REVIEW,
+                "Review",
+                false,
+                Some("CmdOrCtrl+3"),
+            )?,
             &separator(handle)?,
-            &check_menu_item(handle, MENU_TOGGLE_EXPLORER, "Explorer", true, Some("CmdOrCtrl+B"))?,
-            &check_menu_item(handle, MENU_TOGGLE_GIT_PANEL, "Git Panel", false, Some("CmdOrCtrl+Shift+G"))?,
-            &check_menu_item(handle, MENU_TOGGLE_TERMINAL_PANEL, "Terminal Panel", false, Some("CmdOrCtrl+J"))?,
+            &check_menu_item(
+                handle,
+                MENU_TOGGLE_EXPLORER,
+                "Explorer",
+                true,
+                Some("CmdOrCtrl+B"),
+            )?,
+            &check_menu_item(
+                handle,
+                MENU_TOGGLE_GIT_PANEL,
+                "Git Panel",
+                false,
+                Some("CmdOrCtrl+Shift+G"),
+            )?,
+            &check_menu_item(
+                handle,
+                MENU_TOGGLE_TERMINAL_PANEL,
+                "Terminal Panel",
+                false,
+                Some("CmdOrCtrl+J"),
+            )?,
             &separator(handle)?,
-            &check_menu_item(handle, MENU_TOGGLE_AUTO_SIDEBAR, "Auto-toggle Sidebars", true, None::<&str>)?,
+            &check_menu_item(
+                handle,
+                MENU_TOGGLE_AUTO_SIDEBAR,
+                "Auto-toggle Sidebars",
+                true,
+                None::<&str>,
+            )?,
         ],
     )?;
 
@@ -228,10 +325,27 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
         "Review",
         true,
         &[
-            &menu_item(handle, MENU_REVIEW_WORKING_CHANGES, "Review Working Changes", None::<&str>)?,
+            &menu_item(
+                handle,
+                MENU_REVIEW_WORKING_CHANGES,
+                "Review Working Changes",
+                None::<&str>,
+            )?,
             &separator(handle)?,
-            &check_menu_item(handle, MENU_SHOW_CHANGES, "Show Changes", true, None::<&str>)?,
-            &check_menu_item(handle, MENU_SHOW_HISTORY, "Show History", false, None::<&str>)?,
+            &check_menu_item(
+                handle,
+                MENU_SHOW_CHANGES,
+                "Show Changes",
+                true,
+                None::<&str>,
+            )?,
+            &check_menu_item(
+                handle,
+                MENU_SHOW_HISTORY,
+                "Show History",
+                false,
+                None::<&str>,
+            )?,
         ],
     )?;
 
@@ -254,8 +368,12 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
     if let Some(tauri::menu::MenuItemKind::Submenu(help_menu)) =
         menu.get(tauri::menu::HELP_SUBMENU_ID)
     {
-        let command_search =
-            menu_item(handle, MENU_COMMAND_SEARCH, "Command Search", Some("CmdOrCtrl+Shift+F"))?;
+        let command_search = menu_item(
+            handle,
+            MENU_COMMAND_SEARCH,
+            "Command Search",
+            Some("CmdOrCtrl+Shift+F"),
+        )?;
         if !help_menu.items().unwrap_or_default().is_empty() {
             let help_separator = separator(handle)?;
             let _ = help_menu.append(&help_separator);
@@ -282,7 +400,9 @@ fn reveal_project_label() -> &'static str {
 }
 
 fn sync_native_menu(app: &tauri::AppHandle, state: &NativeMenuState) {
-    let Some(menu) = app.menu() else { return; };
+    let Some(menu) = app.menu() else {
+        return;
+    };
 
     set_menu_enabled(&menu, MENU_REVEAL_PROJECT, state.has_project);
     set_menu_enabled(&menu, MENU_CLOSE_PROJECT, state.has_project);
@@ -296,7 +416,11 @@ fn sync_native_menu(app: &tauri::AppHandle, state: &NativeMenuState) {
 
     set_menu_checked(&menu, MENU_WORKSPACE_CODE, state.workspace_mode == "code");
     set_menu_checked(&menu, MENU_WORKSPACE_AGENT, state.workspace_mode == "agent");
-    set_menu_checked(&menu, MENU_WORKSPACE_REVIEW, state.workspace_mode == "review");
+    set_menu_checked(
+        &menu,
+        MENU_WORKSPACE_REVIEW,
+        state.workspace_mode == "review",
+    );
     set_menu_checked(&menu, MENU_YOLO_MODE, state.yolo_mode);
     set_menu_checked(&menu, MENU_TOGGLE_EXPLORER, !state.explorer_collapsed);
     set_menu_checked(&menu, MENU_TOGGLE_GIT_PANEL, !state.git_panel_collapsed);
@@ -697,6 +821,17 @@ fn lsp_definition(
 }
 
 #[tauri::command]
+fn lsp_references(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    line: u64,
+    character: u64,
+) -> Result<Vec<LspDefinition>, String> {
+    lsp::references(&state, &project_path, &rel_path, line, character)
+}
+
+#[tauri::command]
 fn lsp_diagnostics(
     state: State<'_, LspManager>,
     project_path: String,
@@ -743,6 +878,17 @@ fn ensure_work_branch(project_path: String, branch: String) -> Result<String, St
 fn get_current_branch(project_path: String) -> Result<String, String> {
     git::get_current_branch(&project_path)
 }
+
+#[tauri::command]
+fn get_recent_branches(project_path: String, limit: usize) -> Result<Vec<String>, String> {
+    git::get_recent_branches(&project_path, limit)
+}
+
+#[tauri::command]
+fn git_switch_branch(project_path: String, branch_name: String) -> Result<(), String> {
+    git::switch_branch(&project_path, &branch_name)
+}
+
 
 #[tauri::command]
 fn get_git_log(
@@ -868,11 +1014,15 @@ fn run_project(
     target_id: Option<String>,
 ) -> Result<String, String> {
     let target = runner::resolve_run_command(&project_path, target_id.as_deref())?;
-    let auto_open_browser = runner::should_auto_open_browser(&target);
+    let url_action = if runner::should_auto_open_browser(&target) {
+        UrlAction::CaptureAndOpen
+    } else {
+        UrlAction::Capture
+    };
     let label = format!("run:{}", target.kind);
     let (session_id, rx) =
         pty::spawn_shell_command(&state, &label, &target.command, &project_path)?;
-    bridge_pty_with_browser(app, session_id.clone(), rx, auto_open_browser);
+    bridge_pty_with_url(app, session_id.clone(), rx, url_action);
     Ok(session_id)
 }
 
@@ -894,6 +1044,46 @@ fn validate_project(
         pty::spawn_shell_command(&state, &label, &target.command, &project_path)?;
     bridge_pty(app, session_id.clone(), rx);
     Ok(session_id)
+}
+
+// ════════════════════════════════════════════════
+// UI preview commands
+// ════════════════════════════════════════════════
+
+/// Detect available UI previews for the file open in the editor: native
+/// annotations, matching snapshot images, live tooling, and record actions.
+#[tauri::command]
+fn detect_preview(project_path: String, rel_path: String) -> Result<preview::PreviewInfo, String> {
+    preview::detect_preview(&project_path, &rel_path)
+}
+
+/// Read a snapshot/screenshot image as a `data:` URL for `<img>` display.
+#[tauri::command]
+fn read_preview_image(project_path: String, rel_path: String) -> Result<String, String> {
+    preview::read_preview_image(&project_path, &rel_path)
+}
+
+/// Start a live preview or snapshot-record process (flutter widget preview,
+/// Storybook, gradle record task, …) in a PTY session; returns the session id.
+#[tauri::command]
+fn start_preview_session(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    rel_path: String,
+    preview_id: String,
+) -> Result<String, String> {
+    let (label, command) = preview::resolve_preview_command(&project_path, &rel_path, &preview_id)?;
+    let (session_id, rx) =
+        pty::spawn_shell_command(&state, &format!("preview:{label}"), &command, &project_path)?;
+    bridge_pty_with_url(app, session_id.clone(), rx, UrlAction::Capture);
+    Ok(session_id)
+}
+
+/// Return the local URL captured for a running session, if one was seen yet.
+#[tauri::command]
+fn get_session_url(state: State<'_, SessionUrls>, session_id: String) -> Option<String> {
+    state.0.lock().unwrap().get(&session_id).cloned()
 }
 
 // ════════════════════════════════════════════════
@@ -1001,6 +1191,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(PtyManager::new())
         .manage(LspManager::new())
+        .manage(SessionUrls::default())
         .setup(|app| {
             let handle = app.handle();
             if let Ok(menu) = build_app_menu(handle) {
@@ -1052,6 +1243,7 @@ pub fn run() {
             lsp_completion,
             lsp_hover,
             lsp_definition,
+            lsp_references,
             lsp_diagnostics,
             lsp_shutdown_project,
             // Git
@@ -1061,6 +1253,8 @@ pub fn run() {
             auto_commit,
             ensure_work_branch,
             get_current_branch,
+            get_recent_branches,
+            git_switch_branch,
             get_git_log,
             git_rollback,
             rename_commit,
@@ -1083,6 +1277,11 @@ pub fn run() {
             run_project,
             detect_validation_targets,
             validate_project,
+            // Preview
+            detect_preview,
+            read_preview_image,
+            start_preview_session,
+            get_session_url,
             // Review
             get_review_diff,
             // Handoff

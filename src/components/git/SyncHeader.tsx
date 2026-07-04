@@ -1,6 +1,6 @@
 import { Component, Show, createSignal } from "solid-js";
 import type { Resource } from "solid-js";
-import { store, bumpGitStatus, updateCurrentBranch } from "../../lib/store";
+import { store, bumpGitStatus, toggleGitPanelCollapsed, updateCurrentBranch } from "../../lib/store";
 import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, type SyncStatus } from "../../lib/ipc";
 import { Button, Spinner, toast } from "../ui";
 import { openConflictDialog } from "./ConflictFixDialog";
@@ -97,12 +97,18 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
           </div>
         }
       >
-        <span style={{
-          "font-family": "var(--font-mono)", "font-size": "11px",
-          color: "var(--fg-default)", "font-weight": "600",
-        }}>
+        <button
+          type="button"
+          title="Collapse Source Control"
+          onclick={toggleGitPanelCollapsed}
+          style={{
+            "font-family": "var(--font-mono)", "font-size": "11px",
+            color: "var(--fg-default)", "font-weight": "600",
+            padding: "0", background: "transparent", border: "0", cursor: "pointer",
+          }}
+        >
           {s()?.branch || "no branch"}
-        </span>
+        </button>
         <Show
           when={upstream()}
           fallback={

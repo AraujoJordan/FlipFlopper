@@ -178,6 +178,68 @@ pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
 // File tree (lazy, one level at a time)
 // ────────────────────────────────────────────────
 
+/// List the immediate children of `dir` (one level, respecting .gitignore),
+/// without sorting or compaction. Shared by `list_dir` and the compact-chain
+/// probe so both apply identical visibility rules.
+fn collect_children(root: &Path) -> Vec<FileEntry> {
+    // WalkBuilder with max_depth(1) gives us immediate children only,
+    // while still loading .gitignore rules from parent directories.
+    let walker = WalkBuilder::new(root)
+        .max_depth(Some(1))
+        .hidden(false) // show hidden files (like .agents)
+        .git_ignore(true)
+        .build();
+
+    let mut entries: Vec<FileEntry> = Vec::new();
+    for result in walker {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path().to_path_buf();
+        // Skip the directory itself.
+        if path == root {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        entries.push(FileEntry {
+            name,
+            path: path.to_string_lossy().to_string(),
+            is_dir: path.is_dir(),
+        });
+    }
+    entries
+}
+
+/// When a folder contains exactly one child that is itself a folder (and no
+/// files or other folders), collapse the chain into a single node so the tree
+/// reads as `folder1/folder2/folder3` instead of three nested levels — the
+/// same idea as VS Code's "Compact Folders". The returned entry keeps
+/// `is_dir: true` and points its `path` at the deepest folder, so expanding
+/// it lazily fetches and shows the deepest folder's real children.
+fn compact_folder_chain(entry: &mut FileEntry) {
+    const MAX_CHAIN: usize = 32;
+    let mut current = PathBuf::from(&entry.path);
+    let mut segments: Vec<String> = vec![entry.name.clone()];
+    while segments.len() < MAX_CHAIN {
+        let children = collect_children(&current);
+        if children.len() == 1 && children[0].is_dir {
+            let next = children.into_iter().next().unwrap();
+            current = PathBuf::from(&next.path);
+            segments.push(next.name);
+        } else {
+            break;
+        }
+    }
+    if segments.len() > 1 {
+        entry.name = segments.join("/");
+        entry.path = current.to_string_lossy().to_string();
+    }
+}
+
 /// List the direct children of `dir_path`, respecting .gitignore.
 pub fn list_dir(dir_path: &str) -> Result<Vec<FileEntry>, String> {
     let root = PathBuf::from(dir_path);
@@ -185,45 +247,22 @@ pub fn list_dir(dir_path: &str) -> Result<Vec<FileEntry>, String> {
         return Err(format!("Not a directory: {dir_path}"));
     }
 
-    let mut entries: Vec<FileEntry> = Vec::new();
+    let mut entries = collect_children(&root);
 
-    // WalkBuilder with max_depth(1) gives us immediate children only,
-    // while still loading .gitignore rules from parent directories.
-    let walker = WalkBuilder::new(&root)
-        .max_depth(Some(1))
-        .hidden(false) // show hidden files (like .agents)
-        .git_ignore(true)
-        .build();
-
-    for result in walker {
-        match result {
-            Ok(entry) => {
-                let path = entry.path().to_path_buf();
-                // Skip the root itself
-                if path == root {
-                    continue;
-                }
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let is_dir = path.is_dir();
-                entries.push(FileEntry {
-                    name,
-                    path: path.to_string_lossy().to_string(),
-                    is_dir,
-                });
-            }
-            Err(_) => continue,
-        }
-    }
-
-    // Directories first, then alphabetical
+    // Directories first, then alphabetical. Sorting runs before compaction so
+    // folders stay ordered by their original first segment; compaction only
+    // rewrites `name`/`path`, not the ordering.
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
         _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
+
+    for entry in &mut entries {
+        if entry.is_dir {
+            compact_folder_chain(entry);
+        }
+    }
 
     Ok(entries)
 }

@@ -7,11 +7,40 @@ type SearchItem =
   | { kind: "file"; file: FileEntry }
   | { kind: "match"; match: TextMatch };
 
+/** A single usage hit. `text`/`col`/`len` are present for text-search hits
+ *  and omitted for LSP references (which only carry path + position).
+ *  `character` is the 0-based UTF-16 column used to land the cursor on the
+ *  symbol so its occurrences get highlighted. */
+export interface UsageItem {
+  rel_path: string;
+  /** 1-based line number (used directly for navigation). */
+  line: number;
+  text?: string;
+  col?: number;
+  len?: number;
+  character?: number;
+}
+
 const isMac = navigator.platform.toLowerCase().includes("mac");
 const shortcutHint = isMac ? "⌘⇧F" : "Ctrl+Shift+F";
 
 function basename(path: string): string {
   return path.split("/").filter(Boolean).pop() || path;
+}
+
+/** Convert a UTF-8 byte offset within `text` to a UTF-16 code-unit index.
+ *  Search hits report byte offsets (from Rust); CodeMirror/JS use UTF-16. */
+/** Convert a UTF-8 byte offset within `text` to a UTF-16 code-unit index.
+ *  Search hits report byte offsets (from Rust); CodeMirror/JS use UTF-16. */
+export function byteOffsetToUtf16(text: string, byteOffset: number): number {
+  let byteOffsetAcc = 0;
+  for (let index = 0; index < text.length;) {
+    if (byteOffsetAcc >= byteOffset) return index;
+    const codePoint = text.codePointAt(index) ?? 0;
+    byteOffsetAcc += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+    index += codePoint > 0xffff ? 2 : 1;
+  }
+  return text.length;
 }
 
 function byteRangeToIndices(text: string, col: number, len: number): [number, number] {
@@ -36,8 +65,21 @@ function byteRangeToIndices(text: string, col: number, len: number): [number, nu
   return [startIndex, Math.max(startIndex, endIndex)];
 }
 
+function usageToTextMatch(u: UsageItem): TextMatch {
+  return { rel_path: u.rel_path, line: u.line, text: u.text ?? "", col: u.col ?? 0, len: u.len ?? 0 };
+}
+
+// ── Programmatic usages-popup opener (consumed by EditorPane CMD/Ctrl+Click) ──
+const [usagesState, setUsagesState] = createSignal<{ symbol: string; items: UsageItem[] } | null>(null);
+
+/** Open the usages popup pre-seeded with results (IntelliJ-style "Find Usages"). */
+export function openUsages(symbol: string, items: UsageItem[]) {
+  setUsagesState({ symbol, items: items.slice() });
+}
+
 const OmniSearch: Component = () => {
   let inputRef: HTMLInputElement | undefined;
+  let dialogRef: HTMLDivElement | undefined;
   let searchSeq = 0;
 
   const [open, setOpen] = createSignal(false);
@@ -50,14 +92,27 @@ const OmniSearch: Component = () => {
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
-  const items = createMemo<SearchItem[]>(() => [
-    ...files().map((file) => ({ kind: "file" as const, file })),
-    ...matches().map((match) => ({ kind: "match" as const, match })),
-  ]);
+  const visible = createMemo(() => open() || usagesState() !== null);
+
+  // Unified item list for keyboard navigation / selection across both modes.
+  const items = createMemo<SearchItem[]>(() => {
+    const u = usagesState();
+    if (u) {
+      return u.items.map((usage) => {
+        const match = usageToTextMatch(usage);
+        return { kind: "match" as const, match };
+      });
+    }
+    return [
+      ...files().map((file) => ({ kind: "file" as const, file })),
+      ...matches().map((match) => ({ kind: "match" as const, match })),
+    ];
+  });
 
   function close() {
     searchSeq += 1;
     setOpen(false);
+    setUsagesState(null);
     setQuery("");
     setFiles([]);
     setMatches([]);
@@ -68,14 +123,20 @@ const OmniSearch: Component = () => {
 
   onMount(() => {
     const unregister = registerShortcutHandler("omni-search", () => {
-      if (store.currentProject) setOpen(true);
+      if (store.currentProject) {
+        setUsagesState(null);
+        setOpen(true);
+      }
     });
     onCleanup(unregister);
   });
 
   createEffect(() => {
-    if (!open()) return;
-    queueMicrotask(() => inputRef?.focus());
+    if (!visible()) return;
+    queueMicrotask(() => {
+      if (usagesState()) dialogRef?.focus();
+      else inputRef?.focus();
+    });
   });
 
   createEffect(() => {
@@ -194,8 +255,35 @@ const OmniSearch: Component = () => {
     );
   }
 
+  const matchRow = (match: TextMatch, isActive: boolean, onclick: () => void) => (
+    <button
+      type="button"
+      onMouseDown={(e) => e.preventDefault()}
+      onclick={onclick}
+      style={{
+        width: "100%",
+        display: "grid",
+        "grid-template-columns": "minmax(150px, 220px) 1fr",
+        gap: "10px",
+        padding: "8px 10px",
+        "border-radius": "8px",
+        background: isActive ? "#1b1f2a" : "transparent",
+        color: "var(--fg-default)",
+        "text-align": "left",
+        "font-size": "12px",
+      }}
+    >
+      <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap", color: "var(--fg-muted)" }}>
+        {match.rel_path}:{match.line}
+      </span>
+      <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
+        {match.text ? renderMatchText(match) : null}
+      </span>
+    </button>
+  );
+
   return (
-    <Show when={open() && store.currentProject}>
+    <Show when={visible() && store.currentProject}>
       <div
         onclick={close}
         style={{
@@ -206,6 +294,8 @@ const OmniSearch: Component = () => {
         }}
       >
         <div
+          ref={dialogRef}
+          tabindex={-1}
           onclick={(e) => e.stopPropagation()}
           onKeyDown={handleKeyDown}
           style={{
@@ -222,170 +312,209 @@ const OmniSearch: Component = () => {
             "border-radius": "var(--radius-xl)",
             "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
             overflow: "hidden",
+            outline: "none",
           }}
         >
-          <div style={{
-            display: "flex",
-            "align-items": "center",
-            gap: "8px",
-            padding: "10px",
-            border: "0 solid var(--border-muted)",
-            "border-bottom-width": "1px",
-          }}>
-            <input
-              ref={inputRef}
-              value={query()}
-              placeholder="Search files and text"
-              onInput={(e) => setQuery(e.currentTarget.value)}
-              style={{
-                flex: 1,
-                height: "34px",
-                background: "var(--surface-2)",
-                border: "1px solid var(--border-default)",
-                "border-radius": "8px",
-                color: "var(--fg-default)",
-                padding: "0 10px",
-                outline: "none",
-                "font-size": "13px",
-              }}
-            />
-            <button
-              type="button"
-              aria-pressed={regexMode()}
-              title="Regular expression"
-              onclick={() => setRegexMode((v) => !v)}
-              style={{
-                width: "34px",
-                height: "34px",
-                "border-radius": "8px",
-                background: regexMode() ? "rgba(88,166,255,.18)" : "var(--surface-2)",
-                border: `1px solid ${regexMode() ? "rgba(88,166,255,.65)" : "var(--border-default)"}`,
-                color: regexMode() ? "#79c0ff" : "var(--fg-muted)",
-                "font-size": "12px",
-                "font-weight": 700,
-              }}
-            >
-              .*
-            </button>
-            <button
-              type="button"
-              aria-pressed={caseSensitive()}
-              title="Match case"
-              onclick={() => setCaseSensitive((v) => !v)}
-              style={{
-                width: "34px",
-                height: "34px",
-                "border-radius": "8px",
-                background: caseSensitive() ? "rgba(88,166,255,.18)" : "var(--surface-2)",
-                border: `1px solid ${caseSensitive() ? "rgba(88,166,255,.65)" : "var(--border-default)"}`,
-                color: caseSensitive() ? "#79c0ff" : "var(--fg-muted)",
-                "font-size": "12px",
-                "font-weight": 700,
-              }}
-            >
-              Aa
-            </button>
-            <div style={{ color: "var(--fg-subtle)", "font-size": "11px", "white-space": "nowrap" }}>
-              {shortcutHint}
-            </div>
-          </div>
-
-          <div style={{ padding: "7px", overflow: "auto", "min-height": "80px" }}>
-            <Show when={error()}>
-              {(message) => (
-                <div style={{ color: "#ff7b72", "font-size": "12px", padding: "9px 10px" }}>
-                  {message()}
+          {/* ── header: free-text search OR usages title ── */}
+          <Show
+            when={usagesState()}
+            fallback={
+              <div style={{
+                display: "flex",
+                "align-items": "center",
+                gap: "8px",
+                padding: "10px",
+                border: "0 solid var(--border-muted)",
+                "border-bottom-width": "1px",
+              }}>
+                <input
+                  ref={inputRef}
+                  value={query()}
+                  placeholder="Search files and text"
+                  onInput={(e) => setQuery(e.currentTarget.value)}
+                  style={{
+                    flex: 1,
+                    height: "34px",
+                    background: "var(--surface-2)",
+                    border: "1px solid var(--border-default)",
+                    "border-radius": "8px",
+                    color: "var(--fg-default)",
+                    padding: "0 10px",
+                    outline: "none",
+                    "font-size": "13px",
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-pressed={regexMode()}
+                  title="Regular expression"
+                  onclick={() => setRegexMode((v) => !v)}
+                  style={{
+                    width: "34px",
+                    height: "34px",
+                    "border-radius": "8px",
+                    background: regexMode() ? "rgba(88,166,255,.18)" : "var(--surface-2)",
+                    border: `1px solid ${regexMode() ? "rgba(88,166,255,.65)" : "var(--border-default)"}`,
+                    color: regexMode() ? "#79c0ff" : "var(--fg-muted)",
+                    "font-size": "12px",
+                    "font-weight": 700,
+                  }}
+                >
+                  .*
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={caseSensitive()}
+                  title="Match case"
+                  onclick={() => setCaseSensitive((v) => !v)}
+                  style={{
+                    width: "34px",
+                    height: "34px",
+                    "border-radius": "8px",
+                    background: caseSensitive() ? "rgba(88,166,255,.18)" : "var(--surface-2)",
+                    border: `1px solid ${caseSensitive() ? "rgba(88,166,255,.65)" : "var(--border-default)"}`,
+                    color: caseSensitive() ? "#79c0ff" : "var(--fg-muted)",
+                    "font-size": "12px",
+                    "font-weight": 700,
+                  }}
+                >
+                  Aa
+                </button>
+                <div style={{ color: "var(--fg-subtle)", "font-size": "11px", "white-space": "nowrap" }}>
+                  {shortcutHint}
                 </div>
+              </div>
+            }
+          >
+            {(u) => (
+              <div style={{
+                display: "flex",
+                "align-items": "center",
+                gap: "10px",
+                padding: "10px 12px",
+                border: "0 solid var(--border-muted)",
+                "border-bottom-width": "1px",
+              }}>
+                <span style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Usages of</span>
+                <code style={{
+                  "font-family": "'JetBrains Mono', monospace",
+                  "font-size": "12.5px",
+                  color: "#f0c674",
+                  background: "rgba(240, 198, 116, .14)",
+                  padding: "2px 7px",
+                  "border-radius": "5px",
+                }}>
+                  {u().symbol}
+                </code>
+                <span style={{ "font-size": "11px", color: "var(--fg-subtle)" }}>
+                  {u().items.length} {u().items.length === 1 ? "result" : "results"}
+                </span>
+              </div>
+            )}
+          </Show>
+
+          {/* ── body ── */}
+          <div style={{ padding: "7px", overflow: "auto", "min-height": "80px" }}>
+            <Show when={usagesState()}>
+              {(u) => (
+                <Show
+                  when={u().items.length > 0}
+                  fallback={
+                    <div style={{ color: "var(--fg-subtle)", "font-size": "12px", padding: "9px 10px" }}>
+                      No usages found.
+                    </div>
+                  }
+                >
+                  <For each={u().items}>
+                    {(usage, index) => matchRow(
+                      usageToTextMatch(usage),
+                      index() === selectedIndex(),
+                      () => {
+                        void openEditorFile(usage.rel_path, basename(usage.rel_path), usage.line);
+                        close();
+                      },
+                    )}
+                  </For>
+                </Show>
               )}
             </Show>
 
-            <Show when={!error() && !query().trim()}>
-              <div style={{ color: "var(--fg-subtle)", "font-size": "12px", padding: "9px 10px" }}>
-                Type to search the current project.
-              </div>
-            </Show>
+            <Show when={!usagesState()}>
+              <Show when={error()}>
+                {(message) => (
+                  <div style={{ color: "#ff7b72", "font-size": "12px", padding: "9px 10px" }}>
+                    {message()}
+                  </div>
+                )}
+              </Show>
 
-            <Show when={!error() && query().trim() && loading() && items().length === 0}>
-              <div style={{ color: "var(--fg-subtle)", "font-size": "12px", padding: "9px 10px" }}>
-                Searching...
-              </div>
-            </Show>
+              <Show when={!error() && !query().trim()}>
+                <div style={{ color: "var(--fg-subtle)", "font-size": "12px", padding: "9px 10px" }}>
+                  Type to search the current project.
+                </div>
+              </Show>
 
-            <Show when={!error() && query().trim() && !loading() && items().length === 0}>
-              <div style={{ color: "var(--fg-subtle)", "font-size": "12px", padding: "9px 10px" }}>
-                No results
-              </div>
-            </Show>
+              <Show when={!error() && query().trim() && loading() && items().length === 0}>
+                <div style={{ color: "var(--fg-subtle)", "font-size": "12px", padding: "9px 10px" }}>
+                  Searching...
+                </div>
+              </Show>
 
-            <Show when={!error() && files().length > 0}>
-              <div style={{ color: "var(--fg-subtle)", "font-size": "10px", padding: "6px 9px 4px", "text-transform": "uppercase" }}>
-                Files
-              </div>
-              <For each={files()}>
-                {(file, index) => {
-                  const active = () => index() === selectedIndex();
-                  return (
-                    <button
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onclick={() => void activate({ kind: "file", file })}
-                      style={{
-                        width: "100%",
-                        display: "flex",
-                        "align-items": "center",
-                        padding: "8px 10px",
-                        "border-radius": "8px",
-                        background: active() ? "#1b1f2a" : "transparent",
-                        color: "var(--fg-default)",
-                        "text-align": "left",
-                        "font-size": "12px",
-                      }}
-                    >
-                      <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
-                        {file.name}
-                      </span>
-                    </button>
-                  );
-                }}
-              </For>
-            </Show>
+              <Show when={!error() && query().trim() && !loading() && items().length === 0}>
+                <div style={{ color: "var(--fg-subtle)", "font-size": "12px", padding: "9px 10px" }}>
+                  No results
+                </div>
+              </Show>
 
-            <Show when={!error() && matches().length > 0}>
-              <div style={{ color: "var(--fg-subtle)", "font-size": "10px", padding: "8px 9px 4px", "text-transform": "uppercase" }}>
-                Matches
-              </div>
-              <For each={matches()}>
-                {(match, index) => {
-                  const offset = () => files().length;
-                  const active = () => offset() + index() === selectedIndex();
-                  return (
-                    <button
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onclick={() => void activate({ kind: "match", match })}
-                      style={{
-                        width: "100%",
-                        display: "grid",
-                        "grid-template-columns": "minmax(150px, 220px) 1fr",
-                        gap: "10px",
-                        padding: "8px 10px",
-                        "border-radius": "8px",
-                        background: active() ? "#1b1f2a" : "transparent",
-                        color: "var(--fg-default)",
-                        "text-align": "left",
-                        "font-size": "12px",
-                      }}
-                    >
-                      <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap", color: "var(--fg-muted)" }}>
-                        {match.rel_path}:{match.line}
-                      </span>
-                      <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
-                        {renderMatchText(match)}
-                      </span>
-                    </button>
-                  );
-                }}
-              </For>
+              <Show when={!error() && files().length > 0}>
+                <div style={{ color: "var(--fg-subtle)", "font-size": "10px", padding: "6px 9px 4px", "text-transform": "uppercase" }}>
+                  Files
+                </div>
+                <For each={files()}>
+                  {(file, index) => {
+                    const active = () => index() === selectedIndex();
+                    return (
+                      <button
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onclick={() => void activate({ kind: "file", file })}
+                        style={{
+                          width: "100%",
+                          display: "flex",
+                          "align-items": "center",
+                          padding: "8px 10px",
+                          "border-radius": "8px",
+                          background: active() ? "#1b1f2a" : "transparent",
+                          color: "var(--fg-default)",
+                          "text-align": "left",
+                          "font-size": "12px",
+                        }}
+                      >
+                        <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
+                          {file.name}
+                        </span>
+                      </button>
+                    );
+                  }}
+                </For>
+              </Show>
+
+              <Show when={!error() && matches().length > 0}>
+                <div style={{ color: "var(--fg-subtle)", "font-size": "10px", padding: "8px 9px 4px", "text-transform": "uppercase" }}>
+                  Matches
+                </div>
+                <For each={matches()}>
+                  {(match, index) => {
+                    const offset = () => files().length;
+                    const active = () => offset() + index() === selectedIndex();
+                    return matchRow(
+                      match,
+                      active(),
+                      () => void activate({ kind: "match", match }),
+                    );
+                  }}
+                </For>
+              </Show>
             </Show>
           </div>
         </div>

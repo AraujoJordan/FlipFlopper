@@ -1,4 +1,4 @@
-import { Component, createEffect, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
+import { Component, createEffect, createResource, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import {
   EditorView,
   keymap,
@@ -40,6 +40,10 @@ import {
   bumpGitStatus,
   registerEditorSaveFlush,
   unregisterEditorSaveFlush,
+  registerEditorReload,
+  unregisterEditorReload,
+  setEditorSelectionInfo,
+  setPendingPromptInsert,
   type EditorFile,
 } from "../lib/store";
 import {
@@ -51,10 +55,15 @@ import {
   lspCompletion,
   lspHover,
   lspDefinition,
+  lspReferences,
   lspDiagnostics,
+  searchProjectText,
+  detectPreview,
   type LspDiagnostic,
 } from "../lib/ipc";
 import { getFileIcon } from "./FileTree";
+import PreviewPanel from "./PreviewPanel";
+import { openUsages, byteOffsetToUtf16, type UsageItem } from "./OmniSearch";
 import { flipflopperTheme } from "../lib/cmTheme";
 
 const POLL_MS = 3000;
@@ -108,6 +117,8 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
 
   const [saveError, setSaveError] = createSignal<string | null>(null);
   const [conflict, setConflict] = createSignal(false);
+
+
 
   async function save() {
     if (!view || props.file.binary || conflict()) return;
@@ -170,6 +181,97 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     if (!def) return;
     const name = def.path.split("/").pop() || def.path;
     await openEditorFile(def.path, name, def.line + 1);
+  }
+
+  /** Extract the identifier ([A-Za-z0-9_$]+) surrounding `pos`, or null. */
+  function wordAt(pos: number): string | null {
+    if (!view) return null;
+    const line = view.state.doc.lineAt(pos);
+    const text = line.text;
+    const rel = Math.min(Math.max(pos - line.from, 0), text.length);
+    const isIdent = (ch: string) => /[A-Za-z0-9_$]/.test(ch);
+    let start = rel;
+    if (rel < text.length && !isIdent(text[rel]) && rel > 0 && isIdent(text[rel - 1])) {
+      start = rel; // clicked just past the token's right edge
+    }
+    while (start > 0 && isIdent(text[start - 1])) start--;
+    let end = start;
+    while (end < text.length && isIdent(text[end])) end++;
+    return end > start ? text.slice(start, end) : null;
+  }
+
+  /** Resolve a symbol's usages: LSP references first, ripgrep word search as a
+   *  fallback for file types without a language server. Opens the usages popup. */
+  async function findUsages(pos: number, word: string | null) {
+    const project = store.currentProject;
+    if (!project || !view) return;
+    const point = lspPosition(pos);
+    let items: UsageItem[] = [];
+
+    try {
+      const refs = await lspReferences(project.path, props.file.path, point.line, point.character);
+      items = refs.map((r) => ({
+        rel_path: r.path,
+        line: r.line + 1,
+        character: r.character,
+      }));
+    } catch { /* no language server for this file type → text fallback */ }
+
+    if (items.length === 0 && word) {
+      try {
+        const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const results = await searchProjectText(project.path, `\\b${escaped}\\b`, true, true, 100);
+        items = results.map((m) => ({
+          rel_path: m.rel_path,
+          line: m.line,
+          text: m.text,
+          col: m.col,
+          len: m.len,
+          character: byteOffsetToUtf16(m.text, m.col),
+        }));
+      } catch { /* ignore — open with whatever we have */ }
+    }
+
+    // Exclude the location the user clicked so we never navigate to the
+    // current spot. If exactly one other occurrence remains, jump straight to
+    // it (IntelliJ single-result behavior); otherwise open the usages popup.
+    const clickedLine = view.state.doc.lineAt(pos).number;
+    const others = items.filter(
+      (it) => !(it.rel_path === props.file.path && it.line === clickedLine),
+    );
+
+    if (others.length === 1) {
+      const target = others[0];
+      const name = target.rel_path.split("/").pop() || target.rel_path;
+      await openEditorFile(target.rel_path, name, target.line, target.character);
+      return;
+    }
+
+    openUsages(word ?? "symbol", others);
+  }
+
+  /** IntelliJ-smart CMD/Ctrl+Click: if the clicked symbol is a usage, jump to
+   *  its declaration; if it is the declaration (or there is no LSP), open the
+   *  usages popup. */
+  async function smartClick(pos: number) {
+    const project = store.currentProject;
+    if (!project) return;
+    const point = lspPosition(pos);
+    const word = wordAt(pos);
+
+    let def = null;
+    try {
+      def = await lspDefinition(project.path, props.file.path, point.line, point.character);
+    } catch { /* treat as on-declaration below */ }
+
+    const onDeclaration = !def
+      || (def.path === props.file.path && def.line === point.line);
+    if (!onDeclaration && def) {
+      const name = def.path.split("/").pop() || def.path;
+      await openEditorFile(def.path, name, def.line + 1);
+      return;
+    }
+    await findUsages(pos, word);
   }
 
   async function lspCompletionSource(context: CompletionContext): Promise<CompletionResult | null> {
@@ -292,7 +394,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
           bracketMatching(),
           closeBrackets(),
           indentOnInput(),
-          highlightSelectionMatches(),
+          highlightSelectionMatches({ highlightWordAroundCursor: true, wholeWords: true }),
           linter(lspLintSource, { delay: 900 }),
           hoverTooltip(async (_view, pos) => {
             const project = store.currentProject;
@@ -322,7 +424,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
               const pos = v.posAtCoords({ x: event.clientX, y: event.clientY });
               if (pos == null) return false;
               event.preventDefault();
-              void gotoDefinition(pos);
+              void smartClick(pos);
               return true;
             },
           }),
@@ -333,6 +435,15 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
               setEditorDirty(props.file.path, true);
               scheduleAutoSave();
               scheduleLspSync();
+            }
+            if (u.selectionSet && view) {
+              const sel = view.state.selection.main;
+              setEditorSelectionInfo({
+                path: props.file.path,
+                startLine: view.state.doc.lineAt(sel.from).number,
+                endLine: view.state.doc.lineAt(sel.to).number,
+                hasSelection: sel.from !== sel.to,
+              });
             }
           }),
         ],
@@ -353,6 +464,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     }
 
     registerEditorSaveFlush(props.file.path, flushAutoSave);
+    registerEditorReload(props.file.path, reloadFromDisk);
     const poll = window.setInterval(() => {
       if (props.active && store.workspaceMode === "code") checkStale();
     }, POLL_MS);
@@ -363,6 +475,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       if (lspTimer !== undefined) window.clearTimeout(lspTimer);
       void flushAutoSave();
       unregisterEditorSaveFlush(props.file.path);
+      unregisterEditorReload(props.file.path);
       view?.destroy();
     });
   });
@@ -384,9 +497,13 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
         setTimeout(() => {
           if (view && lineNo > 0 && lineNo <= view.state.doc.lines) {
             const line = view.state.doc.line(lineNo);
+            // Land on the symbol column when provided so that
+            // highlight-selection-matches highlights all its occurrences.
+            const col = focus.character ?? 0;
+            const targetPos = Math.min(Math.max(line.from + col, line.from), line.to);
             view.dispatch({
-              selection: { anchor: line.from, head: line.from },
-              effects: EditorView.scrollIntoView(line.from, { y: "center" })
+              selection: { anchor: targetPos, head: targetPos },
+              effects: EditorView.scrollIntoView(targetPos, { y: "center" })
             });
             view.focus();
           }
@@ -469,8 +586,78 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
 
 // ── Editor area (tab strip + header + stacked buffers) ────────────────────────
 
+const PREVIEW_OPEN_KEY = "flipflopper:preview-open";
+const PREVIEW_WIDTH_KEY = "flipflopper:preview-width";
+const PREVIEW_WIDTH_DEFAULT = 420;
+const PREVIEW_WIDTH_MIN = 260;
+const PREVIEW_DEBOUNCE_MS = 2000;
+
+function readPreviewOpen(): boolean {
+  try { return localStorage.getItem(PREVIEW_OPEN_KEY) === "1"; } catch { return false; }
+}
+function readPreviewWidth(): number {
+  try {
+    const raw = Number(localStorage.getItem(PREVIEW_WIDTH_KEY));
+    return Number.isFinite(raw) && raw > 0 ? raw : PREVIEW_WIDTH_DEFAULT;
+  } catch { return PREVIEW_WIDTH_DEFAULT; }
+}
+
 const EditorPane: Component = () => {
   const activeFile = () => store.editorFiles.find((f) => f.path === store.activeEditorPath);
+
+  const [previewOpen, setPreviewOpen] = createSignal(readPreviewOpen());
+  const [previewWidth, setPreviewWidth] = createSignal(readPreviewWidth());
+
+  const togglePreview = () => {
+    const next = !previewOpen();
+    setPreviewOpen(next);
+    try { localStorage.setItem(PREVIEW_OPEN_KEY, next ? "1" : "0"); } catch { /* ignore */ }
+  };
+
+  // Debounce detection against autosave churn: saves bump gitStatusVersion
+  // frequently, so wait for a 2s lull before re-detecting.
+  const [savedTick, setSavedTick] = createSignal(0);
+  let saveDebounce: number | undefined;
+  createEffect(() => {
+    store.gitStatusVersion;
+    if (saveDebounce !== undefined) window.clearTimeout(saveDebounce);
+    saveDebounce = window.setTimeout(() => setSavedTick((t) => t + 1), PREVIEW_DEBOUNCE_MS);
+  });
+  onCleanup(() => { if (saveDebounce !== undefined) window.clearTimeout(saveDebounce); });
+
+  const [previewInfo, { refetch: refetchPreview }] = createResource(
+    () => {
+      const p = store.currentProject?.path;
+      const f = store.activeEditorPath;
+      return p && f ? { p, f, tick: savedTick() } : null;
+    },
+    ({ p, f }) => detectPreview(p, f).catch(() => null),
+  );
+  const previewAvailable = () => (previewInfo()?.kind ?? "none") !== "none";
+  const previewVisible = () => previewOpen() && previewAvailable() && !!activeFile();
+
+  // Resize handle drag (mirrors TerminalPanel's pointer-capture pattern).
+  const [dragging, setDragging] = createSignal(false);
+  let dragStartX = 0;
+  let dragStartWidth = 0;
+  const onDragStart = (e: PointerEvent) => {
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    dragStartX = e.clientX;
+    dragStartWidth = previewWidth();
+    setDragging(true);
+  };
+  const onDragMove = (e: PointerEvent) => {
+    if (!dragging()) return;
+    const max = Math.max(PREVIEW_WIDTH_MIN, window.innerWidth * 0.7);
+    const next = Math.min(Math.max(dragStartWidth + (dragStartX - e.clientX), PREVIEW_WIDTH_MIN), max);
+    setPreviewWidth(next);
+  };
+  const onDragEnd = (e: PointerEvent) => {
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    setDragging(false);
+    try { localStorage.setItem(PREVIEW_WIDTH_KEY, String(previewWidth())); } catch { /* ignore */ }
+  };
 
   return (
     <div style={{
@@ -509,7 +696,13 @@ const EditorPane: Component = () => {
               const isActive = () => file.path === store.activeEditorPath;
               return (
                 <div
+                  class="editor-tab"
+                  classList={{ "tab-closing": file.isClosing }}
                   onclick={() => setActiveEditorFile(file.path)}
+                  oncontextmenu={(e) => {
+                    e.preventDefault();
+                    void closeEditorFile(file.path);
+                  }}
                   title={file.path}
                   style={{
                     display: "flex", "align-items": "center", gap: "7px",
@@ -580,6 +773,57 @@ const EditorPane: Component = () => {
               </Show>
 
               <div style={{ "margin-left": "auto", display: "flex", gap: "8px" }}>
+                <Show when={store.editorSelectionInfo?.hasSelection && store.editorSelectionInfo?.path === file().path ? store.editorSelectionInfo : undefined}>
+                  {(sel) => {
+                    const label = () => sel().startLine === sel().endLine
+                      ? `L${sel().startLine}`
+                      : `L${sel().startLine}-${sel().endLine}`;
+                    return (
+                      <button
+                        onclick={() => {
+                          const s = sel();
+                          setPendingPromptInsert({
+                            path: s.path,
+                            startLine: s.startLine,
+                            endLine: s.endLine,
+                          });
+                          setEditorSelectionInfo(null);
+                        }}
+                        title={`Add ${label()} to prompt`}
+                        style={{
+                          display: "flex", "align-items": "center", gap: "5px",
+                          padding: "4px 10px", "border-radius": "7px",
+                          border: "1px solid var(--accent)",
+                          color: "var(--accent)",
+                          background: "var(--surface-4)",
+                          "font-size": "11.5px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M5 12h14M12 5v14" />
+                        </svg>
+                        {label()}
+                      </button>
+                    );
+                  }}
+                </Show>
+                <Show when={previewAvailable()}>
+                  <button
+                    onclick={togglePreview}
+                    title="Toggle UI preview"
+                    style={{
+                      padding: "4px 12px", "border-radius": "7px",
+                      border: previewOpen() ? "1px solid var(--accent)" : "1px solid var(--border-strong)",
+                      color: previewOpen() ? "var(--fg-default)" : "var(--fg-muted)",
+                      background: previewOpen() ? "var(--surface-4)" : "transparent",
+                      "font-size": "11.5px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Preview
+                  </button>
+                </Show>
                 <button
                   onclick={() => openReview("HEAD", file().name, file().path)}
                   title="Review changes vs HEAD"
@@ -597,16 +841,38 @@ const EditorPane: Component = () => {
           )}
         </Show>
 
-        {/* ── stacked buffers ── */}
-        <div style={{ flex: "1", position: "relative", "min-height": 0 }}>
-          <For each={store.editorFiles}>
-            {(file) => (
-              <EditorBuffer
-                file={file}
-                active={file.path === store.activeEditorPath && store.workspaceMode === "code"}
+        {/* ── stacked buffers + optional preview split ── */}
+        <div style={{ flex: "1", display: "flex", "min-height": 0 }}>
+          <div style={{ flex: "1", position: "relative", "min-width": 0 }}>
+            <For each={store.editorFiles}>
+              {(file) => (
+                <EditorBuffer
+                  file={file}
+                  active={file.path === store.activeEditorPath && store.workspaceMode === "code"}
+                />
+              )}
+            </For>
+          </div>
+          <Show when={previewVisible()}>
+            <div
+              class="preview-resize-handle"
+              classList={{ "preview-resize-handle-active": dragging() }}
+              onPointerDown={onDragStart}
+              onPointerMove={onDragMove}
+              onPointerUp={onDragEnd}
+            />
+            <div style={{
+              width: `${previewWidth()}px`, flex: "0 0 auto", "min-width": 0,
+              "border-left": "1px solid var(--border-muted)",
+            }}>
+              <PreviewPanel
+                info={previewInfo()!}
+                relPath={store.activeEditorPath!}
+                onClose={togglePreview}
+                onRefresh={refetchPreview}
               />
-            )}
-          </For>
+            </div>
+          </Show>
         </div>
       </Show>
     </div>

@@ -129,6 +129,8 @@ const AgentBar: Component = () => {
           return (
             <div
               role="tab"
+              class="agent-tab"
+              classList={{ "tab-closing": tab.isClosing }}
               tabIndex={0}
               aria-selected={isActive()}
               onclick={() => setActiveTab(tab.sessionId)}

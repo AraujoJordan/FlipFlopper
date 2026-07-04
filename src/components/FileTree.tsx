@@ -33,9 +33,14 @@ export function getFileIcon(filename: string): string {
   return materialIconPath(getFileIconName(filename));
 }
 
-/** Material Icon Theme folder icon for a folder's basename. */
+/** Folder icon for a folder's display name. Compacted chains (e.g.
+ *  "src/components/widgets") resolve by their last segment so the deepest
+ *  folder's specific icon wins. */
 export function getFolderIcon(folderName: string, isRoot = false): string {
-  return materialIconPath(getFolderIconName(folderName, isRoot));
+  const base = folderName.lastIndexOf("/") > -1
+    ? folderName.slice(folderName.lastIndexOf("/") + 1)
+    : folderName;
+  return materialIconPath(getFolderIconName(base, isRoot));
 }
 
 /** Vertical indent-guide lines, one per depth level, drawn as stacked
@@ -100,6 +105,15 @@ const FileTree: Component = () => {
   );
 
   const statuses = () => gitStatus() ?? [];
+
+  createEffect(() => {
+    store.fileTreeVersion;
+    void refetchRoot();
+    const currentExpanded = expanded();
+    for (const dirPath of currentExpanded) {
+      void reloadDir(dirPath);
+    }
+  });
 
   // ── Context menu / inline create-rename / keyboard focus state ─────────────
   const [menu, setMenu] = createSignal<{ x: number; y: number; target: MenuTarget } | null>(null);
@@ -192,7 +206,7 @@ const FileTree: Component = () => {
   // Scroll the focused row into view once it exists in the DOM.
   createEffect(() => {
     const path = focusedPath();
-    if (path) rowRefs.get(path)?.scrollIntoView({ block: "nearest" });
+    if (path) rowRefs.get(path)?.scrollIntoView({ block: "nearest", inline: "nearest" });
   });
 
   function relPathOf(path: string): string {
@@ -714,12 +728,18 @@ const FileTree: Component = () => {
         padding: "0 10px 0 14px",
         "border-bottom": "1px solid var(--border-muted)",
       }}>
-        <span style={{
-          "font-size": "11px", "letter-spacing": ".5px",
-          "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
-        }}>
+        <button
+          type="button"
+          title="Collapse Explorer"
+          onclick={toggleExplorerCollapsed}
+          style={{
+            "font-size": "11px", "letter-spacing": ".5px",
+            "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
+            padding: "0", background: "transparent", border: "0", cursor: "pointer",
+          }}
+        >
           Explorer
-        </span>
+        </button>
         <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
           <Show when={statuses().length > 0}>
             <span style={{
@@ -829,16 +849,21 @@ const FileTree: Component = () => {
                   </div>
                 </Show>
 
-                <Show when={editing() && editing()!.mode !== "rename" && editing()!.parent === store.fileTreePath}>
-                  {(() => {
-                    const e = editing() as Extract<EditingState, { mode: "create-file" | "create-folder" }>;
-                    return <NewEntryRow depth={0} kind={e.mode} />;
-                  })()}
-                </Show>
+                {/* Wrapper grows to the natural width of the widest row (deep
+                    indent + long/compacted names) so the scroll container can
+                    scroll horizontally instead of forcing ellipsis. */}
+                <div style={{ "min-width": "100%", width: "max-content" }}>
+                  <Show when={editing() && editing()!.mode !== "rename" && editing()!.parent === store.fileTreePath}>
+                    {(() => {
+                      const e = editing() as Extract<EditingState, { mode: "create-file" | "create-folder" }>;
+                      return <NewEntryRow depth={0} kind={e.mode} />;
+                    })()}
+                  </Show>
 
-                <For each={rootEntries() ?? []}>
-                  {(entry) => <FileNode entry={entry} statuses={statuses()} depth={0} />}
-                </For>
+                  <For each={rootEntries() ?? []}>
+                    {(entry) => <FileNode entry={entry} statuses={statuses()} depth={0} />}
+                  </For>
+                </div>
               </>
             }
           >
@@ -897,7 +922,6 @@ const FileTree: Component = () => {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--fg-subtle)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
         </svg>
-        <span class="panel-rail-label">Explorer</span>
         <Show when={statuses().length > 0}>
           <span style={{
             "font-family": "var(--font-mono)",

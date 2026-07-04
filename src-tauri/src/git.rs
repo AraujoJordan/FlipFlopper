@@ -226,9 +226,9 @@ pub fn ensure_work_branch(project_path: &str, branch_name: &str) -> Result<Strin
     // Check if branch exists already
     let branches = git(project_path, &["branch", "--list", branch_name])?;
     if branches.is_empty() {
-        git(project_path, &["checkout", "-b", branch_name])?;
+        git(project_path, &["switch", "-c", branch_name])?;
     } else {
-        git(project_path, &["checkout", branch_name])?;
+        git(project_path, &["switch", branch_name])?;
     }
     Ok(branch_name.to_string())
 }
@@ -593,3 +593,31 @@ pub fn checkout_previous(project_path: &str) -> Result<(), String> {
     git(project_path, &["checkout", "-"])?;
     Ok(())
 }
+
+/// Get the recent local branches, sorted by committerdate (most recent first).
+pub fn get_recent_branches(project_path: &str, limit: usize) -> Result<Vec<String>, String> {
+    let limit_str = limit.to_string();
+    let out = git(
+        project_path,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "refs/heads/",
+            "--format=%(refname:short)",
+            &format!("--count={}", limit_str),
+        ],
+    )?;
+    let branches = out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    Ok(branches)
+}
+
+/// Switch to an existing branch.
+pub fn switch_branch(project_path: &str, branch_name: &str) -> Result<(), String> {
+    git(project_path, &["switch", branch_name])?;
+    Ok(())
+}
+
