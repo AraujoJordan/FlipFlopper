@@ -1,10 +1,9 @@
 import { Component, createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { store, addTab, removeTab, setActiveTab } from "../lib/store";
 import { spawnAgent, type AgentInfo } from "../lib/ipc";
-import { agentColor, AgentLogo } from "../App";
 import { Menu, MenuLabel, MenuItem, Spinner, toast } from "./ui";
 import { registerShortcutHandler } from "../lib/shortcuts";
-import { agentModeShortLabel } from "../lib/agentMeta";
+import { agentColor, AgentLogo, agentModeShortLabel } from "../lib/agentMeta";
 
 /** The "pick an agent to start" dropdown. Shared by AgentBar's "+" tab
  *  button, the empty agent-workspace CTA, and the prompt composer's

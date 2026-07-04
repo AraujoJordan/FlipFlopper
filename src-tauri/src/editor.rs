@@ -19,6 +19,19 @@ pub struct FileContent {
 // Path safety
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Canonicalize `path`. If `path` itself doesn't exist yet (e.g. a file
+/// that's about to be created), walks up to the nearest existing ancestor
+/// and canonicalizes that instead, so not-yet-existing destinations still
+/// resolve to a real, symlink-free location. Errors only if no ancestor
+/// exists at all.
+pub(crate) fn canonicalize_lenient(path: &Path) -> Result<PathBuf, String> {
+    let existing = path
+        .ancestors()
+        .find(|p| p.exists())
+        .ok_or_else(|| "Path does not exist".to_string())?;
+    fs::canonicalize(existing).map_err(|e| format!("Cannot resolve path: {e}"))
+}
+
 /// Resolve `rel_path` inside `project_path`, rejecting anything that escapes
 /// the project root (absolute paths, `..` traversal, symlinks pointing out).
 pub(crate) fn resolve_in_project(project_path: &str, rel_path: &str) -> Result<PathBuf, String> {
@@ -30,11 +43,7 @@ pub(crate) fn resolve_in_project(project_path: &str, rel_path: &str) -> Result<P
     let joined = root.join(rel_path);
 
     // Canonicalize the deepest existing ancestor so new files still validate.
-    let existing = joined
-        .ancestors()
-        .find(|p| p.exists())
-        .ok_or_else(|| "Path does not exist".to_string())?;
-    let canonical = fs::canonicalize(existing).map_err(|e| format!("Cannot resolve path: {e}"))?;
+    let canonical = canonicalize_lenient(&joined)?;
 
     if !canonical.starts_with(&root) {
         return Err("Path escapes project root".into());

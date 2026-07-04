@@ -9,7 +9,7 @@ import {
 import {
   addTerminal,
   readValidationTargets,
-  setStore,
+  setValidationSessionId,
   store,
   writeValidationTarget,
 } from "../lib/store";
@@ -87,7 +87,7 @@ const ValidationButton: Component = () => {
     const path = projectPath();
     validationExitUnlisten?.();
     validationExitUnlisten = null;
-    setStore("validationSessionId", null);
+    setValidationSessionId(null);
     setMenuOpen(false);
     setTargets([]);
     if (path) void loadTargets(path);
@@ -116,10 +116,10 @@ const ValidationButton: Component = () => {
         label: `Validate · ${shortLabel(target)}`,
         kind: "validate",
       });
-      setStore("validationSessionId", sessionId);
+      setValidationSessionId(sessionId);
       validationExitUnlisten?.();
       validationExitUnlisten = await onPtyExit(sessionId, () => {
-        if (store.validationSessionId === sessionId) setStore("validationSessionId", null);
+        if (store.validationSessionId === sessionId) setValidationSessionId(null);
         validationExitUnlisten?.();
         validationExitUnlisten = null;
       });
@@ -137,7 +137,7 @@ const ValidationButton: Component = () => {
       await ptyKill(sessionId);
     } catch (e) {
       toast(`Stop failed: ${String(e)}`, "error");
-      setStore("validationSessionId", null);
+      setValidationSessionId(null);
       validationExitUnlisten?.();
       validationExitUnlisten = null;
     }

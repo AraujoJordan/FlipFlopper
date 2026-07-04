@@ -488,8 +488,12 @@ pub fn move_entry_into(path: &str, dest_dir: &str) -> Result<FileEntry, String> 
     if !dest.is_dir() {
         return Err(format!("Not a directory: {dest_dir}"));
     }
-    let canonical_source = source.canonicalize().unwrap_or_else(|_| source.clone());
-    let canonical_dest = dest.canonicalize().unwrap_or_else(|_| dest.clone());
+    // Shares the same canonicalize-with-lenient-fallback primitive as
+    // `editor::resolve_in_project`, instead of an ad-hoc canonicalize here.
+    let canonical_source =
+        crate::editor::canonicalize_lenient(&source).unwrap_or_else(|_| source.clone());
+    let canonical_dest =
+        crate::editor::canonicalize_lenient(&dest).unwrap_or_else(|_| dest.clone());
     if canonical_source == canonical_dest || canonical_dest.starts_with(&canonical_source) {
         return Err("Cannot move a folder into itself".to_string());
     }
@@ -551,7 +555,7 @@ pub fn search_files(
     }
 
     let query = query.trim_start_matches('@');
-    if let Some(explicit) = explicit_file_query(project_path, query, dirs::home_dir().as_deref())? {
+    if let Some(explicit) = explicit_file_query(project_path, query, home_dir().as_deref())? {
         return search_explicit_file_query(explicit, limit);
     }
 
@@ -1070,6 +1074,28 @@ fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
 }
 
 // ────────────────────────────────────────────────
+// Home dir / agent-store path resolution (shared with handoff.rs)
+// ────────────────────────────────────────────────
+
+/// Resolve the user's home directory. Single shared entry point so every
+/// module that needs a home-relative agent-store path (skills, recents,
+/// handoff session scanning) resolves it the same way.
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
+/// Resolve the Codex CLI's data directory: `$CODEX_HOME` if set, else
+/// `~/.codex`. Shared by skills discovery (`list_skills` below) and
+/// `handoff::codex_latest`'s session-transcript scanning so both honor the
+/// same override consistently.
+pub(crate) fn codex_home_dir() -> Option<PathBuf> {
+    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+        return Some(PathBuf::from(codex_home));
+    }
+    home_dir().map(|h| h.join(".codex"))
+}
+
+// ────────────────────────────────────────────────
 // Prompt skill autocomplete
 // ────────────────────────────────────────────────
 
@@ -1086,16 +1112,11 @@ pub fn list_skills(project_path: Option<&str>) -> Vec<SkillEntry> {
         ));
     }
 
-    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-        roots.push((
-            PathBuf::from(codex_home).join("skills"),
-            "codex".to_string(),
-        ));
-    } else if let Some(home) = dirs::home_dir() {
-        roots.push((home.join(".codex").join("skills"), "codex".to_string()));
+    if let Some(codex_home) = codex_home_dir() {
+        roots.push((codex_home.join("skills"), "codex".to_string()));
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home_dir() {
         roots.push((home.join(".agents").join("skills"), "agents".to_string()));
     }
 
@@ -1229,7 +1250,7 @@ fn clean_yaml_scalar(raw: &str) -> String {
 // ────────────────────────────────────────────────
 
 fn recents_path() -> PathBuf {
-    let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let base = home_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join(".config")
         .join("flipflopper")
         .join("recents.json")
@@ -1240,21 +1261,41 @@ pub fn get_recent_projects() -> Vec<ProjectInfo> {
     if !path.exists() {
         return vec![];
     }
-    let content = fs::read_to_string(&path).unwrap_or_default();
-    serde_json::from_str::<Vec<ProjectInfo>>(&content).unwrap_or_default()
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("recents: failed to read {}: {e}", path.display());
+            return vec![];
+        }
+    };
+    match serde_json::from_str::<Vec<ProjectInfo>>(&content) {
+        Ok(recents) => recents,
+        Err(e) => {
+            eprintln!("recents: failed to parse {}: {e}", path.display());
+            vec![]
+        }
+    }
 }
 
 pub fn add_recent_project(info: &ProjectInfo) {
     let path = recents_path();
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!("recents: failed to create {}: {e}", parent.display());
+        }
     }
     let mut recents = get_recent_projects();
     recents.retain(|r| r.path != info.path);
     recents.insert(0, info.clone());
     recents.truncate(20);
-    let _ = fs::write(
-        &path,
-        serde_json::to_string_pretty(&recents).unwrap_or_default(),
-    );
+    let serialized = match serde_json::to_string_pretty(&recents) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("recents: failed to serialize recents list: {e}");
+            return;
+        }
+    };
+    if let Err(e) = fs::write(&path, serialized) {
+        eprintln!("recents: failed to write {}: {e}", path.display());
+    }
 }

@@ -489,6 +489,19 @@ export async function killAndClearAllTerminals() {
   setStore("terminalPanelOpen", false);
 }
 
+// ── Run / validation session ownership ───────────────────────────────────────
+// `runSessionId` and `validationSessionId` are each written from more than one
+// component (RunButton/PreviewPanel for run, ValidationButton for validation),
+// so they go through these mutators rather than raw `setStore` calls.
+
+export function setRunSessionId(sessionId: string | null) {
+  setStore("runSessionId", sessionId);
+}
+
+export function setValidationSessionId(sessionId: string | null) {
+  setStore("validationSessionId", sessionId);
+}
+
 export function setYoloMode(enabled: boolean) {
   setStore("yoloMode", enabled);
   try { localStorage.setItem(YOLO_MODE_KEY, String(enabled)); } catch { /* ignore */ }
@@ -631,6 +644,13 @@ export function setPendingPromptInsert(info: { path: string; startLine: number; 
  *  the "+" button visibility in the editor header. */
 export function setEditorSelectionInfo(info: { path: string; startLine: number; endLine: number; hasSelection: boolean } | null) {
   setStore("editorSelectionInfo", info);
+}
+
+/** One-shot request: land the cursor on a given line (+ optional column) the
+ *  next time that file's buffer becomes active. The buffer clears this once
+ *  consumed. */
+export function setPendingLineFocus(focus: { path: string; line: number; character?: number } | null) {
+  setStore("pendingLineFocus", focus);
 }
 
 // ── File-tree clipboard (cut / copy / paste) ─────────────────────────────────

@@ -27,7 +27,7 @@ terminal windows was making you flip out (and then flop back).
 
 ## What is this?
 
-FlipFlopper is a cross-platform desktop cockpit for CLI coding agents. It keeps
+FlipFlopper is a cross-platform desktop IDE cockpit for CLI coding agents. It keeps
 real terminals, local files, git history, and agent handoffs in one place so you
 can switch tools without losing context.
 

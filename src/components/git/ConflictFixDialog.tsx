@@ -1,7 +1,7 @@
 import { Component, For, Show, createSignal } from "solid-js";
 import { store, addTab, rankContinueCandidates } from "../../lib/store";
 import { spawnAgent, ptyInput, onPtyOutput, type AgentInfo } from "../../lib/ipc";
-import { AgentLogo } from "../../App";
+import { AgentLogo } from "../../lib/agentMeta";
 import { Button, Menu, MenuItem, Spinner, toast } from "../ui";
 
 interface ConflictState {

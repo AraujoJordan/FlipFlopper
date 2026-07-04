@@ -44,30 +44,14 @@ pub struct FileDiff {
 
 // ────────────────────────────────────────────────────────────────────────────
 // Shell helper
+//
+// Uses the shared `git`/`git_ignore_exit` exec primitives in `git.rs` instead
+// of a local copy. `git diff` exits with 1 when there are differences, which
+// is not an error, so diff calls below use `git_ignore_exit`; everything else
+// (e.g. `ls-files`) uses `git`, which treats a non-zero exit as a real error.
 // ────────────────────────────────────────────────────────────────────────────
 
-fn git(project_path: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(project_path)
-        .output()
-        .map_err(|e| format!("git error: {e}"))?;
-    // git diff exits with 1 when there are differences — that's fine
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-fn git_err(project_path: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(project_path)
-        .output()
-        .map_err(|e| format!("git error: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
-}
+use crate::git::{git, git_ignore_exit};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Unified-diff parser
@@ -334,7 +318,7 @@ pub fn get_review_diff(
                 args.push("--");
                 args.push(p.as_str());
             }
-            parse_unified_diff(&git(project_path, &args)?)
+            parse_unified_diff(&git_ignore_exit(project_path, &args)?)
         }
         "unstaged" => {
             let mut args: Vec<&str> = vec!["-c", "core.quotepath=false", "diff", "--unified=3"];
@@ -342,7 +326,7 @@ pub fn get_review_diff(
                 args.push("--");
                 args.push(p.as_str());
             }
-            parse_unified_diff(&git(project_path, &args)?)
+            parse_unified_diff(&git_ignore_exit(project_path, &args)?)
         }
         _ => {
             let rev_arg = rev.as_deref().unwrap_or("HEAD");
@@ -352,14 +336,14 @@ pub fn get_review_diff(
                 args.push("--");
                 args.push(p.as_str());
             }
-            parse_unified_diff(&git(project_path, &args)?)
+            parse_unified_diff(&git_ignore_exit(project_path, &args)?)
         }
     };
 
     // Augment with untracked files for working-tree-relative views.
     let include_untracked = mode == "unstaged" || (mode == "head" && rev.is_none());
     if include_untracked {
-        let untracked_raw = git_err(
+        let untracked_raw = git(
             project_path,
             &["ls-files", "--others", "--exclude-standard"],
         )

@@ -12,7 +12,7 @@ import {
   type PreviewInfo,
   type PreviewImage,
 } from "../lib/ipc";
-import { addTerminal, removeTerminal, setStore, store } from "../lib/store";
+import { addTerminal, removeTerminal, setRunSessionId, store } from "../lib/store";
 import { Button, Spinner, toast } from "./ui";
 
 const MONO = "var(--font-mono)";
@@ -180,12 +180,12 @@ const PreviewPanel: Component<{
       }
       const sessionId = await runProject(path);
       addTerminal({ sessionId, label: "Run · Dev server", kind: "run" });
-      setStore("runSessionId", sessionId);
+      setRunSessionId(sessionId);
       await subscribeUrl(sessionId);
       // Don't own this session (RunButton owns runSessionId); just track exit.
       exitUnlisten?.();
       exitUnlisten = await onPtyExit(sessionId, () => {
-        if (store.runSessionId === sessionId) setStore("runSessionId", null);
+        if (store.runSessionId === sessionId) setRunSessionId(null);
         setLiveUrl(null); setStarting(false);
         exitUnlisten?.(); exitUnlisten = null;
       });

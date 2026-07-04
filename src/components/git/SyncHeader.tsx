@@ -5,6 +5,7 @@ import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, commitsAheadOfRemote, 
 import { Button, Spinner, toast } from "../ui";
 import { openConflictDialog } from "./ConflictFixDialog";
 import { openSquashPushDialog } from "./SquashPushDialog";
+import { isProtectedBranch } from "../../lib/constants";
 
 type BusyOp = "fetch" | "pull" | "push" | null;
 
@@ -48,7 +49,7 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
     try {
       // Squashing is refused on main/master server-side anyway (mirrors the
       // rollback/rename guards), so skip the dialog there and push directly.
-      if (branch !== "main" && branch !== "master") {
+      if (!isProtectedBranch(branch)) {
         const commits = await commitsAheadOfRemote(project.path);
         if ((isPublish && commits.length >= 1) || commits.length >= 2) {
           openSquashPushDialog({ commits, isPublish });

@@ -9,7 +9,7 @@ import {
 import {
   addTerminal,
   readRunTargets,
-  setStore,
+  setRunSessionId,
   store,
   writeRunTarget,
 } from "../lib/store";
@@ -82,7 +82,7 @@ const RunButton: Component = () => {
     const path = projectPath();
     runExitUnlisten?.();
     runExitUnlisten = null;
-    setStore("runSessionId", null);
+    setRunSessionId(null);
     setMenuOpen(false);
     setTargets([]);
     if (path) void loadTargets(path);
@@ -111,10 +111,10 @@ const RunButton: Component = () => {
         label: `Run · ${shortLabel(target)}`,
         kind: "run",
       });
-      setStore("runSessionId", sessionId);
+      setRunSessionId(sessionId);
       runExitUnlisten?.();
       runExitUnlisten = await onPtyExit(sessionId, () => {
-        if (store.runSessionId === sessionId) setStore("runSessionId", null);
+        if (store.runSessionId === sessionId) setRunSessionId(null);
         runExitUnlisten?.();
         runExitUnlisten = null;
       });
@@ -132,7 +132,7 @@ const RunButton: Component = () => {
       await ptyKill(sessionId);
     } catch (e) {
       toast(`Stop failed: ${String(e)}`, "error");
-      setStore("runSessionId", null);
+      setRunSessionId(null);
       runExitUnlisten?.();
       runExitUnlisten = null;
     }

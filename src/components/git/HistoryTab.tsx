@@ -2,7 +2,7 @@ import { Component, createResource, createSignal, For, Show } from "solid-js";
 import type { Accessor } from "solid-js";
 import { store, openReview, bumpGitStatus, clearHistoryFilter, updateCurrentBranch } from "../../lib/store";
 import { getGitLog, gitRollback, renameCommit, gitCheckoutCommit } from "../../lib/ipc";
-import { agentColor, agentLetter } from "../../App";
+import { agentColor, agentLetter } from "../../lib/agentMeta";
 import { Button, Spinner, confirmDialog, toast } from "../ui";
 
 const UNIT_ABBR: Record<string, string> = {

@@ -10,7 +10,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::SystemTime;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,8 +100,10 @@ fn chrono_lite() -> String {
     format!("t={secs}")
 }
 
+/// Shared with `project::home_dir` / `project::codex_home_dir` so home-dir
+/// (and CODEX_HOME-aware) resolution is done in exactly one place.
 fn home() -> Option<PathBuf> {
-    dirs::home_dir()
+    crate::project::home_dir()
 }
 
 /// Return the path in the iterator with the most recent modification time.
@@ -378,7 +379,9 @@ fn claude_parse_jsonl(path: &Path) -> Option<HandoffContext> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn codex_latest(project_path: &str) -> Option<HandoffContext> {
-    let sessions_dir = home()?.join(".codex").join("sessions");
+    // Shared with `project::list_skills` so a custom CODEX_HOME is honored
+    // consistently everywhere Codex's data directory is located.
+    let sessions_dir = crate::project::codex_home_dir()?.join("sessions");
     if !sessions_dir.is_dir() {
         return None;
     }
@@ -953,16 +956,10 @@ fn find_latest_session(agent_id: &str, project_path: &str) -> Option<HandoffCont
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn gather_git(project_path: &str) -> GitContext {
-    let run = |args: &[&str]| -> String {
-        Command::new("git")
-            .args(args)
-            .current_dir(project_path)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
-    };
+    // Shared exec primitive (`crate::git::git`) already treats a non-zero
+    // exit as an error and trims stdout; `unwrap_or_default()` reproduces the
+    // old inline closure's "empty string on any failure" behavior.
+    let run = |args: &[&str]| -> String { crate::git::git(project_path, args).unwrap_or_default() };
 
     let branch = {
         let b = run(&["rev-parse", "--abbrev-ref", "HEAD"]);

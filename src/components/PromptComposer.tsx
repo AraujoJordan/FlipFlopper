@@ -9,12 +9,11 @@ import {
   type FileEntry,
   type PromptSkill,
 } from "../lib/ipc";
-import { agentColor, AgentLogo } from "../App";
-import { getFileIcon } from "./FileTree";
+import { getFileIcon } from "../lib/fileIcons";
 import { NewAgentMenu } from "./AgentBar";
 import { toast } from "./ui";
 import { registerShortcutHandler } from "../lib/shortcuts";
-import { AGENT_SLASH_COMMANDS, agentModeLabel } from "../lib/agentMeta";
+import { agentColor, AgentLogo, AGENT_SLASH_COMMANDS, agentModeLabel } from "../lib/agentMeta";
 
 type CompletionKind = "file" | "skill" | "command";
 

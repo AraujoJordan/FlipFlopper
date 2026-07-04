@@ -8160,3 +8160,9 @@ export function getFolderIconName(folderName: string, isRoot = false): string {
 export function iconPath(name: string): string {
   return `/icons/${name}.svg`;
 }
+
+/** Material Icon Theme file icon for a filename (always resolves — falls
+ *  back to the theme's generic file icon). */
+export function getFileIcon(filename: string): string {
+  return iconPath(getFileIconName(filename));
+}

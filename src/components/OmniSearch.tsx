@@ -2,79 +2,17 @@ import { Component, For, Show, createEffect, createMemo, createSignal, onCleanup
 import { searchProjectText, searchPromptFiles, type FileEntry, type TextMatch } from "../lib/ipc";
 import { openEditorFile, store } from "../lib/store";
 import { registerShortcutHandler, runAction } from "../lib/shortcuts";
+import { usagesState, clearUsages, byteRangeToIndices, usageToTextMatch } from "../lib/usages";
 
 type SearchItem =
   | { kind: "file"; file: FileEntry }
   | { kind: "match"; match: TextMatch };
-
-/** A single usage hit. `text`/`col`/`len` are present for text-search hits
- *  and omitted for LSP references (which only carry path + position).
- *  `character` is the 0-based UTF-16 column used to land the cursor on the
- *  symbol so its occurrences get highlighted. */
-export interface UsageItem {
-  rel_path: string;
-  /** 1-based line number (used directly for navigation). */
-  line: number;
-  text?: string;
-  col?: number;
-  len?: number;
-  character?: number;
-}
 
 const isMac = navigator.platform.toLowerCase().includes("mac");
 const shortcutHint = isMac ? "⌘⇧F" : "Ctrl+Shift+F";
 
 function basename(path: string): string {
   return path.split("/").filter(Boolean).pop() || path;
-}
-
-/** Convert a UTF-8 byte offset within `text` to a UTF-16 code-unit index.
- *  Search hits report byte offsets (from Rust); CodeMirror/JS use UTF-16. */
-/** Convert a UTF-8 byte offset within `text` to a UTF-16 code-unit index.
- *  Search hits report byte offsets (from Rust); CodeMirror/JS use UTF-16. */
-export function byteOffsetToUtf16(text: string, byteOffset: number): number {
-  let byteOffsetAcc = 0;
-  for (let index = 0; index < text.length;) {
-    if (byteOffsetAcc >= byteOffset) return index;
-    const codePoint = text.codePointAt(index) ?? 0;
-    byteOffsetAcc += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
-    index += codePoint > 0xffff ? 2 : 1;
-  }
-  return text.length;
-}
-
-function byteRangeToIndices(text: string, col: number, len: number): [number, number] {
-  const end = col + len;
-  let byteOffset = 0;
-  let startIndex = text.length;
-  let endIndex = text.length;
-
-  for (let index = 0; index < text.length;) {
-    if (byteOffset >= col && startIndex === text.length) startIndex = index;
-    if (byteOffset >= end) {
-      endIndex = index;
-      break;
-    }
-    const codePoint = text.codePointAt(index) ?? 0;
-    byteOffset += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
-    index += codePoint > 0xffff ? 2 : 1;
-  }
-
-  if (byteOffset >= col && startIndex === text.length) startIndex = text.length;
-  if (byteOffset >= end && endIndex === text.length) endIndex = text.length;
-  return [startIndex, Math.max(startIndex, endIndex)];
-}
-
-function usageToTextMatch(u: UsageItem): TextMatch {
-  return { rel_path: u.rel_path, line: u.line, text: u.text ?? "", col: u.col ?? 0, len: u.len ?? 0 };
-}
-
-// ── Programmatic usages-popup opener (consumed by EditorPane CMD/Ctrl+Click) ──
-const [usagesState, setUsagesState] = createSignal<{ symbol: string; items: UsageItem[] } | null>(null);
-
-/** Open the usages popup pre-seeded with results (IntelliJ-style "Find Usages"). */
-export function openUsages(symbol: string, items: UsageItem[]) {
-  setUsagesState({ symbol, items: items.slice() });
 }
 
 // ── Scoped open (consumed by FileTree "Find in Folder…") ─────────────────────
@@ -123,7 +61,7 @@ const OmniSearch: Component = () => {
   function close() {
     searchSeq += 1;
     setOpen(false);
-    setUsagesState(null);
+    clearUsages();
     setQuery("");
     setFiles([]);
     setMatches([]);
@@ -137,7 +75,7 @@ const OmniSearch: Component = () => {
   onMount(() => {
     const unregister = registerShortcutHandler("omni-search", () => {
       if (store.currentProject) {
-        setUsagesState(null);
+        clearUsages();
         // Pick up a pending scope (set by openOmniSearchInScope) — or clear it.
         setScope(pendingScope());
         setPendingScope(null);

@@ -29,7 +29,6 @@ import { languages } from "@codemirror/language-data";
 import { LanguageDescription } from "@codemirror/language";
 import {
   store,
-  setStore,
   openReview,
   openEditorFile,
   closeEditorFile,
@@ -44,6 +43,7 @@ import {
   unregisterEditorReload,
   setEditorSelectionInfo,
   setPendingPromptInsert,
+  setPendingLineFocus,
   type EditorFile,
 } from "../lib/store";
 import {
@@ -61,9 +61,9 @@ import {
   detectPreview,
   type LspDiagnostic,
 } from "../lib/ipc";
-import { getFileIcon } from "./FileTree";
+import { getFileIcon } from "../lib/fileIcons";
 import PreviewPanel from "./PreviewPanel";
-import { openUsages, byteOffsetToUtf16, type UsageItem } from "./OmniSearch";
+import { openUsages, byteOffsetToUtf16, type UsageItem } from "../lib/usages";
 import { flipflopperTheme } from "../lib/cmTheme";
 
 const POLL_MS = 3000;
@@ -491,7 +491,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       const focus = store.pendingLineFocus;
       if (focus && focus.path === props.file.path) {
         // Clear the focus request immediately
-        setStore("pendingLineFocus", null);
+        setPendingLineFocus(null);
 
         const lineNo = focus.line;
         setTimeout(() => {

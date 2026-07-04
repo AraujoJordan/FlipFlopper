@@ -44,14 +44,11 @@ Currently implemented:
 
 Known gaps / current quirks:
 
-- The visible branch labels in `src/App.tsx` and
-  `src/components/CommitTimeline.tsx` are hardcoded to `main`.
 - The git backend refuses auto-commit, rollback, and commit rename on
   `main`/`master`.
-- IPC wrappers exist for `ensure_work_branch`, `git_rollback`,
-  `rename_commit`, `inject_file_refs`, and `pick_prompt_file`, but the current
-  UI does not wire all of them.
-- `project::search_files` exists but is not exposed through `lib.rs`.
+- `project::search_files` is registered and reachable; it is exposed through
+  `lib.rs` under the command name `search_prompt_files` (see `lib.rs:699,704,1285`),
+  not under its own function name. The naming mismatch is cosmetic, not a gap.
 - `.agents/settings.json` may still mention `cli-continues`; current
   `handoff.rs` no longer depends on it.
 - The README is user-facing and partly stale. Prefer source files and this
@@ -97,26 +94,52 @@ git push origin main
 
 ```text
 src/
-  App.tsx                    top-level app shell, title bar, tabs, layout,
-                             continue menu, workspace restore
+  App.tsx                    thin app shell: title bar, tabs, layout, native
+                             menu routing, workspace persistence/restore
   App.css                    global UI styles
   index.tsx                  Solid entry point
   lib/ipc.ts                 typed Tauri invoke/listen wrappers
   lib/store.ts               Solid store, tab/session helpers, review state
+  lib/agentMeta.tsx          agent visual identity (colors, letters, AgentLogo)
+                             and per-agent mode-cycle support map
+  lib/constants.ts           PROTECTED_BRANCHES / isProtectedBranch, WORK_BRANCH
+  lib/fileIcons.ts           file extension to icon mapping (getFileIcon)
+  lib/usages.ts              find-usages result model shared by EditorPane/OmniSearch
+  lib/shortcuts.ts           global keyboard shortcut registry, capture-phase
+                             before xterm/CodeMirror
   components/
     AgentBar.tsx             terminal tab strip and new-tab behavior
     TerminalPane.tsx         xterm.js instance wired to PTY events
+    TerminalPanel.tsx        bottom panel hosting run/validate/install TerminalPanes
     FileTree.tsx             lazy explorer, git status badges, review entry
     PromptComposer.tsx       bottom prompt input, PTY send / auto-commit path
-    CommitTimeline.tsx       recent commits, working-tree review button
     DiffPane.tsx             native unified/split diff overlay
     EditorPane.tsx           CodeMirror editor, tabs, and preview split host
     PreviewPanel.tsx         UI preview side panel (live iframe / snapshot grid)
+    OmniSearch.tsx           file/text search command palette and find-usages
+    RunButton.tsx            detect run targets, launch/stop project run in a PTY
+    ValidationButton.tsx     detect and launch project validation/test targets
+    BranchIndicator.tsx      recent branches, switch, create work branch,
+                             protected-branch guard (extracted from App.tsx)
+    YoloButton.tsx           autonomous-mode toggle and confirm/kill flow
+                             (extracted from App.tsx)
+    AgentWorkspace.tsx       active agent pane plus "Continue on..." handoff menu
+                             (extracted from App.tsx)
+    ui.tsx                   shared UI kit: Spinner, toast, and other primitives
+    git/
+      GitPanel.tsx           tab shell for sync/changes/history, status polling
+      ChangesTab.tsx         staged/unstaged list, stage/unstage/discard/stash
+      HistoryTab.tsx         commit log, rollback, rename, checkout by sha
+      SyncHeader.tsx         fetch/pull/push, ahead/behind, conflict/squash entry
+      SquashPushDialog.tsx   squash-and-push with AI-generated commit message
+      ConflictFixDialog.tsx  merge-conflict resolution handoff to an agent
 
 src-tauri/src/
   lib.rs                     Tauri builder, command registry, event bridge
   main.rs                    native entry point
   pty.rs                     portable-pty session lifecycle and shell commands
+  lsp.rs                     LSP session manager: completions, diagnostics,
+                             go-to-definition
   agents.rs                  static agent registry and PATH/version detection
   project.rs                 AGENTS.md/.agents scaffolding, recents, file tree
   git.rs                     shell-based status, commit, log, rename, rollback
@@ -171,8 +194,8 @@ requires generated output.
   input forwarding. Clean up listeners on unmount.
 - `FileTree` fetches one directory level at a time via `get_file_tree`; keep it
   lazy for large repositories.
-- `CommitTimeline` and `FileTree` should open native review diffs, not spawn an
-  external preview server.
+- `components/git/*` and `FileTree` should open native review diffs, not spawn
+  an external preview server.
 - Keep UI text compact and operational. This is a desktop workbench, not a
   marketing page.
 

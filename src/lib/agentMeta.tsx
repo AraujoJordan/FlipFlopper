@@ -1,3 +1,5 @@
+import { Component, createSignal, Show } from "solid-js";
+
 export type AgentMode = "normal" | "acceptEdits" | "plan" | "bypass";
 
 interface AgentModeSupport {
@@ -430,3 +432,85 @@ export function agentModeLabel(agentId: string, mode: AgentMode) {
 export function agentModeShortLabel(agentId: string, mode: AgentMode) {
   return AGENT_MODE_SUPPORT[agentId]?.shortLabels[mode] ?? null;
 }
+
+// ── Agent visual identity (colors, letters, logo) ────────────────────────────
+// Single source of truth for how an agent is represented in the UI. Consumed
+// by App.tsx, AgentBar.tsx, TerminalPanel.tsx, PromptComposer.tsx, and
+// AgentTaskDialog.tsx.
+
+const AGENT_COLORS: Record<string, string> = {
+  claude: "#58a6ff",
+  qwen: "#a371f7",
+  gemini: "#2f81f7",
+  codex: "#3fb950",
+  cursor: "#f0f6fc",
+  agy: "#2f81f7",
+  aider: "#f0883e",
+  opencode: "#bc8cff",
+  cline: "#39c5cf",
+  goose: "#56d364",
+  plandex: "#a5d6ff",
+  droid: "#f778ba",
+  run: "#3fb950",
+  validate: "#58a6ff",
+};
+
+export function agentColor(agentId: string): string {
+  return AGENT_COLORS[agentId] ?? "#8b949e";
+}
+
+export function agentLetter(agentId: string): string {
+  const map: Record<string, string> = {
+    claude: "C", qwen: "Q", gemini: "G", codex: "X", cursor: "C",
+    agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R",
+    run: "▶",
+    validate: "✓",
+  };
+  return map[agentId] ?? agentId[0]?.toUpperCase() ?? "?";
+}
+
+export const AgentLogo: Component<{
+  agentId: string;
+  icon?: string | null;
+  name?: string;
+  size?: number;
+  radius?: number;
+}> = (props) => {
+  const [imageFailed, setImageFailed] = createSignal(false);
+  const size = () => props.size ?? 24;
+  const radius = () => props.radius ?? 7;
+
+  return (
+    <span style={{
+      width: `${size()}px`, height: `${size()}px`,
+      "border-radius": `${radius()}px`,
+      background: `${agentColor(props.agentId)}22`,
+      border: "1px solid rgba(255,255,255,.08)",
+      display: "flex", "align-items": "center", "justify-content": "center",
+      overflow: "hidden",
+      flex: "0 0 auto",
+    }}>
+      <Show when={props.icon && !imageFailed()} fallback={
+        <span style={{
+          color: "#f0f6fc",
+          "font-family": "'JetBrains Mono', monospace",
+          "font-weight": "700", "font-size": `${Math.max(10, Math.round(size() * 0.52))}px`,
+          "line-height": "1",
+        }}>
+          {agentLetter(props.agentId)}
+        </span>
+      }>
+        <img
+          src={props.icon ?? ""}
+          alt={props.name ? `${props.name} logo` : ""}
+          onError={() => setImageFailed(true)}
+          style={{
+            width: "100%", height: "100%",
+            "object-fit": "contain",
+            display: "block",
+          }}
+        />
+      </Show>
+    </span>
+  );
+};

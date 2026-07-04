@@ -9,13 +9,10 @@ import {
   toggleTerminalPanel,
   type TerminalKind,
 } from "../lib/store";
-import { agentColor } from "../App";
+import { agentColor } from "../lib/agentMeta";
 import TerminalPane from "./TerminalPane";
 import { toast } from "./ui";
 
-// Resolved at call time, not module-eval time: `agentColor` lives in App.tsx,
-// which imports this component back, so touching it at the top level would hit
-// App's `AGENT_COLORS` before it is initialized (circular-import TDZ crash).
 function kindColor(kind: TerminalKind): string {
   switch (kind) {
     case "run": return agentColor("run");

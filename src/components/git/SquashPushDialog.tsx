@@ -4,7 +4,7 @@ import {
   gitPush, squashUnpushed, generateCommitMessage,
   type AgentInfo, type CommitEntry,
 } from "../../lib/ipc";
-import { AgentLogo } from "../../App";
+import { AgentLogo } from "../../lib/agentMeta";
 import { Button, Menu, MenuItem, Spinner, toast } from "../ui";
 
 interface SquashPushState {

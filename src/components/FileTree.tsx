@@ -16,7 +16,7 @@ import { revealItemInDir, openPath } from "@tauri-apps/plugin-opener";
 import { openOmniSearchInScope } from "./OmniSearch";
 import { openAgentTaskDialog } from "./AgentTaskDialog";
 import { runAction } from "../lib/shortcuts";
-import { getFileIconName, getFolderIconName, iconPath as materialIconPath } from "../lib/fileIcons";
+import { getFileIcon, getFolderIconName, iconPath as materialIconPath } from "../lib/fileIcons";
 
 const STATUS_STYLE: Record<string, { color: string; bg: string; label: string }> = {
   A: { color: "var(--status-add)", bg: "#1a2a1e", label: "A" },
@@ -38,12 +38,6 @@ function revealLabel(): string {
   if (platform.includes("mac")) return "Reveal in Finder";
   if (platform.includes("win")) return "Reveal in Explorer";
   return "Reveal in Files";
-}
-
-/** Material Icon Theme file icon for a filename (always resolves — falls
- *  back to the theme's generic file icon). See src/lib/fileIcons.ts. */
-export function getFileIcon(filename: string): string {
-  return materialIconPath(getFileIconName(filename));
 }
 
 /** Folder icon for a folder's display name. Compacted chains (e.g.

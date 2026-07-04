@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::process::Command;
 
 // ────────────────────────────────────────────────
@@ -20,20 +19,18 @@ pub struct CommitResult {
 
 // ────────────────────────────────────────────────
 // Git helpers (shell-based, zero C deps)
+//
+// `git_output` is the single shared exec primitive: it just spawns `git` and
+// hands back the raw `Output` (erroring only if the process fails to spawn).
+// `git` and `git_ignore_exit` are thin wrappers over it for the two shapes
+// call sites need:
+//   - `git`: treat a non-zero exit as an error (stderr becomes the message).
+//     This is the right default for most subcommands.
+//   - `git_ignore_exit`: return stdout regardless of exit code. Some
+//     subcommands (`git diff`) use a non-zero exit to mean something other
+//     than failure (e.g. exit 1 = "there are differences"), so callers that
+//     care about that distinction (review.rs) must not treat it as an error.
 // ────────────────────────────────────────────────
-
-fn git(project_path: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(project_path)
-        .output()
-        .map_err(|e| format!("git error: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
-}
 
 fn git_output(project_path: &str, args: &[&str]) -> Result<std::process::Output, String> {
     Command::new("git")
@@ -43,16 +40,20 @@ fn git_output(project_path: &str, args: &[&str]) -> Result<std::process::Output,
         .map_err(|e| format!("git error: {e}"))
 }
 
-/// True if `project_path` is inside a git repo.
-#[allow(dead_code)]
-pub fn is_git_repo(project_path: &str) -> bool {
-    Path::new(project_path).join(".git").exists()
-        || Command::new("git")
-            .args(["rev-parse", "--git-dir"])
-            .current_dir(project_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+pub(crate) fn git(project_path: &str, args: &[&str]) -> Result<String, String> {
+    let out = git_output(project_path, args)?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// See module doc above: like `git`, but returns stdout as-is (untrimmed)
+/// no matter the exit code.
+pub(crate) fn git_ignore_exit(project_path: &str, args: &[&str]) -> Result<String, String> {
+    let out = git_output(project_path, args)?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 /// Return `git status --short` entries.
@@ -255,12 +256,6 @@ pub fn ensure_work_branch(project_path: &str, branch_name: &str) -> Result<Strin
         git(project_path, &["switch", branch_name])?;
     }
     Ok(branch_name.to_string())
-}
-
-/// Return a simple diff summary for the working tree.
-#[allow(dead_code)]
-pub fn diff_stat(project_path: &str) -> Result<String, String> {
-    git(project_path, &["diff", "--stat", "HEAD"])
 }
 
 // ────────────────────────────────────────────────

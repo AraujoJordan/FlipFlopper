@@ -6,6 +6,7 @@ import {
   type StatusEntry, type SyncStatus,
 } from "../../lib/ipc";
 import { Button, Spinner, confirmDialog, toast } from "../ui";
+import { isProtectedBranch } from "../../lib/constants";
 
 const iconBtnStyle = {
   display: "flex", "align-items": "center", "justify-content": "center",
@@ -235,7 +236,7 @@ const ChangesTab: Component<{
     }
 
     const branch = store.currentBranch;
-    if (branch === "main" || branch === "master") {
+    if (isProtectedBranch(branch)) {
       const ok = await confirmDialog(`Commit directly to ${branch}?`, "Commit");
       if (!ok) return;
     }

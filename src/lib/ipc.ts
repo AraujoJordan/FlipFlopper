@@ -15,12 +15,6 @@ export interface AgentInfo {
   headless_supported: boolean;
 }
 
-export interface SessionInfo {
-  id: string;
-  agent_id: string;
-  project_path: string;
-}
-
 export interface ProjectInfo {
   path: string;
   name: string;
@@ -133,9 +127,6 @@ export const ptyResize = (sessionId: string, cols: number, rows: number): Promis
 
 export const ptyKill = (sessionId: string): Promise<void> =>
   invoke("pty_kill", { sessionId });
-
-export const listSessions = (): Promise<SessionInfo[]> =>
-  invoke("list_sessions");
 
 export const openTerminal = (projectPath: string, cwd?: string): Promise<string> =>
   invoke("open_terminal", { projectPath, cwd: cwd ?? null });
@@ -262,9 +253,6 @@ export interface LspDefinition {
   character: number;
 }
 
-export const lspStatus = (projectPath: string, relPath: string): Promise<LspStatus> =>
-  invoke("lsp_status", { projectPath, relPath });
-
 export const lspOpenDocument = (
   projectPath: string,
   relPath: string,
@@ -330,9 +318,6 @@ export const getGitStatusV2 = (projectPath: string): Promise<StatusEntry[]> =>
 
 export const getSyncStatus = (projectPath: string): Promise<SyncStatus> =>
   invoke("get_sync_status", { projectPath });
-
-export const autoCommit = (projectPath: string, message: string): Promise<CommitResult> =>
-  invoke("auto_commit", { projectPath, message });
 
 export const ensureWorkBranch = (projectPath: string, branch: string): Promise<string> =>
   invoke("ensure_work_branch", { projectPath, branch });

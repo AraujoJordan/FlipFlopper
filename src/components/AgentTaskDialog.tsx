@@ -2,7 +2,7 @@ import { Component, For, Show, createMemo, createSignal, onCleanup, onMount } fr
 import { Portal } from "solid-js/web";
 import { store, addTab, lastUsableAgent } from "../lib/store";
 import { spawnAgent, ptyInput, type AgentInfo } from "../lib/ipc";
-import { agentColor, AgentLogo } from "../App";
+import { agentColor, AgentLogo } from "../lib/agentMeta";
 import { Button, toast } from "./ui";
 
 export interface AgentTaskDialogOptions {
