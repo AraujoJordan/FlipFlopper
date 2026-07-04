@@ -27,72 +27,64 @@ terminal windows was making you flip out (and then flop back).
 
 ## What is this?
 
-FlipFlopper is a cross-platform AI IDE that wraps your favorite CLI AI
-coding agents in a unified developer workspace that doesn't make you cry. It is, naturally,
-**blazingly fast** (it's written in Rust, we are legally required to tell you
-this), uses **zero-cost abstractions**, and is **memory safe** (no agents were
-segfaulted in the making of this app).
-
-You bring the agents. FlipFlopper brings the real terminals, the file explorer,
-the native diff review overlay, and the big shiny "switch from Claude to Codex mid-task"
-button.
-
-## Why bother?
-
-Right now the cheapest AI coding plans are heavily subsidized by venture capital
-and enterprise revenue. Translation: someone else is footing your bill, and that
-does not last forever. When the free-money music stops and prices correct, the
-people who can shrug and flip to whichever agent is cheapest that week are the
-ones who sleep fine. FlipFlopper is that flip button. No lock-in, no loyalty,
-may the best (and cheapest) agent win.
+FlipFlopper is a cross-platform desktop cockpit for CLI coding agents. It keeps
+real terminals, local files, git history, and agent handoffs in one place so you
+can switch tools without losing context.
 
 ## Features
 
-- **Real embedded terminals** - a genuine PTY per agent (via `portable-pty`),
-  not some sad fake textbox. Your agent thinks it's home.
-- **File tree with checkboxes** - tick some files, and FlipFlopper injects them
-  as `@file` references straight into the agent. No more copy-pasting paths like
-  it's 2009.
-- **Built-in code editor** - view and edit files directly in the app using a CodeMirror-based code editor with syntax highlighting, auto-saving, conflict detection, and tabbed file support.
-- **Native code review & diffs** - inspect working-tree changes and commit history
-  natively. Features unified and split layout toggles, change statistics, and
-  syntax highlighting.
-- **Git auto-commit** - auto-commits changes on your current active branch so your progress is saved.
-- **Agent handoff** - hot-swap Claude for Codex (or agy, or Aider) in the
-  middle of a session. It automatically reads active session stores, writes `.agents/handoff.md`, appends to `.agents/context.md`, and launches the target agent with seeded context. Flip. Flop. Repeat.
-- **Shared config** - one `AGENTS.md` plus `.agents/` per project, read by every
-  agent, following the Linux Foundation AAIF standard.
+- **Embedded PTY terminals** - each agent gets a real terminal tab backed by `portable-pty`.
+- **Agent registry** - detects installed CLI agents, their PATH, and version info.
+- **Project workspace** - recent project persistence, project picking, and per-project `.agents/` scaffolding.
+- **Lazy file explorer** - `.gitignore`-aware tree loading with git status badges, file checkboxes, and native diff entry points.
+- **Built-in editor** - tabbed file editing with syntax highlighting, autosave, conflict detection, and the preview split for UI previews and snapshot images.
+- **Prompt composer** - sends text to the active PTY, or falls back to git auto-commit when no agent is active.
+- **Native git review** - working-tree diffs, commit history, and review overlay inside the app.
+- **Agent handoff** - reads available session state, writes `.agents/handoff.md`, appends `.agents/context.md`, and launches the target agent with seeded context when supported.
+- **Tool catalog** - discovers installable tools and generates install commands from the backend.
 
 ## Supported agents
 
-Claude Code, Codex, Cursor CLI, agy, Aider, Goose, Cline, OpenCode, Qwen,
-Plandex, and Droid. If your agent speaks "terminal", it'll probably feel right
-at home.
+Claude Code, Codex, Cursor CLI, OpenCode, Aider, Goose, agy, Cline, Qwen Code,
+Plandex, and Droid.
 
 ## Stack
 
 - **Backend:** Rust + Tauri 2 (`src-tauri/`)
 - **Frontend:** SolidJS + Vite + TypeScript (`src/`)
-- **Key crates:** `portable-pty`, `which`, `ignore` (yes, ripgrep's one), `dirs`
-- **Key npm bits:** `@xterm/xterm`, `@xterm/addon-fit`
+- **Key crates:** `portable-pty`, `which`, `ignore`, `dirs`, `rusqlite`
+- **Key npm bits:** `@xterm/xterm`, `@xterm/addon-fit`, `highlight.js`
 
 ```
 src/
-  App.tsx                    top-level app shell, title bar, tabs, layout, continue menu, workspace restore
+  App.tsx                    top-level app shell, title bar, tabs, layout, menus, workspace restore
   App.css                    global UI styles
   index.tsx                  Solid entry point
   lib/
-    cmTheme.ts               custom CodeMirror editor theme
     ipc.ts                   typed Tauri invoke/listen wrappers
     store.ts                 Solid store, tab/session helpers, review/editor state
+    cmTheme.ts               custom CodeMirror editor theme
+    shortcuts.ts             keyboard shortcut wiring
   components/
     AgentBar.tsx             terminal tab strip and new-tab behavior
+    AgentTaskDialog.tsx      agent task / handoff dialog
     TerminalPane.tsx         xterm.js instance wired to PTY events
     FileTree.tsx             lazy explorer, git status badges, review entry
-    EditorPane.tsx           embedded CodeMirror file viewer/editor with conflict detection
+    OmniSearch.tsx           command/file search palette
+    RunButton.tsx            project run controls
+    ValidationButton.tsx     validation controls
     PromptComposer.tsx       bottom prompt input, PTY send / auto-commit path
-    CommitTimeline.tsx       recent commits, working-tree review button
+    EditorPane.tsx           embedded CodeMirror file viewer/editor with conflict detection
+    PreviewPanel.tsx         UI preview split and snapshot browser
     DiffPane.tsx             native unified/split diff overlay
+    git/
+      GitPanel.tsx           git changes/history workspace
+      SyncHeader.tsx         branch sync actions
+      ChangesTab.tsx         working tree view
+      HistoryTab.tsx         commit history view
+      ConflictFixDialog.tsx  merge conflict resolution helper
+      SquashPushDialog.tsx   squash-and-push flow
+    ui.tsx                   shared buttons, menus, dialogs, toasts
 
 src-tauri/src/
   lib.rs                     Tauri builder, command registry, event bridge
@@ -102,13 +94,16 @@ src-tauri/src/
   project.rs                 AGENTS.md/.agents scaffolding, recents, file tree
   git.rs                     shell-based status, commit, log, rename, rollback
   review.rs                  git diff parser for native review pane
+  preview.rs                 UI preview detection, snapshot matching, image data URLs
+  editor.rs                  file read/write with in-project path safety
+  runner.rs                  run/validation target detection
   tools.rs                   tool catalog, package manager detection, installs
   handoff.rs                 in-house session parser and handoff launcher
 ```
 
 ## Download
 
-Pre-built binaries for every platform are attached to each
+Pre-built binaries are attached to each
 [GitHub Release](https://github.com/AraujoJordan/FlipFlopper/releases):
 
 | Platform | Installer |
