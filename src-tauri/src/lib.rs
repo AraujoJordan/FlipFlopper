@@ -93,13 +93,20 @@ struct PendingBridge {
 #[derive(Default)]
 struct PendingBridges(std::sync::Mutex<std::collections::HashMap<String, PendingBridge>>);
 
-/// Grace period before the watchdog auto-attaches a parked session. The
-/// frontend's `TerminalPane.onMount` normally attaches within tens of
-/// milliseconds; this only fires for sessions no one ever attaches (defensive).
-const PTY_ATTACH_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(2);
+/// Grace period after which a parked session that nobody ever attached is
+/// reclaimed. This **never** auto-starts the event bridge: emitting before the
+/// frontend's `pty://` listener exists silently drops the first output chunk,
+/// which holds the terminal-capability queries query-first TUIs (opencode,
+/// agy) block their first paint on. On a cold release-build webview the
+/// `TerminalPane` for a restored tab can take longer than any short timer to
+/// mount, so a time-based auto-attach reintroduces the very race the park
+/// model exists to prevent. The timer only guards against leaks when the
+/// frontend dies before mounting a pane at all.
+const PTY_PARK_CLEANUP: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Park a freshly spawned session: store it for the frontend to attach, and
-/// arm a watchdog so output still flows even if no one attaches explicitly.
+/// Park a freshly spawned session: hold its event channel until the frontend
+/// attaches (`pty_attach`), and arm a cleanup timer that reclaims the bridge
+/// if the frontend never mounts a pane for it.
 fn park_bridge(
     app: tauri::AppHandle,
     session_id: String,
@@ -117,15 +124,22 @@ fn park_bridge(
     let app_watch = app.clone();
     let id_watch = session_id;
     std::thread::spawn(move || {
-        std::thread::sleep(PTY_ATTACH_WATCHDOG);
-        let taken = app_watch
+        std::thread::sleep(PTY_PARK_CLEANUP);
+        // Reclaim only — do NOT start emitting. Dropping the Receiver makes the
+        // pty.rs reader thread exit on its next tx.send error, the same cleanup
+        // semantics pty_kill already relies on.
+        if app_watch
             .state::<PendingBridges>()
             .0
             .lock()
             .unwrap()
-            .remove(&id_watch);
-        if let Some(pb) = taken {
-            bridge_pty_with_url(app_watch, id_watch, pb.rx, pb.url_action);
+            .remove(&id_watch)
+            .is_some()
+        {
+            eprintln!(
+                "pty: reclaimed unattached session {id_watch} after {PTY_PARK_CLEANUP:?} \
+                 (frontend never mounted a pane)"
+            );
         }
     });
 }

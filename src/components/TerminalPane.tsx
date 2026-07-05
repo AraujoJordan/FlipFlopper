@@ -77,6 +77,16 @@ const TerminalPane: Component<Props> = (props) => {
       return true;
     });
 
+    // Forward xterm's output to the PTY BEFORE any await / ptyAttach. xterm
+    // answers the agent's terminal-capability queries (DA/DSR, cursor-position,
+    // etc.) via onData -> ptyInput; if this isn't wired up the instant the
+    // backend's buffered first chunk is released, those replies are dropped and
+    // query-first TUIs (opencode, agy) hang on a blank frame. Input before
+    // attach is harmless: pty_input writes straight to the PTY writer.
+    terminal.onData((data) => {
+      ptyInput(props.sessionId, data).catch(console.error);
+    });
+
     fitAndResize();
     if (props.active) {
       if (isShell) terminal.focus();
@@ -147,10 +157,6 @@ const TerminalPane: Component<Props> = (props) => {
     // can answer them and the agent's TUI actually renders. Doing this before
     // the listener exists is what left query-first TUIs (opencode, agy) blank.
     await ptyAttach(props.sessionId);
-
-    terminal.onData((data) => {
-      ptyInput(props.sessionId, data).catch(console.error);
-    });
 
     resizeObserver = new ResizeObserver(() => {
       if (props.active) fitAndResize();
