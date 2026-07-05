@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.7 - 2026-07-05
+
+### Fixed
+
+- Fixed OpenCode and AGY opening as empty/black tabs in the packaged (Homebrew/dmg) release. The park/attach handshake's 2s watchdog force-started the event bridge before the frontend's restored-tab `TerminalPane` had mounted on a cold release webview, so the agents' terminal-capability queries were dropped and the TUIs hung. The watchdog no longer auto-attaches; it is now a 60s cleanup timer that only reclaims unattached sessions.
+- `TerminalPane` now registers xterm's `onData` (the capability-query reply path) before releasing the backend's buffered first chunk, so query replies round-trip instead of being dropped.
+
 ## 0.1.6 - 2026-07-05
 
 ### Fixed
