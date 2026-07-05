@@ -1,5 +1,6 @@
 mod agents;
 mod editor;
+mod env;
 mod git;
 mod handoff;
 mod lsp;
@@ -1551,6 +1552,8 @@ async fn trigger_haptic(app: tauri::AppHandle, pattern: String) -> Result<(), St
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    env::install_augmented_path();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

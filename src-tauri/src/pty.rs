@@ -6,6 +6,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use uuid::Uuid;
 
 use crate::agents::{find_agent, launch_binary};
+use crate::env::augmented_path_string;
 
 // ────────────────────────────────────────────────
 // Types
@@ -104,6 +105,7 @@ pub fn spawn_session(
         }
     }
     cmd.cwd(project_path);
+    cmd.env("PATH", augmented_path_string());
 
     let child = pair
         .slave
@@ -255,6 +257,7 @@ pub fn spawn_shell_command(
     cmd.arg(flag);
     cmd.arg(command);
     cmd.cwd(project_path);
+    cmd.env("PATH", augmented_path_string());
 
     let child = pair
         .slave
@@ -338,6 +341,7 @@ pub fn spawn_interactive_shell(
         cmd.env("TERM", "xterm-256color");
         cmd
     };
+    cmd.env("PATH", augmented_path_string());
     cmd.cwd(cwd.unwrap_or(project_path));
 
     let child = pair

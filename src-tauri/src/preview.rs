@@ -5,9 +5,9 @@ use std::{
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
-use which::which;
 
 use crate::editor::resolve_in_project;
+use crate::env::resolve_executable;
 use crate::runner::ProjectFacts;
 
 /// Files above this size are never scanned for preview annotations.
@@ -286,7 +286,7 @@ fn detect_flutter(root: &Path, source: &str, stem: &str) -> PreviewInfo {
     });
     let images = rank_images(root, &dirs, &targets, stem, &[]);
 
-    let live = which("flutter").ok().map(|_| LivePreviewSpec {
+    let live = resolve_executable("flutter").map(|_| LivePreviewSpec {
         id: "flutter-widget-preview".into(),
         label: "Flutter widget preview".into(),
         command: Some("flutter widget-preview start".into()),

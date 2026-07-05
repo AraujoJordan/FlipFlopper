@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use which::which;
+
+use crate::env::{augmented_path_string, resolve_executable};
 
 /// A known CLI AI agent (static config — not serialized to the frontend; use AgentInfo for that).
 #[derive(Debug, Clone)]
@@ -166,11 +167,11 @@ pub static AGENTS: &[AgentDef] = &[
 
 /// Resolve the actual binary path for an agent, trying primary + aliases.
 fn resolve_binary(def: &AgentDef) -> Option<String> {
-    if let Ok(p) = which(def.binary) {
+    if let Some(p) = resolve_executable(def.binary) {
         return Some(p.to_string_lossy().to_string());
     }
     for alias in def.aliases {
-        if let Ok(p) = which(alias) {
+        if let Some(p) = resolve_executable(alias) {
             return Some(p.to_string_lossy().to_string());
         }
     }
@@ -179,26 +180,27 @@ fn resolve_binary(def: &AgentDef) -> Option<String> {
 
 /// Return the binary to actually invoke (primary or first alias found).
 pub fn launch_binary(def: &AgentDef) -> Option<String> {
-    if which(def.binary).is_ok() {
-        return Some(def.binary.to_string());
+    if let Some(p) = resolve_executable(def.binary) {
+        return Some(p.to_string_lossy().to_string());
     }
     for alias in def.aliases {
-        if which(alias).is_ok() {
-            return Some(alias.to_string());
+        if let Some(p) = resolve_executable(alias) {
+            return Some(p.to_string_lossy().to_string());
         }
     }
     None
 }
 
 /// Query version string by running `binary --version`.
-fn get_version(binary: &str) -> Option<String> {
+fn get_version(def: &AgentDef, binary: &str) -> Option<String> {
     // Plandex can open an interactive first-run auth prompt for `--version`.
-    if binary == "plandex" || binary == "pdx" {
+    if def.id == "plandex" {
         return None;
     }
 
     std::process::Command::new(binary)
         .arg("--version")
+        .env("PATH", augmented_path_string())
         .output()
         .ok()
         .and_then(|o| {
@@ -227,7 +229,7 @@ pub fn list_agents() -> Vec<AgentInfo> {
                     let installed = binary_path.is_some();
                     let version = if installed {
                         let bin = launch_binary(def).unwrap_or_default();
-                        get_version(&bin)
+                        get_version(def, &bin)
                     } else {
                         None
                     };
@@ -258,18 +260,26 @@ pub fn find_agent(id: &str) -> Option<&'static AgentDef> {
 /// Run `def`'s non-interactive print/exec mode with `prompt` and capture its
 /// stdout. Used for one-shot helpers (e.g. AI-generated commit messages) that
 /// need a text answer back, not an interactive terminal session.
-pub async fn run_headless(def: &AgentDef, project_path: &str, prompt: &str) -> Result<String, String> {
+pub async fn run_headless(
+    def: &AgentDef,
+    project_path: &str,
+    prompt: &str,
+) -> Result<String, String> {
     let headless_args = def
         .headless_args
         .ok_or_else(|| format!("Agent '{}' has no non-interactive mode.", def.name))?;
     let binary = launch_binary(def).ok_or_else(|| {
-        format!("Agent '{}' binary not found on PATH. Install it first.", def.name)
+        format!(
+            "Agent '{}' binary not found on PATH. Install it first.",
+            def.name
+        )
     })?;
 
     let mut cmd = tokio::process::Command::new(&binary);
     cmd.args(headless_args)
         .arg(prompt)
         .current_dir(project_path)
+        .env("PATH", augmented_path_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

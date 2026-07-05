@@ -1,6 +1,6 @@
+use crate::env::{augmented_path_string, resolve_executable};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use which::which;
 
 // ────────────────────────────────────────────────
 // Types
@@ -363,42 +363,42 @@ pub static CATALOG: &[ToolEntry] = &[
 
 fn detect_pkg_manager() -> &'static str {
     #[cfg(target_os = "macos")]
-    if which("brew").is_ok() {
+    if resolve_executable("brew").is_some() {
         return "brew";
     }
     #[cfg(target_os = "macos")]
-    if which("pipx").is_ok() {
+    if resolve_executable("pipx").is_some() {
         return "pipx";
     }
 
     #[cfg(target_os = "linux")]
     {
-        if which("apt").is_ok() {
+        if resolve_executable("apt").is_some() {
             return "apt";
         }
-        if which("dnf").is_ok() {
+        if resolve_executable("dnf").is_some() {
             return "dnf";
         }
-        if which("pacman").is_ok() {
+        if resolve_executable("pacman").is_some() {
             return "pacman";
         }
-        if which("pipx").is_ok() {
+        if resolve_executable("pipx").is_some() {
             return "pipx";
         }
     }
 
     #[cfg(target_os = "windows")]
     {
-        if which("winget").is_ok() {
+        if resolve_executable("winget").is_some() {
             return "winget";
         }
-        if which("scoop").is_ok() {
+        if resolve_executable("scoop").is_some() {
             return "scoop";
         }
-        if which("choco").is_ok() {
+        if resolve_executable("choco").is_some() {
             return "choco";
         }
-        if which("pipx").is_ok() {
+        if resolve_executable("pipx").is_some() {
             return "pipx";
         }
     }
@@ -469,6 +469,7 @@ fn get_tool_version(binary: &str) -> Option<String> {
 
     Command::new(binary)
         .arg("--version")
+        .env("PATH", augmented_path_string())
         .output()
         .ok()
         .map(|o| {
@@ -483,7 +484,7 @@ fn get_tool_version(binary: &str) -> Option<String> {
 }
 
 fn tool_binary(entry: &ToolEntry) -> Option<String> {
-    which(entry.binary).ok().map(|_| entry.binary.to_string())
+    resolve_executable(entry.binary).map(|path| path.to_string_lossy().to_string())
 }
 
 // ────────────────────────────────────────────────

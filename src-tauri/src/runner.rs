@@ -6,8 +6,8 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use which::which;
 
+use crate::env::resolve_executable;
 use crate::tools;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -900,7 +900,7 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
     if (facts.exists("docker-compose.yml")
         || facts.exists("compose.yaml")
         || facts.exists("compose.yml"))
-        && which("docker").is_ok()
+        && resolve_executable("docker").is_some()
     {
         push_target(
             &mut candidates,
@@ -914,7 +914,7 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
         );
     }
 
-    if facts.exists("project.godot") && which("godot").is_ok() {
+    if facts.exists("project.godot") && resolve_executable("godot").is_some() {
         push_target(
             &mut candidates,
             &mut order,
@@ -1934,7 +1934,7 @@ fn ios_emulator_prelude() -> Result<String, String> {
         return Err("iOS simulator runs are only available on macOS.".to_string());
     }
 
-    let xcrun = which("xcrun").map_err(|_| {
+    let xcrun = resolve_executable("xcrun").ok_or_else(|| {
         "xcrun was not found. Install Xcode command line tools, then press Run again.".to_string()
     })?;
     let devices = Command::new(&xcrun)
@@ -1993,7 +1993,7 @@ fn android_online_device_serial(adb: &Path) -> Option<String> {
 }
 
 fn find_android_tool(binary: &str, sdk_rel: &str) -> Option<PathBuf> {
-    if let Ok(path) = which(binary) {
+    if let Some(path) = resolve_executable(binary) {
         return Some(path);
     }
 
@@ -2035,7 +2035,7 @@ fn ios_physical_device_udid() -> Option<String> {
     if tools::current_os() != "macos" {
         return None;
     }
-    let xcrun = which("xcrun").ok()?;
+    let xcrun = resolve_executable("xcrun")?;
     let output = Command::new(&xcrun)
         .args(["xctrace", "list", "devices"])
         .output()

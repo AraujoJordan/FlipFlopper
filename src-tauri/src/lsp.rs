@@ -474,6 +474,7 @@ fn spawn_session(
     let mut child = Command::new(command)
         .args(spec.args)
         .current_dir(project_path)
+        .env("PATH", crate::env::augmented_path_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -671,7 +672,7 @@ fn server_for_path(rel_path: &str) -> Option<ServerSpec> {
             tool_id: Some("rust-analyzer"),
         }),
         "py" | "pyw" => {
-            if which::which("pylsp").is_ok() {
+            if crate::env::resolve_executable("pylsp").is_some() {
                 Some(ServerSpec {
                     id: "python",
                     command: "pylsp",
@@ -724,7 +725,7 @@ fn server_for_path(rel_path: &str) -> Option<ServerSpec> {
             tool_id: None,
         }),
         "cs" => {
-            if which::which("csharp-ls").is_ok() {
+            if crate::env::resolve_executable("csharp-ls").is_some() {
                 Some(ServerSpec {
                     id: "csharp",
                     command: "csharp-ls",
@@ -794,7 +795,7 @@ fn resolve_command(project_path: &str, command: &str) -> Option<PathBuf> {
             return Some(local_cmd);
         }
     }
-    which::which(command).ok()
+    crate::env::resolve_executable(command)
 }
 
 fn session_key(project_path: &str, server_id: &str) -> String {
