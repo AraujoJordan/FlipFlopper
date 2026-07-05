@@ -2,7 +2,7 @@ import { onMount, onCleanup, createEffect, type Component } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { onPtyOutput, onPtyExit, ptyInput, ptyResize, triggerHaptic } from "../lib/ipc";
+import { onPtyOutput, onPtyExit, ptyInput, ptyResize, ptyAttach, triggerHaptic } from "../lib/ipc";
 import { runAction } from "../lib/shortcuts";
 import { clearAgentMode, cycleAgentModeOptimistic, sniffAgentMode, setTabNeedsAttention, store } from "../lib/store";
 
@@ -141,6 +141,12 @@ const TerminalPane: Component<Props> = (props) => {
         }
       }
     });
+
+    // Both pty:// and pty-exit:// listeners are now registered — release the
+    // backend's buffered first chunk (capability queries, etc.) so xterm.js
+    // can answer them and the agent's TUI actually renders. Doing this before
+    // the listener exists is what left query-first TUIs (opencode, agy) blank.
+    await ptyAttach(props.sessionId);
 
     terminal.onData((data) => {
       ptyInput(props.sessionId, data).catch(console.error);

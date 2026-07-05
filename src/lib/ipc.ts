@@ -128,6 +128,13 @@ export const ptyResize = (sessionId: string, cols: number, rows: number): Promis
 export const ptyKill = (sessionId: string): Promise<void> =>
   invoke("pty_kill", { sessionId });
 
+/** Tell the backend the frontend listeners for this session are in place, so
+ *  it may start emitting PTY output events. Must be called after registering
+ *  the `pty://{id}` / `pty-exit://{id}` listeners to avoid losing the first
+ *  output chunk (which, for query-first TUIs, contains capability queries). */
+export const ptyAttach = (sessionId: string): Promise<void> =>
+  invoke("pty_attach", { sessionId });
+
 export const openTerminal = (projectPath: string, cwd?: string): Promise<string> =>
   invoke("open_terminal", { projectPath, cwd: cwd ?? null });
 

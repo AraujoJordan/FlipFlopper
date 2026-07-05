@@ -106,6 +106,12 @@ pub fn spawn_session(
     }
     cmd.cwd(project_path);
     cmd.env("PATH", augmented_path_string());
+    // Match a real terminal's environment so TUI agents (Bubble Tea, ratatui,
+    // Textual, …) render correctly even when the desktop app was launched
+    // from Finder/Homebrew with no shell environment. TERM is read by most
+    // TUIs before they send capability queries; COLORTERM enables truecolor.
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
 
     let child = pair
         .slave

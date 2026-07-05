@@ -77,11 +77,75 @@ enum UrlAction {
 #[derive(Default)]
 struct SessionUrls(std::sync::Mutex<std::collections::HashMap<String, String>>);
 
-// Bridge a PtyEvent receiver to Tauri events on the given session_id.
-fn bridge_pty(app: tauri::AppHandle, session_id: String, rx: std::sync::mpsc::Receiver<PtyEvent>) {
-    bridge_pty_with_url(app, session_id, rx, UrlAction::Ignore);
+/// A freshly spawned PTY session whose event bridge has not started yet.
+/// The child is already running and writing into the channel; we hold off
+/// emitting Tauri events until the frontend has attached its `pty://` and
+/// `pty-exit://` listeners (see `pty_attach`). Without this, the first
+/// output chunk — which for query-first TUIs (opencode, agy, …) contains
+/// terminal-capability queries — is emitted with no listener registered and
+/// silently dropped by Tauri, leaving the agent waiting forever for a reply
+/// that xterm.js never sends.
+struct PendingBridge {
+    rx: std::sync::mpsc::Receiver<PtyEvent>,
+    url_action: UrlAction,
 }
 
+#[derive(Default)]
+struct PendingBridges(std::sync::Mutex<std::collections::HashMap<String, PendingBridge>>);
+
+/// Grace period before the watchdog auto-attaches a parked session. The
+/// frontend's `TerminalPane.onMount` normally attaches within tens of
+/// milliseconds; this only fires for sessions no one ever attaches (defensive).
+const PTY_ATTACH_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Park a freshly spawned session: store it for the frontend to attach, and
+/// arm a watchdog so output still flows even if no one attaches explicitly.
+fn park_bridge(
+    app: tauri::AppHandle,
+    session_id: String,
+    rx: std::sync::mpsc::Receiver<PtyEvent>,
+    url_action: UrlAction,
+) {
+    {
+        let pending = app.state::<PendingBridges>();
+        pending
+            .0
+            .lock()
+            .unwrap()
+            .insert(session_id.clone(), PendingBridge { rx, url_action });
+    }
+    let app_watch = app.clone();
+    let id_watch = session_id;
+    std::thread::spawn(move || {
+        std::thread::sleep(PTY_ATTACH_WATCHDOG);
+        let taken = app_watch
+            .state::<PendingBridges>()
+            .0
+            .lock()
+            .unwrap()
+            .remove(&id_watch);
+        if let Some(pb) = taken {
+            bridge_pty_with_url(app_watch, id_watch, pb.rx, pb.url_action);
+        }
+    });
+}
+
+/// Attach a parked session: start its event bridge now that the frontend is
+/// listening. Atomically pops the entry so the watchdog (or a double-call)
+/// can't start two bridges.
+fn attach_bridge(app: &tauri::AppHandle, session_id: &str) {
+    let taken = app
+        .state::<PendingBridges>()
+        .0
+        .lock()
+        .unwrap()
+        .remove(session_id);
+    if let Some(pb) = taken {
+        bridge_pty_with_url(app.clone(), session_id.to_string(), pb.rx, pb.url_action);
+    }
+}
+
+// Bridge a PtyEvent receiver to Tauri events on the given session_id.
 fn bridge_pty_with_url(
     app: tauri::AppHandle,
     session_id: String,
@@ -628,7 +692,7 @@ fn spawn_agent(
     yolo: bool,
 ) -> Result<String, String> {
     let (session_id, rx) = pty::spawn_session(&state, &agent_id, &project_path, yolo)?;
-    bridge_pty(app, session_id.clone(), rx);
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
@@ -648,8 +712,24 @@ fn pty_resize(
 }
 
 #[tauri::command]
-fn pty_kill(state: State<'_, PtyManager>, session_id: String) -> Result<(), String> {
+fn pty_kill(app: tauri::AppHandle, state: State<'_, PtyManager>, session_id: String) -> Result<(), String> {
+    // Drop any parked bridge so its reader receiver (and thus the reader
+    // thread) goes away cleanly instead of being auto-attached by the watchdog.
+    app.state::<PendingBridges>()
+        .0
+        .lock()
+        .unwrap()
+        .remove(&session_id);
     pty::kill_session(&state, &session_id)
+}
+
+/// Frontend signal that its `pty://` and `pty-exit://` listeners are in place
+/// for this session, so the backend may now start emitting. Must be called
+/// after registering those listeners; see `TerminalPane.onMount`.
+#[tauri::command]
+fn pty_attach(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
+    attach_bridge(&app, &session_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -665,7 +745,7 @@ fn open_terminal(
     cwd: Option<String>,
 ) -> Result<String, String> {
     let (session_id, rx) = pty::spawn_interactive_shell(&state, &project_path, cwd.as_deref())?;
-    bridge_pty(app, session_id.clone(), rx);
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
@@ -1076,7 +1156,7 @@ fn install_tool(
         .ok_or_else(|| format!("No install command found for tool: {tool_id}"))?;
     let label = format!("install:{tool_id}");
     let (session_id, rx) = pty::spawn_shell_command(&state, &label, &cmd, &project_path)?;
-    bridge_pty(app, session_id.clone(), rx);
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
@@ -1105,7 +1185,7 @@ fn run_project(
     let label = format!("run:{}", target.kind);
     let (session_id, rx) =
         pty::spawn_shell_command(&state, &label, &target.command, &project_path)?;
-    bridge_pty_with_url(app, session_id.clone(), rx, url_action);
+    park_bridge(app, session_id.clone(), rx, url_action);
     Ok(session_id)
 }
 
@@ -1125,7 +1205,7 @@ fn validate_project(
     let label = format!("validate:{}", target.kind);
     let (session_id, rx) =
         pty::spawn_shell_command(&state, &label, &target.command, &project_path)?;
-    bridge_pty(app, session_id.clone(), rx);
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
@@ -1159,7 +1239,7 @@ fn start_preview_session(
     let (label, command) = preview::resolve_preview_command(&project_path, &rel_path, &preview_id)?;
     let (session_id, rx) =
         pty::spawn_shell_command(&state, &format!("preview:{label}"), &command, &project_path)?;
-    bridge_pty_with_url(app, session_id.clone(), rx, UrlAction::Capture);
+    park_bridge(app, session_id.clone(), rx, UrlAction::Capture);
     Ok(session_id)
 }
 
@@ -1202,7 +1282,7 @@ fn continue_agent(
     let launch = handoff::continue_launch(&project_path, &from_agent, &to_agent, yolo)?;
     let (session_id, rx) =
         pty::spawn_shell_command(&state, &launch.label, &launch.command, &project_path)?;
-    bridge_pty(app, session_id.clone(), rx);
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
@@ -1560,6 +1640,7 @@ pub fn run() {
         .manage(PtyManager::new())
         .manage(LspManager::new())
         .manage(SessionUrls::default())
+        .manage(PendingBridges::default())
         .setup(|app| {
             let handle = app.handle();
             if let Ok(menu) = build_app_menu(handle) {
@@ -1586,6 +1667,7 @@ pub fn run() {
             pty_input,
             pty_resize,
             pty_kill,
+            pty_attach,
             list_sessions,
             open_terminal,
             // Agents
