@@ -72,6 +72,7 @@ function guideBackground(depth: number): JSX.CSSProperties {
 
 const HeaderIconButton: Component<{ title: string; active?: boolean; onClick: () => void; children: JSX.Element }> = (props) => (
   <button
+    class="hover-tint press"
     onclick={props.onClick}
     title={props.title}
     style={{
@@ -82,8 +83,6 @@ const HeaderIconButton: Component<{ title: string; active?: boolean; onClick: ()
       "border-radius": "var(--radius-sm)",
       cursor: "pointer",
     }}
-    onmouseenter={(e) => { e.currentTarget.style.backgroundColor = "var(--surface-4)"; }}
-    onmouseleave={(e) => { e.currentTarget.style.backgroundColor = props.active ? "var(--surface-4)" : "transparent"; }}
   >
     {props.children}
   </button>
@@ -706,6 +705,7 @@ const FileTree: Component = () => {
 
     return (
       <div
+        class="hover-tint"
         onclick={() => void selectFilterResult(rowProps.entry)}
         title={rowProps.entry.name}
         style={{
@@ -714,8 +714,6 @@ const FileTree: Component = () => {
           cursor: "pointer",
           "background-color": stStyle()?.bg ?? "transparent",
         }}
-        onmouseenter={(e) => { e.currentTarget.style.backgroundColor = "var(--surface-4)"; }}
-        onmouseleave={(e) => { e.currentTarget.style.backgroundColor = stStyle()?.bg ?? "transparent"; }}
       >
         <span style={{ display: "flex", gap: "6px", "align-items": "center", "min-width": 0 }}>
           <img
@@ -781,6 +779,7 @@ const FileTree: Component = () => {
       <>
         <div
           ref={(el) => rowRefs.set(props.entry.path, el)}
+          class="hover-tint"
           onclick={(e: MouseEvent) => {
             if (isRenaming()) return;
             if (!props.entry.is_dir && (e.metaKey || e.ctrlKey)) {
@@ -863,6 +862,7 @@ const FileTree: Component = () => {
             <span style={{ display: "flex", "align-items": "center", gap: "4px", "flex-shrink": 0 }}>
               <Show when={!props.entry.is_dir && rowHovered()}>
                 <button
+                  class="icon-btn press"
                   onclick={(e) => { e.stopPropagation(); openFileHistory(relPath(props.entry)); }}
                   title="File history"
                   style={{
@@ -1045,8 +1045,16 @@ const FileTree: Component = () => {
         }}
       >
         <Show when={!store.fileTreePath}>
-          <div style={{ padding: "16px", color: "var(--fg-subtle)", "font-size": "12px" }}>
-            No project open
+          <div class="overlay-pop-in" style={{
+            padding: "32px 16px", display: "flex", "flex-direction": "column",
+            "align-items": "center", gap: "8px", "text-align": "center",
+            color: "var(--fg-subtle)",
+          }}>
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--fg-faint)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+            <div style={{ "font-size": "12px" }}>No project open</div>
+            <div style={{ "font-size": "10.5px", color: "var(--fg-faint)" }}>Open a folder to see its files</div>
           </div>
         </Show>
 
@@ -1056,7 +1064,7 @@ const FileTree: Component = () => {
             fallback={
               <>
                 <Show when={rootEntries.loading}>
-                  <div style={{ padding: "16px 0", display: "flex", "justify-content": "center" }}>
+                  <div class="overlay-pop-in" style={{ padding: "16px 0", display: "flex", "justify-content": "center" }}>
                     <Spinner />
                   </div>
                 </Show>
@@ -1089,7 +1097,7 @@ const FileTree: Component = () => {
             }
           >
             <Show when={filterResults.loading}>
-              <div style={{ padding: "16px 0", display: "flex", "justify-content": "center" }}>
+              <div class="overlay-pop-in" style={{ padding: "16px 0", display: "flex", "justify-content": "center" }}>
                 <Spinner />
               </div>
             </Show>
@@ -1097,8 +1105,16 @@ const FileTree: Component = () => {
               {(entry) => <FilterResultRow entry={entry} statuses={statuses()} />}
             </For>
             <Show when={!filterResults.loading && (filterResults() ?? []).length === 0}>
-              <div style={{ padding: "16px", color: "var(--fg-subtle)", "font-size": "11.5px", "text-align": "center" }}>
-                No matches
+              <div class="overlay-pop-in" style={{
+                padding: "24px 16px", display: "flex", "flex-direction": "column",
+                "align-items": "center", gap: "8px", "text-align": "center",
+                color: "var(--fg-subtle)",
+              }}>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--fg-faint)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m21 21-4.35-4.35" />
+                </svg>
+                <div style={{ "font-size": "11.5px" }}>No matches</div>
               </div>
             </Show>
           </Show>

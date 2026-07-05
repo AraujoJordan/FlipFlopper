@@ -14,6 +14,8 @@ const tabBtnStyle = (active: boolean) => ({
   border: active ? "1px solid var(--border-strong)" : "1px solid transparent",
   background: active ? "var(--surface-4)" : "transparent",
   cursor: "pointer",
+  transition:
+    "background var(--dur-base) var(--ease-standard), border-color var(--dur-base) var(--ease-standard), color var(--dur-base) var(--ease-standard)",
 } as const);
 
 const countBadgeStyle = {
@@ -72,16 +74,25 @@ const GitPanel: Component = () => {
         padding: "7px 10px",
         "border-bottom": "1px solid var(--border-muted)",
       }}>
-        <button onclick={() => setGitPanelTab("changes")} style={tabBtnStyle(store.gitPanelTab === "changes")}>
+        <button
+          class={store.gitPanelTab === "changes" ? undefined : "hover-tint"}
+          onclick={() => setGitPanelTab("changes")}
+          style={tabBtnStyle(store.gitPanelTab === "changes")}
+        >
           Changes
           <Show when={changedCount() > 0}>
-            <span style={countBadgeStyle}>{changedCount()}</span>
+            <span class="badge-pop" style={countBadgeStyle}>{changedCount()}</span>
           </Show>
         </button>
-        <button onclick={() => setGitPanelTab("history")} style={tabBtnStyle(store.gitPanelTab === "history")}>
+        <button
+          class={store.gitPanelTab === "history" ? undefined : "hover-tint"}
+          onclick={() => setGitPanelTab("history")}
+          style={tabBtnStyle(store.gitPanelTab === "history")}
+        >
           History
         </button>
         <button
+          class="icon-btn press"
           onclick={toggleGitPanelCollapsed}
           title="Collapse Source Control"
           style={{
@@ -117,7 +128,7 @@ const GitPanel: Component = () => {
           <path d="M6 8.4V15.6M8.2 6.8A6 6 0 0 0 15.8 10.8" />
         </svg>
         <Show when={changedCount() > 0}>
-          <span style={{
+          <span class="badge-pop" style={{
             "font-family": "var(--font-mono)",
             "font-size": "9.5px", color: "var(--fg-subtle)",
             background: "var(--surface-4)", padding: "2px 5px", "border-radius": "999px",

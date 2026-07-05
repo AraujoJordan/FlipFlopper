@@ -7,7 +7,7 @@ import { Button, toast } from "./ui";
 
 export interface AgentTaskDialogOptions {
   title: string;
-  /** Project-relative paths shown as removable @path context chips. */
+  /** Project-relative paths or scoped refs shown as removable @path context chips. */
   files: string[];
   /** Optional quick-fill chips for the instruction textarea. */
   suggestions?: string[];
@@ -169,6 +169,7 @@ const AgentTaskDialogHost: Component = () => {
         return (
           <Portal>
             <div
+              class="overlay-backdrop-in"
               onclick={closeDialog}
               style={{
                 position: "fixed", inset: 0, "z-index": "210",
@@ -177,6 +178,7 @@ const AgentTaskDialogHost: Component = () => {
               }}
             >
               <div
+                class="overlay-pop-in"
                 onclick={(e) => e.stopPropagation()}
                 style={{
                   width: "min(560px, calc(100vw - 32px))",
@@ -185,7 +187,7 @@ const AgentTaskDialogHost: Component = () => {
                   background: "var(--surface-3)",
                   border: "1px solid var(--border-default)",
                   "border-radius": "var(--radius-xl)",
-                  "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+                  "box-shadow": "var(--shadow-menu)",
                   overflow: "hidden",
                 }}
               >

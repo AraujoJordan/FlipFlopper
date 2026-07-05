@@ -7,7 +7,7 @@ import {
   refreshOpenedFiles,
   updateCurrentBranch,
 } from "../lib/store";
-import { ensureWorkBranch, getRecentBranches, gitSwitchBranch } from "../lib/ipc";
+import { ensureWorkBranch, getRecentBranches, gitSwitchBranch, triggerHaptic } from "../lib/ipc";
 import { isProtectedBranch, WORK_BRANCH } from "../lib/constants";
 import { Menu, MenuLabel, MenuItem, MenuDivider, Spinner, confirmDialog, toast } from "./ui";
 
@@ -48,14 +48,17 @@ const BranchIndicator: Component = () => {
     }
     await flushAllEditorSaves();
     setSwitching(true);
+    void triggerHaptic("generic");
     try {
       await ensureWorkBranch(project.path, WORK_BRANCH);
       await updateCurrentBranch();
       bumpGitStatus();
       bumpFileTree();
       await refreshOpenedFiles();
+      void triggerHaptic("alignment");
       toast(`Switched to ${WORK_BRANCH}`, "success");
     } catch (e) {
+      void triggerHaptic("levelChange");
       toast(`Failed to switch branch: ${String(e)}`, "error");
     } finally {
       setSwitching(false);
@@ -76,14 +79,17 @@ const BranchIndicator: Component = () => {
     }
     await flushAllEditorSaves();
     setSwitching(true);
+    void triggerHaptic("generic");
     try {
       await gitSwitchBranch(project.path, targetBranch);
       await updateCurrentBranch();
       bumpGitStatus();
       bumpFileTree();
       await refreshOpenedFiles();
+      void triggerHaptic("alignment");
       toast(`Switched to ${targetBranch}`, "success");
     } catch (e) {
+      void triggerHaptic("levelChange");
       toast(`Failed to switch branch: ${String(e)}`, "error");
     } finally {
       setSwitching(false);
@@ -95,6 +101,7 @@ const BranchIndicator: Component = () => {
     <div style={{ position: "relative" }}>
       <button
         ref={toggleRef}
+        class="hover-tint"
         onclick={() => store.currentProject && setOpen((o) => !o)}
         title={
           !branch() ? "No branch detected" :
@@ -154,7 +161,7 @@ const BranchIndicator: Component = () => {
                     width="12"
                     height="12"
                     fill="none"
-                    stroke={b === branch() ? "var(--accent-default)" : "var(--fg-subtle)"}
+                    stroke={b === branch() ? "var(--accent)" : "var(--fg-subtle)"}
                     stroke-width="1.5"
                     stroke-linecap="round"
                     stroke-linejoin="round"
@@ -169,7 +176,7 @@ const BranchIndicator: Component = () => {
                     flex: "1",
                     "font-family": "var(--font-mono)",
                     "font-size": "11.5px",
-                    color: b === branch() ? "var(--accent-default)" : "var(--fg-default)",
+                    color: b === branch() ? "var(--accent)" : "var(--fg-default)",
                     overflow: "hidden",
                     "text-overflow": "ellipsis",
                     "white-space": "nowrap",
@@ -177,7 +184,7 @@ const BranchIndicator: Component = () => {
                     {b}
                   </span>
                   <Show when={b === branch()}>
-                    <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" style={{ color: "var(--accent-default)" }}>
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" style={{ color: "var(--accent)" }}>
                       <path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z" />
                     </svg>
                   </Show>

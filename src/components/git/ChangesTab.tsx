@@ -3,7 +3,7 @@ import type { Resource } from "solid-js";
 import { store, openReview, bumpGitStatus } from "../../lib/store";
 import {
   gitStage, gitUnstage, gitDiscard, gitCommit, gitStashPush, gitStashPop, getGitLog,
-  type StatusEntry, type SyncStatus,
+  type StatusEntry, type SyncStatus, triggerHaptic,
 } from "../../lib/ipc";
 import { Button, Spinner, confirmDialog, toast } from "../ui";
 import { isProtectedBranch } from "../../lib/constants";
@@ -13,6 +13,11 @@ const iconBtnStyle = {
   color: "var(--fg-subtle)", padding: "3px", "border-radius": "var(--radius-sm)",
 } as const;
 
+/** Matches the .git-row exit transition duration in App.css (--dur-base) —
+ *  the row collapses locally before the status refetch actually removes it,
+ *  so the stage/unstage/discard action reads as landing rather than snapping. */
+const ROW_EXIT_MS = 160;
+
 function basename(path: string): string {
   return path.split("/").pop() || path;
 }
@@ -21,8 +26,13 @@ const isStaged = (e: StatusEntry) => e.index_status !== " " && e.index_status !=
 const isUnstaged = (e: StatusEntry) => e.worktree_status !== " ";
 
 const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> = (props) => {
-  const [hovered, setHovered] = createSignal(false);
+  const [removing, setRemoving] = createSignal(false);
   const isUntracked = () => props.entry.index_status === "?" && props.entry.worktree_status === "?";
+
+  function settle() {
+    setRemoving(true);
+    setTimeout(bumpGitStatus, ROW_EXIT_MS);
+  }
 
   const letter = () => {
     const raw = props.group === "staged" ? props.entry.index_status : props.entry.worktree_status;
@@ -55,9 +65,10 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
   async function stage(e: MouseEvent) {
     e.stopPropagation();
     if (!store.currentProject) return;
+    void triggerHaptic("generic");
     try {
       await gitStage(store.currentProject.path, [props.entry.path]);
-      bumpGitStatus();
+      settle();
     } catch (err) {
       toast(`Stage failed: ${String(err)}`, "error");
     }
@@ -66,9 +77,10 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
   async function unstage(e: MouseEvent) {
     e.stopPropagation();
     if (!store.currentProject) return;
+    void triggerHaptic("generic");
     try {
       await gitUnstage(store.currentProject.path, [props.entry.path]);
-      bumpGitStatus();
+      settle();
     } catch (err) {
       toast(`Unstage failed: ${String(err)}`, "error");
     }
@@ -84,13 +96,14 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
       untracked ? "Delete" : "Discard",
     );
     if (!ok) return;
+    void triggerHaptic("levelChange");
     try {
       await gitDiscard(
         store.currentProject.path,
         untracked ? [] : [props.entry.path],
         untracked ? [props.entry.path] : [],
       );
-      bumpGitStatus();
+      settle();
     } catch (err) {
       toast(`Discard failed: ${String(err)}`, "error");
     }
@@ -98,9 +111,9 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
 
   return (
     <div
+      class="git-row"
+      classList={{ "git-row-removing": removing() }}
       onclick={openDiff}
-      onmouseenter={() => setHovered(true)}
-      onmouseleave={() => setHovered(false)}
       title={props.entry.path}
       style={{
         display: "flex", "align-items": "center", gap: "8px",
@@ -119,29 +132,27 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
       }}>
         {displayName()}
       </span>
-      <Show when={hovered()}>
-        <span style={{ display: "flex", "align-items": "center", gap: "3px" }}>
-          <Show when={props.group === "unstaged"}>
-            <button onclick={discard} title="Discard" style={iconBtnStyle}>
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6" />
-              </svg>
-            </button>
-            <button onclick={stage} title="Stage" style={iconBtnStyle}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-            </button>
-          </Show>
-          <Show when={props.group === "staged"}>
-            <button onclick={unstage} title="Unstage" style={iconBtnStyle}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M5 12h14" />
-              </svg>
-            </button>
-          </Show>
-        </span>
-      </Show>
+      <span class="git-row-actions" style={{ display: "flex", "align-items": "center", gap: "3px" }}>
+        <Show when={props.group === "unstaged"}>
+          <button class="icon-btn-danger press" onclick={discard} title="Discard" style={iconBtnStyle}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6" />
+            </svg>
+          </button>
+          <button class="icon-btn press" onclick={stage} title="Stage" style={iconBtnStyle}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
+        </Show>
+        <Show when={props.group === "staged"}>
+          <button class="icon-btn press" onclick={unstage} title="Unstage" style={iconBtnStyle}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14" />
+            </svg>
+          </button>
+        </Show>
+      </span>
     </div>
   );
 };
@@ -156,6 +167,7 @@ const GroupHeader: Component<{ label: string; count: number; actionLabel: string
     </span>
     <Show when={props.count > 0}>
       <button
+        class="link-btn press"
         onclick={props.onAction}
         style={{
           "margin-left": "auto", "font-size": "10.5px", color: "var(--accent-soft)", cursor: "pointer",
@@ -182,9 +194,11 @@ const ChangesTab: Component<{
   const [stashOpen, setStashOpen] = createSignal(false);
   const [stashMsg, setStashMsg] = createSignal("");
   const [stashBusy, setStashBusy] = createSignal(false);
+  const [commitFlash, setCommitFlash] = createSignal(false);
 
   async function stageAll() {
     if (!store.currentProject || unstaged().length === 0) return;
+    void triggerHaptic("generic");
     try {
       await gitStage(store.currentProject.path, unstaged().map((e) => e.path));
       bumpGitStatus();
@@ -195,6 +209,7 @@ const ChangesTab: Component<{
 
   async function unstageAll() {
     if (!store.currentProject || staged().length === 0) return;
+    void triggerHaptic("generic");
     try {
       await gitUnstage(store.currentProject.path, staged().map((e) => e.path));
       bumpGitStatus();
@@ -205,6 +220,7 @@ const ChangesTab: Component<{
 
   async function toggleAmend() {
     const next = !amend();
+    void triggerHaptic("generic");
     setAmend(next);
     if (next && !message().trim() && store.currentProject) {
       try {
@@ -250,13 +266,18 @@ const ChangesTab: Component<{
     }
 
     setCommitting(true);
+    void triggerHaptic("generic");
     try {
       const result = await gitCommit(store.currentProject.path, msg, all, amend());
+      void triggerHaptic("alignment");
       toast(`Committed ${result.sha}`, "success");
       setMessage("");
       setAmend(false);
+      setCommitFlash(true);
+      setTimeout(() => setCommitFlash(false), 700);
       bumpGitStatus();
     } catch (e) {
+      void triggerHaptic("levelChange");
       toast(`Commit failed: ${String(e)}`, "error");
     } finally {
       setCommitting(false);
@@ -266,13 +287,16 @@ const ChangesTab: Component<{
   async function doStashPush() {
     if (!store.currentProject) return;
     setStashBusy(true);
+    void triggerHaptic("generic");
     try {
       await gitStashPush(store.currentProject.path, stashMsg().trim() || undefined);
+      void triggerHaptic("alignment");
       toast("Stashed changes", "success");
       setStashMsg("");
       setStashOpen(false);
       bumpGitStatus();
     } catch (e) {
+      void triggerHaptic("levelChange");
       toast(`Stash failed: ${String(e)}`, "error");
     } finally {
       setStashBusy(false);
@@ -282,8 +306,10 @@ const ChangesTab: Component<{
   async function doStashPop() {
     if (!store.currentProject) return;
     setStashBusy(true);
+    void triggerHaptic("generic");
     try {
       await gitStashPop(store.currentProject.path);
+      void triggerHaptic("alignment");
       toast("Restored stashed changes", "success");
       bumpGitStatus();
     } catch (e) {
@@ -291,6 +317,7 @@ const ChangesTab: Component<{
       // writes literal conflict markers into the affected files — bump status
       // so those files show up as changed right away, and make the toast
       // sticky since this needs the user's attention, not a 4s auto-dismiss.
+      void triggerHaptic("levelChange");
       toast(
         `Stash pop conflicted — resolve the conflict markers in the affected files. The stash is kept, nothing was lost. (${String(e)})`,
         "error",
@@ -337,6 +364,7 @@ const ChangesTab: Component<{
           when={!stashOpen()}
           fallback={
             <input
+              class="overlay-pop-in"
               value={stashMsg()}
               oninput={(e) => setStashMsg(e.currentTarget.value)}
               onkeydown={(e) => {
@@ -353,13 +381,14 @@ const ChangesTab: Component<{
             />
           }
         >
-          <Button size="sm" onClick={() => setStashOpen(true)} disabled={entries().length === 0}>
+          <Button size="sm" onClick={() => setStashOpen(true)} disabled={entries().length === 0} classList={{ "overlay-pop-in": true }}>
             Stash
           </Button>
           <Button
             size="sm" variant="ghost"
             onClick={doStashPop}
             disabled={(props.sync()?.stash_count ?? 0) === 0 || stashBusy()}
+            classList={{ "overlay-pop-in": true }}
           >
             <Show when={stashBusy()}><Spinner size={11} /></Show>
             Pop
@@ -400,18 +429,21 @@ const ChangesTab: Component<{
         />
         <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
           <button
+            class="press"
             onclick={toggleAmend}
             title="Amend the last commit"
             style={{
               display: "flex", "align-items": "center", gap: "5px",
               "font-size": "11px", color: amend() ? "var(--accent-soft)" : "var(--fg-subtle)",
               cursor: "pointer",
+              transition: "color var(--dur-base) var(--ease-standard)",
             }}
           >
             <span style={{
               width: "10px", height: "10px", "border-radius": "3px",
               border: `1px solid ${amend() ? "var(--accent-soft)" : "var(--border-strong)"}`,
               background: amend() ? "var(--accent-soft)" : "transparent",
+              transition: "background var(--dur-base) var(--ease-standard), border-color var(--dur-base) var(--ease-standard)",
             }} />
             Amend
           </button>
@@ -419,6 +451,7 @@ const ChangesTab: Component<{
             variant="solid" size="sm"
             onClick={doCommit}
             disabled={committing() || !store.currentProject}
+            classList={{ "success-flash": commitFlash() }}
             style={{ "margin-left": "auto" }}
           >
             <Show when={committing()}><Spinner size={11} /></Show>

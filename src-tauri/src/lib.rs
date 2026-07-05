@@ -1236,6 +1236,80 @@ async fn pick_prompt_file(
     })
 }
 
+#[tauri::command]
+fn trigger_haptic(pattern: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        use std::os::raw::c_char;
+
+        #[link(name = "objc", kind = "dylib")]
+        extern "C" {
+            fn objc_getClass(name: *const c_char) -> *mut std::ffi::c_void;
+            fn sel_registerName(name: *const c_char) -> *mut std::ffi::c_char;
+            fn objc_msgSend();
+        }
+
+        let pattern_val: isize = match pattern.as_str() {
+            "generic" => 0,
+            "alignment" => 1,
+            "level-change" | "levelChange" => 2,
+            _ => return Err(format!("Invalid haptic pattern: {}", pattern)),
+        };
+
+        unsafe {
+            let class_name = CString::new("NSHapticFeedbackManager").map_err(|e| e.to_string())?;
+            let class_ptr = objc_getClass(class_name.as_ptr());
+            if class_ptr.is_null() {
+                return Err("Failed to get NSHapticFeedbackManager class".to_string());
+            }
+
+            let sel_default_performer = sel_registerName(
+                CString::new("defaultPerformer")
+                    .map_err(|e| e.to_string())?
+                    .as_ptr(),
+            ) as *mut std::ffi::c_void;
+            if sel_default_performer.is_null() {
+                return Err("Failed to register defaultPerformer selector".to_string());
+            }
+
+            let msg_send_performer: extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut std::ffi::c_void,
+            ) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const std::ffi::c_void);
+            let performer = msg_send_performer(class_ptr, sel_default_performer);
+            if performer.is_null() {
+                return Err("Failed to get defaultPerformer".to_string());
+            }
+
+            let sel_perform_pattern = sel_registerName(
+                CString::new("performFeedbackPattern:performanceTime:")
+                    .map_err(|e| e.to_string())?
+                    .as_ptr(),
+            ) as *mut std::ffi::c_void;
+            if sel_perform_pattern.is_null() {
+                return Err(
+                    "Failed to register performFeedbackPattern:performanceTime: selector".to_string(),
+                );
+            }
+
+            let msg_send_perform: extern "C" fn(
+                *mut std::ffi::c_void,
+                *mut std::ffi::c_void,
+                isize,
+                isize,
+            ) = std::mem::transmute(objc_msgSend as *const std::ffi::c_void);
+            msg_send_perform(performer, sel_perform_pattern, pattern_val, 0);
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pattern;
+        Ok(())
+    }
+}
+
 // ════════════════════════════════════════════════
 // Tauri entry point
 // ════════════════════════════════════════════════
@@ -1351,6 +1425,7 @@ pub fn run() {
             // Dialog
             pick_project_folder,
             pick_prompt_file,
+            trigger_haptic,
             // Menu
             sync_native_menu_state,
         ])

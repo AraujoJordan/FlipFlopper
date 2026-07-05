@@ -5,6 +5,7 @@ import {
   ptyKill,
   validateProject,
   type ValidationTarget,
+  triggerHaptic,
 } from "../lib/ipc";
 import {
   addTerminal,
@@ -21,14 +22,24 @@ const CheckIcon: Component<{ color?: string }> = (props) => (
   </svg>
 );
 
-const StopIcon: Component = () => (
-  <svg width="12" height="12" viewBox="0 0 24 24" style={{ color: "var(--status-del)", flex: "0 0 auto" }}>
+const StopIcon: Component<{ pulse?: boolean }> = (props) => (
+  <svg
+    class={props.pulse ? "running-pulse" : undefined}
+    width="12" height="12" viewBox="0 0 24 24" style={{ color: "var(--status-del)", flex: "0 0 auto" }}
+  >
     <path d="M7 7h10v10H7z" fill="currentColor" />
   </svg>
 );
 
-const ChevronIcon: Component = () => (
-  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round" style={{ flex: "0 0 auto" }}>
+const ChevronIcon: Component<{ open?: boolean }> = (props) => (
+  <svg
+    width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"
+    style={{
+      flex: "0 0 auto",
+      transform: props.open ? "rotate(180deg)" : "rotate(0deg)",
+      transition: "transform var(--dur-base) var(--ease-standard)",
+    }}
+  >
     <path d="M6 9l6 6 6-6" />
   </svg>
 );
@@ -108,6 +119,7 @@ const ValidationButton: Component = () => {
     if (!path || starting()) return;
     setMenuOpen(false);
     setStarting(true);
+    void triggerHaptic("generic");
     try {
       const sessionId = await validateProject(path, target.id);
       writeValidationTarget(path, target.id);
@@ -119,7 +131,10 @@ const ValidationButton: Component = () => {
       setValidationSessionId(sessionId);
       validationExitUnlisten?.();
       validationExitUnlisten = await onPtyExit(sessionId, () => {
-        if (store.validationSessionId === sessionId) setValidationSessionId(null);
+        if (store.validationSessionId === sessionId) {
+          setValidationSessionId(null);
+          void triggerHaptic("alignment");
+        }
         validationExitUnlisten?.();
         validationExitUnlisten = null;
       });
@@ -133,6 +148,7 @@ const ValidationButton: Component = () => {
   async function stopValidation() {
     const sessionId = store.validationSessionId;
     if (!sessionId) return;
+    void triggerHaptic("levelChange");
     try {
       await ptyKill(sessionId);
     } catch (e) {
@@ -175,6 +191,7 @@ const ValidationButton: Component = () => {
         overflow: "hidden",
       }}>
         <button
+          class="hover-tint press"
           onclick={handleMainClick}
           disabled={!projectPath() || (!running() && targets().length === 0) || busy()}
           title={mainTitle()}
@@ -193,16 +210,20 @@ const ValidationButton: Component = () => {
             cursor: !projectPath() || (!running() && targets().length === 0) || busy() ? "default" : "pointer",
           }}
         >
-          <Show
-            when={!busy()}
-            fallback={<Spinner size={12} color="var(--accent)" />}
-          >
-            <Show when={running()} fallback={<CheckIcon />}>
-              <StopIcon />
-            </Show>
-          </Show>
+          <div style={{ position: "relative", width: "13px", height: "13px", display: "flex", "align-items": "center", "justify-content": "center" }}>
+            <span class="icon-fade" classList={{ "icon-fade-visible": busy() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
+              <Spinner size={12} color="var(--accent)" />
+            </span>
+            <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && !running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
+              <CheckIcon />
+            </span>
+            <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
+              <StopIcon pulse />
+            </span>
+          </div>
         </button>
         <button
+          class="hover-tint press"
           onclick={(e) => {
             e.stopPropagation();
             if (projectPath() && targets().length > 0 && !running()) setMenuOpen((open) => !open);
@@ -222,7 +243,7 @@ const ValidationButton: Component = () => {
             cursor: projectPath() && targets().length > 0 && !running() ? "pointer" : "default",
           }}
         >
-          <ChevronIcon />
+          <ChevronIcon open={menuOpen()} />
         </button>
       </div>
 

@@ -1,6 +1,7 @@
 import { Component, createSignal, Show } from "solid-js";
 import { store, killAndClearAllTabs, setYoloMode } from "../lib/store";
 import { Spinner, confirmDialog, toast } from "./ui";
+import { triggerHaptic } from "../lib/ipc";
 
 /** Toggles YOLO mode (dangerous permission bypass for supported agents).
  *  Closes all current agent tabs first since the bypass flag only applies
@@ -10,11 +11,13 @@ const YoloButton: Component = () => {
 
   async function toggleYolo() {
     if (busy()) return;
+    void triggerHaptic("levelChange");
     if (store.yoloMode) {
       setYoloMode(false);
       toast("YOLO mode disabled", "info");
       return;
     }
+
 
     if (store.tabs.length > 0) {
       const confirmed = await confirmDialog(

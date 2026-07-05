@@ -11,7 +11,7 @@ import {
 } from "../lib/store";
 import { agentColor } from "../lib/agentMeta";
 import TerminalPane from "./TerminalPane";
-import { toast } from "./ui";
+import { toast, Spinner } from "./ui";
 
 function kindColor(kind: TerminalKind): string {
   switch (kind) {
@@ -103,6 +103,7 @@ const TerminalPanel: Component = () => {
                 return (
                   <div
                     role="tab"
+                    class={isActive() ? undefined : "hover-tint"}
                     tabIndex={0}
                     aria-selected={isActive()}
                     onclick={() => setActiveTerminal(term.sessionId)}
@@ -130,10 +131,11 @@ const TerminalPanel: Component = () => {
                       {term.label}
                     </span>
                     <button
+                      class="icon-btn-danger press"
                       onclick={(e) => { e.stopPropagation(); removeTerminal(term.sessionId); }}
                       title="Close terminal"
                       style={{
-                        color: isActive() ? "var(--fg-subtle)" : "#3a3d47",
+                        color: isActive() ? "var(--fg-subtle)" : "var(--border-strong)",
                         width: "16px", height: "16px",
                         display: "flex", "align-items": "center", "justify-content": "center",
                         "border-radius": "var(--radius-sm)",
@@ -150,6 +152,7 @@ const TerminalPanel: Component = () => {
           </div>
 
           <button
+            class="icon-btn press"
             onclick={openShell}
             disabled={!store.currentProject || opening()}
             title="New terminal"
@@ -161,12 +164,17 @@ const TerminalPanel: Component = () => {
               cursor: store.currentProject ? "pointer" : "default",
             }}
           >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
+            <Show when={opening()} fallback={
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            }>
+              <Spinner size={12} />
+            </Show>
           </button>
 
           <button
+            class="icon-btn press"
             onclick={toggleTerminalPanel}
             title={store.terminalPanelOpen ? "Collapse terminal panel" : "Expand terminal panel"}
             style={{
@@ -185,6 +193,7 @@ const TerminalPanel: Component = () => {
           height: store.terminalPanelOpen ? `${store.terminalPanelHeight}px` : "0",
           overflow: "hidden",
           position: "relative",
+          transition: dragging() ? "none" : "height var(--dur-slow) var(--ease-standard)",
         }}>
           <For each={store.terminals}>
             {(term) => (

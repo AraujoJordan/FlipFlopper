@@ -8,10 +8,11 @@ import {
   spawnAgent,
   type FileEntry,
   type PromptSkill,
+  triggerHaptic,
 } from "../lib/ipc";
 import { getFileIcon } from "../lib/fileIcons";
 import { NewAgentMenu } from "./AgentBar";
-import { toast } from "./ui";
+import { toast, Spinner } from "./ui";
 import { registerShortcutHandler } from "../lib/shortcuts";
 import { agentColor, AgentLogo, AGENT_SLASH_COMMANDS, agentModeLabel } from "../lib/agentMeta";
 
@@ -87,12 +88,12 @@ const FileSuggestionIcon: Component<{ item: CompletionItem }> = (props) => {
     <span style={{
       width: "20px", height: "20px",
       display: "flex", "align-items": "center", "justify-content": "center",
-      flex: "0 0 auto", color: "#79c0ff",
+      flex: "0 0 auto", color: "var(--accent-soft)",
     }}>
       <Show when={props.item.kind === "skill" || props.item.kind === "command"} fallback={
         <Show when={props.item.isDir} fallback={
           <Show when={iconPath()} fallback={
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--fg-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
               <path d="M14 2v6h6" />
             </svg>
@@ -109,9 +110,9 @@ const FileSuggestionIcon: Component<{ item: CompletionItem }> = (props) => {
           width: "20px", height: "20px",
           "border-radius": "6px",
           background: props.item.kind === "command" ? `${commandColor()}22` : "#1a2636",
-          color: props.item.kind === "command" ? commandColor() : "#79c0ff",
+          color: props.item.kind === "command" ? commandColor() : "var(--accent-soft)",
           display: "flex", "align-items": "center", "justify-content": "center",
-          "font-family": "'JetBrains Mono', monospace",
+          "font-family": "var(--font-mono)",
           "font-size": "13px", "font-weight": "700",
         }}>
           {props.item.marker ?? "/"}
@@ -328,6 +329,7 @@ const PromptComposer: Component = () => {
     const token = completionToken();
     if (!token) return;
 
+    void triggerHaptic("alignment");
     const suffix = item.kind === "file" && item.isDir ? "/" : " ";
     const replacement = `${item.marker ?? token.marker}${item.value}${suffix}`;
     const next = `${value().slice(0, token.start)}${replacement}${value().slice(token.end)}`;
@@ -340,6 +342,7 @@ const PromptComposer: Component = () => {
   function cycleActiveAgentMode() {
     const tab = activeTab();
     if (!tab) return;
+    void triggerHaptic("generic");
     ptyInput(tab.sessionId, "\x1b[Z").catch(console.error);
     cycleAgentModeOptimistic(tab.sessionId);
   }
@@ -348,6 +351,7 @@ const PromptComposer: Component = () => {
     const picked = await pickPromptFile(store.currentProject?.path ?? null, false);
     if (!picked) return;
 
+    void triggerHaptic("alignment");
     const ref = toPromptPath(picked, store.currentProject?.path);
     if (!ref) return;
     insertAtCaret(`@${ref} `);
@@ -359,6 +363,7 @@ const PromptComposer: Component = () => {
 
     const tab = activeTab();
     setSending(true);
+    void triggerHaptic("generic");
 
     try {
       let sessionId: string;
@@ -449,29 +454,30 @@ const PromptComposer: Component = () => {
   return (
     <div style={{
       flex: "0 0 auto",
-      background: "#0f1116",
-      "border-top": "1px solid #1d2028",
+      background: "var(--surface-2)",
+      "border-top": "1px solid var(--border-muted)",
       padding: "13px 16px",
     }}>
       <div style={{
         position: "relative",
         display: "flex", "align-items": "center", gap: "10px",
-        background: "#14161d",
+        background: "var(--surface-3)",
         border: `1px solid ${activeColor()}55`,
         "border-radius": "11px",
         padding: "11px 12px",
-        "box-shadow": `0 0 0 3px ${activeColor()}14`,
+        "box-shadow": focused() ? `0 0 0 3px ${activeColor()}22` : `0 0 0 3px ${activeColor()}14`,
+        transition: "box-shadow var(--dur-base) var(--ease-standard), border-color var(--dur-base) var(--ease-standard)",
       }}>
         <Show when={showCompletions()}>
-          <div style={{
+          <div class="overlay-pop-in" style={{
             position: "absolute",
             left: 0,
             right: 0,
             bottom: "calc(100% + 8px)",
-            background: "#14161d",
-            border: "1px solid #2a2e3a",
+            background: "var(--surface-3)",
+            border: "1px solid var(--border-default)",
             "border-radius": "11px",
-            "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+            "box-shadow": "var(--shadow-menu)",
             padding: "7px",
             "z-index": "60",
             "max-height": "284px",
@@ -483,7 +489,9 @@ const PromptComposer: Component = () => {
                 return (
                   <button
                     type="button"
+                    class="hover-tint"
                     onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => setSelectedIndex(index())}
                     onclick={() => applyCompletion(item)}
                     style={{
                       width: "100%",
@@ -493,7 +501,7 @@ const PromptComposer: Component = () => {
                       padding: "8px 10px",
                       "border-radius": "8px",
                       "text-align": "left",
-                      background: active() ? "#1b1f2a" : "transparent",
+                      background: active() ? "var(--surface-4)" : "transparent",
                     }}
                   >
                     <FileSuggestionIcon item={item} />
@@ -520,7 +528,7 @@ const PromptComposer: Component = () => {
                       </div>
                       <div style={{
                         color: "var(--fg-subtle)",
-                        "font-family": "'JetBrains Mono', monospace",
+                        "font-family": "var(--font-mono)",
                         "font-size": "10.5px",
                         overflow: "hidden",
                         "text-overflow": "ellipsis",
@@ -577,6 +585,7 @@ const PromptComposer: Component = () => {
 
         <button
           type="button"
+          class="icon-btn press"
           onclick={pickFile}
           disabled={!store.currentProject}
           title="Attach file"
@@ -584,8 +593,8 @@ const PromptComposer: Component = () => {
             display: "flex", "align-items": "center", "justify-content": "center",
             width: "30px", height: "30px",
             "border-radius": "8px",
-            color: store.currentProject ? "var(--fg-subtle)" : "#3a3d47",
-            background: "#1a1d25",
+            color: store.currentProject ? "var(--fg-subtle)" : "var(--border-strong)",
+            background: "var(--surface-4)",
             flex: "0 0 auto",
             cursor: store.currentProject ? "pointer" : "default",
           }}
@@ -617,7 +626,7 @@ const PromptComposer: Component = () => {
           style={{
             flex: "1",
             "min-width": 0,
-            "font-family": "'JetBrains Mono', monospace",
+            "font-family": "var(--font-mono)",
             "font-size": "13px",
             color: value() ? "var(--fg-default)" : "var(--fg-subtle)",
             background: "none",
@@ -634,10 +643,11 @@ const PromptComposer: Component = () => {
           {(label) => (
             <button
               type="button"
+              class="press"
               onclick={cycleActiveAgentMode}
               title="Shift+Tab to cycle mode"
               style={{
-                "font-family": "'JetBrains Mono', monospace",
+                "font-family": "var(--font-mono)",
                 "font-size": "10.5px",
                 color: activeColor(),
                 border: `1px solid ${activeColor()}66`,
@@ -655,9 +665,9 @@ const PromptComposer: Component = () => {
 
         <Show when={!activeTab() && store.currentProject}>
           <span style={{
-            "font-family": "'JetBrains Mono', monospace",
+            "font-family": "var(--font-mono)",
             "font-size": "10.5px", color: "var(--fg-subtle)",
-            border: "1px solid #262a35", "border-radius": "6px",
+            border: "1px solid var(--border-default)", "border-radius": "6px",
             padding: "3px 8px", flex: "0 0 auto",
           }}>
             Agent
@@ -666,23 +676,28 @@ const PromptComposer: Component = () => {
 
         <button
           type="button"
+          class="press"
           onclick={send}
           disabled={sending() || !value().trim()}
           style={{
             display: "flex", "align-items": "center", "justify-content": "center",
             width: "34px", height: "34px",
             "border-radius": "9px",
-            background: value().trim() ? activeColor() : "#1a1d25",
+            background: value().trim() ? activeColor() : "var(--surface-4)",
             flex: "0 0 auto",
-            transition: "background 0.15s",
+            transition: "background var(--dur-base) var(--ease-standard)",
             cursor: value().trim() ? "pointer" : "default",
           }}
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-            stroke={value().trim() ? "#0d1117" : "#6e7681"}
-            stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M7 11l5-5 5 5M12 6v13" />
-          </svg>
+          <Show when={sending()} fallback={
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+              stroke={value().trim() ? "var(--fg-on-accent)" : "var(--fg-subtle)"}
+              stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 11l5-5 5 5M12 6v13" />
+            </svg>
+          }>
+            <Spinner size={13} color="var(--fg-on-accent)" />
+          </Show>
         </button>
       </div>
     </div>

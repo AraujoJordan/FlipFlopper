@@ -33,6 +33,7 @@ export const Button: Component<{
   ref?: (el: HTMLButtonElement) => void;
   onClick?: (e: MouseEvent) => void;
   style?: JSX.CSSProperties;
+  classList?: Record<string, boolean | undefined>;
   children: JSX.Element;
 }> = (props) => {
   const variant = () => props.variant ?? "outline";
@@ -41,7 +42,7 @@ export const Button: Component<{
   const variantStyle = (): JSX.CSSProperties => {
     switch (variant()) {
       case "solid":
-        return { background: "var(--accent)", border: "1px solid var(--accent)", color: "#0d1117" };
+        return { background: "var(--accent)", border: "1px solid var(--accent)", color: "var(--fg-on-accent)" };
       case "ghost":
         return { background: "transparent", border: "1px solid transparent", color: "var(--fg-muted)" };
       default:
@@ -52,6 +53,8 @@ export const Button: Component<{
   return (
     <button
       ref={props.ref}
+      class={`ui-btn ui-btn-${variant()}`}
+      classList={props.classList}
       type={props.type ?? "button"}
       title={props.title}
       disabled={props.disabled}
@@ -160,6 +163,7 @@ export const Menu: Component<{
           <div
             ref={ref}
             role="menu"
+            class="overlay-pop-in"
             style={{
               position: "fixed",
               ...(p().top !== undefined ? { top: `${p().top}px` } : {}),
@@ -172,8 +176,8 @@ export const Menu: Component<{
               background: "var(--surface-3)",
               border: "1px solid var(--border-default)",
               "border-radius": "var(--radius-xl)",
-              "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
-              padding: "7px", "z-index": "150",
+              "box-shadow": "var(--shadow-menu)",
+              padding: "7px", "z-index": "var(--z-menu)",
               ...(props.style ?? {}),
             }}
           >
@@ -203,6 +207,7 @@ export const MenuItem: Component<{
 }> = (props) => (
   <button
     role="menuitem"
+    class={props.disabled ? undefined : "hover-tint"}
     disabled={props.disabled}
     onclick={props.onSelect}
     style={{
@@ -210,12 +215,11 @@ export const MenuItem: Component<{
       gap: "11px", padding: "9px 10px",
       "border-radius": "var(--radius-lg)",
       "text-align": "left",
+      background: "transparent",
       opacity: props.disabled ? ".5" : "1",
       cursor: props.disabled ? "default" : "pointer",
       ...(props.style ?? {}),
     }}
-    onMouseEnter={(e) => { if (!props.disabled) e.currentTarget.style.background = "var(--surface-4)"; }}
-    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
   >
     {props.children}
   </button>
@@ -281,8 +285,9 @@ export const ContextMenu: Component<{
     let cancelled = false;
     const id = window.setTimeout(() => {
       if (cancelled) return;
-      document.addEventListener("click", handleClick);
-      document.addEventListener("contextmenu", handleClick);
+      document.addEventListener("pointerdown", handleClick, true);
+      document.addEventListener("click", handleClick, true);
+      document.addEventListener("contextmenu", handleClick, true);
       document.addEventListener("scroll", handleClick, true);
       document.addEventListener("keydown", handleKey, true);
     }, 0);
@@ -290,8 +295,9 @@ export const ContextMenu: Component<{
     onCleanup(() => {
       cancelled = true;
       window.clearTimeout(id);
-      document.removeEventListener("click", handleClick);
-      document.removeEventListener("contextmenu", handleClick);
+      document.removeEventListener("pointerdown", handleClick, true);
+      document.removeEventListener("click", handleClick, true);
+      document.removeEventListener("contextmenu", handleClick, true);
       document.removeEventListener("scroll", handleClick, true);
       document.removeEventListener("keydown", handleKey, true);
     });
@@ -304,6 +310,7 @@ export const ContextMenu: Component<{
           <div
             ref={ref}
             role="menu"
+            class="overlay-pop-in"
             style={{
               position: "fixed",
               left: `${p().left}px`,
@@ -314,8 +321,8 @@ export const ContextMenu: Component<{
               background: "var(--surface-3)",
               border: "1px solid var(--border-default)",
               "border-radius": "var(--radius-xl)",
-              "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
-              padding: "6px", "z-index": "150",
+              "box-shadow": "var(--shadow-menu)",
+              padding: "6px", "z-index": "var(--z-menu)",
               ...(props.style ?? {}),
             }}
           >
@@ -337,10 +344,15 @@ interface ToastItem {
   kind: ToastKind;
   actionLabel?: string;
   onAction?: () => void;
+  leaving?: boolean;
 }
 
 const [toasts, setToasts] = createSignal<ToastItem[]>([]);
 let toastSeq = 0;
+
+/** Matches the .toast-item exit transition duration in App.css (--dur-base)
+ *  so the row is only removed from the DOM once it has fully faded/slid out. */
+const TOAST_EXIT_MS = 160;
 
 export function toast(
   message: string,
@@ -358,7 +370,10 @@ export function toast(
 }
 
 export function dismissToast(id: number) {
-  setToasts((t) => t.filter((x) => x.id !== id));
+  setToasts((t) => t.map((x) => (x.id === id ? { ...x, leaving: true } : x)));
+  setTimeout(() => {
+    setToasts((t) => t.filter((x) => x.id !== id));
+  }, TOAST_EXIT_MS);
 }
 
 const TOAST_COLOR: Record<ToastKind, string> = {
@@ -371,26 +386,30 @@ export const ToastHost: Component = () => (
   <div style={{
     position: "fixed", bottom: "84px", right: "16px",
     display: "flex", "flex-direction": "column", gap: "8px",
-    "z-index": "100", "max-width": "360px",
+    "z-index": "var(--z-toast)", "max-width": "360px",
   }}>
     <For each={toasts()}>
       {(t) => {
         const color = TOAST_COLOR[t.kind];
         return (
-          <div style={{
-            display: "flex", "align-items": "flex-start", gap: "10px",
-            background: "var(--surface-3)",
-            border: `1px solid ${color}55`,
-            "border-radius": "var(--radius-lg)",
-            padding: "10px 12px",
-            "box-shadow": "0 12px 32px rgba(0,0,0,.5)",
-            "font-size": "12.5px", color: "var(--fg-body)",
-          }}>
+          <div
+            class="toast-item"
+            classList={{ "toast-item-leaving": t.leaving }}
+            style={{
+              display: "flex", "align-items": "flex-start", gap: "10px",
+              background: "var(--surface-3)",
+              border: `1px solid ${color}55`,
+              "border-radius": "var(--radius-lg)",
+              padding: "10px 12px",
+              "box-shadow": "var(--shadow-toast)",
+              "font-size": "12.5px", color: "var(--fg-body)",
+            }}>
             <span style={{ flex: "1", "line-height": "1.5", "word-break": "break-word" }}>
               {t.message}
             </span>
             <Show when={t.actionLabel}>
               <button
+                class="press"
                 onclick={() => { t.onAction?.(); dismissToast(t.id); }}
                 style={{
                   "flex-shrink": "0", color, "font-size": "11.5px", "font-weight": "600",
@@ -401,9 +420,10 @@ export const ToastHost: Component = () => (
               </button>
             </Show>
             <button
+              class="icon-btn press"
               onclick={() => dismissToast(t.id)}
               title="Dismiss"
-              style={{ "flex-shrink": "0", color: "var(--fg-subtle)", cursor: "pointer" }}
+              style={{ "flex-shrink": "0", color: "var(--fg-subtle)", cursor: "pointer", padding: "2px" }}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M18 6L6 18M6 6l12 12" />
@@ -453,21 +473,23 @@ export const ConfirmHost: Component = () => {
     <Show when={confirmState()}>
       {(state) => (
         <div
+          class="overlay-backdrop-in"
           onclick={() => resolveConfirm(false)}
           style={{
-            position: "fixed", inset: 0, "z-index": "200",
+            position: "fixed", inset: 0, "z-index": "var(--z-modal)",
             display: "flex", "align-items": "center", "justify-content": "center",
             background: "rgba(0,0,0,.5)",
           }}
         >
           <div
+            class="overlay-pop-in"
             onclick={(e) => e.stopPropagation()}
             style={{
               width: "340px",
               background: "var(--surface-3)",
               border: "1px solid var(--border-default)",
               "border-radius": "var(--radius-xl)",
-              "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+              "box-shadow": "var(--shadow-menu)",
               padding: "18px",
             }}
           >

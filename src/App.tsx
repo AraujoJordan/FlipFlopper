@@ -51,6 +51,19 @@ import { ToastHost, ConfirmHost, toast } from "./components/ui";
 import { installGlobalShortcuts, runAction } from "./lib/shortcuts";
 import "./App.css";
 
+type OS = "macos" | "windows" | "linux";
+
+const getOS = (): OS => {
+  const platform = navigator.platform.toLowerCase();
+  const ua = navigator.userAgent.toLowerCase();
+  if (platform.includes("mac") || ua.includes("mac")) return "macos";
+  if (platform.includes("win") || ua.includes("win")) return "windows";
+  if (platform.includes("linux") || ua.includes("linux")) return "linux";
+  return "macos";
+};
+
+const CURRENT_OS = getOS();
+
 const WORKSPACE_KEY = "flipflopper:last-workspace";
 
 interface PersistedWorkspace {
@@ -365,6 +378,13 @@ const App: Component = () => {
       {/* ── TITLE BAR ── */}
       <div
         data-tauri-drag-region
+        ondblclick={(e) => {
+          const target = e.target as HTMLElement;
+          if (target.closest("button") || target.closest("input") || target.closest("select") || target.closest("a")) {
+            return;
+          }
+          void win.toggleMaximize();
+        }}
         style={{
           height: "42px", flex: "0 0 42px",
           background: "linear-gradient(var(--surface-3), var(--surface-2))",
@@ -373,40 +393,68 @@ const App: Component = () => {
           padding: "0 16px", position: "relative",
         }}
       >
-        {/* Traffic-light window controls */}
-        <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-          <button
-            onClick={() => win.close()}
-            title="Close"
-            aria-label="Close window"
-            style={{
-              width: "12px", height: "12px", "border-radius": "50%",
-              background: "#ff5f57", cursor: "pointer", padding: 0,
-            }}
-          />
-          <button
-            onClick={() => win.minimize()}
-            title="Minimize"
-            aria-label="Minimize window"
-            style={{
-              width: "12px", height: "12px", "border-radius": "50%",
-              background: "#febc2e", cursor: "pointer", padding: 0,
-            }}
-          />
-          <button
-            onClick={() => win.toggleMaximize()}
-            title="Maximize"
-            aria-label="Maximize window"
-            style={{
-              width: "12px", height: "12px", "border-radius": "50%",
-              background: "#28c840", cursor: "pointer", padding: 0,
-            }}
-          />
-        </div>
+        {/* macOS traffic light controls (left side) */}
+        <Show when={CURRENT_OS === "macos"}>
+          <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
+            <button
+              class="mac-traffic-light"
+              onClick={() => win.close()}
+              title="Close"
+              aria-label="Close window"
+              style={{
+                width: "12px", height: "12px", "border-radius": "50%",
+                background: "#ff5f57", cursor: "pointer", padding: 0,
+                border: "0",
+                display: "flex", "align-items": "center", "justify-content": "center",
+              }}
+            >
+              <svg class="mac-traffic-glyph" width="7" height="7" viewBox="0 0 10 10">
+                <path d="M2 2L8 8M8 2L2 8" stroke="#4d0000" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+            </button>
+            <button
+              class="mac-traffic-light"
+              onClick={() => win.minimize()}
+              title="Minimize"
+              aria-label="Minimize window"
+              style={{
+                width: "12px", height: "12px", "border-radius": "50%",
+                background: "#febc2e", cursor: "pointer", padding: 0,
+                border: "0",
+                display: "flex", "align-items": "center", "justify-content": "center",
+              }}
+            >
+              <svg class="mac-traffic-glyph" width="7" height="7" viewBox="0 0 10 10">
+                <path d="M2 5H8" stroke="#985700" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+            </button>
+            <button
+              class="mac-traffic-light"
+              onClick={() => win.toggleMaximize()}
+              title="Maximize"
+              aria-label="Maximize window"
+              style={{
+                width: "12px", height: "12px", "border-radius": "50%",
+                background: "#28c840", cursor: "pointer", padding: 0,
+                border: "0",
+                display: "flex", "align-items": "center", "justify-content": "center",
+              }}
+            >
+              <svg class="mac-traffic-glyph" width="7" height="7" viewBox="0 0 10 10">
+                <path d="M5 2V8M2 5H8" stroke="#004d0f" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+            </button>
+          </div>
+        </Show>
 
-        {/* Project Picker (on the left side next to traffic lights) */}
-        <div style={{ "margin-left": "24px", display: "flex", "align-items": "center" }}>
+        {/* Project Picker (on the left side: next to traffic lights on macOS, far left on Windows/Linux) */}
+        <div style={{
+          "margin-left": CURRENT_OS === "macos" ? "24px" : "0px",
+          display: "flex",
+          "align-items": "center"
+        }}>
           <button
+            class="hover-lift"
             onclick={handlePickProject}
             style={{
               color: "var(--fg-body)",
@@ -438,6 +486,125 @@ const App: Component = () => {
           <RunButton />
           <ValidationButton />
           <BranchIndicator />
+
+          {/* Windows-style controls (far right) */}
+          <Show when={CURRENT_OS === "windows"}>
+            <div style={{
+              display: "flex",
+              height: "42px",
+              "margin-right": "-16px",
+              "margin-left": "8px",
+              "align-items": "center",
+            }}>
+              <button
+                class="win-ctrl"
+                onClick={() => win.minimize()}
+                title="Minimize"
+                aria-label="Minimize window"
+                style={{
+                  width: "46px", height: "100%",
+                  display: "flex", "align-items": "center", "justify-content": "center",
+                  background: "transparent", border: "0", color: "var(--fg-muted)",
+                  cursor: "pointer", padding: 0,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10">
+                  <line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1" />
+                </svg>
+              </button>
+              <button
+                class="win-ctrl"
+                onClick={() => win.toggleMaximize()}
+                title="Maximize"
+                aria-label="Maximize window"
+                style={{
+                  width: "46px", height: "100%",
+                  display: "flex", "align-items": "center", "justify-content": "center",
+                  background: "transparent", border: "0", color: "var(--fg-muted)",
+                  cursor: "pointer", padding: 0,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10">
+                  <rect x="1" y="1" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1" />
+                </svg>
+              </button>
+              <button
+                class="win-ctrl win-ctrl-close"
+                onClick={() => win.close()}
+                title="Close"
+                aria-label="Close window"
+                style={{
+                  width: "46px", height: "100%",
+                  display: "flex", "align-items": "center", "justify-content": "center",
+                  background: "transparent", border: "0", color: "var(--fg-muted)",
+                  cursor: "pointer", padding: 0,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10">
+                  <path d="M 1,1 L 9,9 M 9,1 L 1,9" stroke="currentColor" stroke-width="1" />
+                </svg>
+              </button>
+            </div>
+          </Show>
+
+          {/* Linux-style controls (far right) */}
+          <Show when={CURRENT_OS === "linux"}>
+            <div style={{
+              display: "flex",
+              gap: "6px",
+              "align-items": "center",
+              "margin-left": "12px",
+            }}>
+              <button
+                class="linux-ctrl"
+                onClick={() => win.minimize()}
+                title="Minimize"
+                aria-label="Minimize window"
+                style={{
+                  width: "24px", height: "24px", "border-radius": "50%",
+                  display: "flex", "align-items": "center", "justify-content": "center",
+                  background: "rgba(255, 255, 255, 0.06)", border: "0", color: "var(--fg-muted)",
+                  cursor: "pointer", padding: 0,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 12 12">
+                  <rect x="2" y="5.5" width="8" height="1" fill="currentColor" />
+                </svg>
+              </button>
+              <button
+                class="linux-ctrl"
+                onClick={() => win.toggleMaximize()}
+                title="Maximize"
+                aria-label="Maximize window"
+                style={{
+                  width: "24px", height: "24px", "border-radius": "50%",
+                  display: "flex", "align-items": "center", "justify-content": "center",
+                  background: "rgba(255, 255, 255, 0.06)", border: "0", color: "var(--fg-muted)",
+                  cursor: "pointer", padding: 0,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 12 12">
+                  <rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2" />
+                </svg>
+              </button>
+              <button
+                class="linux-ctrl linux-ctrl-close"
+                onClick={() => win.close()}
+                title="Close"
+                aria-label="Close window"
+                style={{
+                  width: "24px", height: "24px", "border-radius": "50%",
+                  display: "flex", "align-items": "center", "justify-content": "center",
+                  background: "rgba(255, 255, 255, 0.06)", border: "0", color: "var(--fg-muted)",
+                  cursor: "pointer", padding: 0,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 12 12">
+                  <path d="M3 3l6 6M9 3L3 9" stroke="currentColor" stroke-width="1.2" />
+                </svg>
+              </button>
+            </div>
+          </Show>
         </div>
       </div>
 

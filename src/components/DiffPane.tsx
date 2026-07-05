@@ -276,8 +276,13 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         }}
       >
         {/* Collapse chevron */}
-        <span style={{ color: "var(--fg-faint)", "font-size": "12px", "flex-shrink": "0" }}>
-          {collapsed() ? "▸" : "▾"}
+        <span style={{
+          color: "var(--fg-faint)", "font-size": "12px", "flex-shrink": "0",
+          display: "inline-block",
+          transform: collapsed() ? "rotate(-90deg)" : "rotate(0deg)",
+          transition: "transform var(--dur-base) var(--ease-standard)",
+        }}>
+          ▾
         </span>
 
         {/* Status pill */}
@@ -429,6 +434,8 @@ const DiffPane: Component = () => {
     border: active ? "1px solid var(--border-strong)" : "1px solid transparent",
     background: active ? "var(--surface-4)" : "transparent",
     cursor: "pointer",
+    transition:
+      "background var(--dur-base) var(--ease-standard), border-color var(--dur-base) var(--ease-standard), color var(--dur-base) var(--ease-standard)",
   } as const);
 
   const closeBtnStyle = {
@@ -469,10 +476,16 @@ const DiffPane: Component = () => {
               display: "flex", "align-items": "center",
               border: "1px solid var(--border-default)", "border-radius": "var(--radius-md)", overflow: "hidden",
             }}>
-              <button onclick={() => setMode("unified")} style={segBtnStyle(mode() === "unified")}>
+              <button
+                class={mode() === "unified" ? undefined : "hover-tint"}
+                onclick={() => setMode("unified")} style={segBtnStyle(mode() === "unified")}
+              >
                 Unified
               </button>
-              <button onclick={() => setMode("split")} style={segBtnStyle(mode() === "split")}>
+              <button
+                class={mode() === "split" ? undefined : "hover-tint"}
+                onclick={() => setMode("split")} style={segBtnStyle(mode() === "split")}
+              >
                 Split
               </button>
             </div>
@@ -484,7 +497,7 @@ const DiffPane: Component = () => {
               Reload
             </Button>
 
-            <button onclick={closeReview} title="Close review pane" style={closeBtnStyle}>
+            <button class="icon-btn press" onclick={closeReview} title="Close review pane" style={closeBtnStyle}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M18 6L6 18M6 6l12 12" />
               </svg>
@@ -530,7 +543,7 @@ const DiffPane: Component = () => {
           {/* Error */}
           <Show when={diffs.error}>
             <div style={{
-              background: "#2a1a1a", border: "1px solid #3a2020",
+              background: "var(--status-del-bg)", border: "1px solid var(--status-del)55",
               "border-radius": "var(--radius-lg)", padding: "16px",
               color: "var(--status-del)", "font-family": MONO, "font-size": "12px",
             }}>

@@ -3,6 +3,7 @@ import { searchProjectText, searchPromptFiles, type FileEntry, type TextMatch } 
 import { openEditorFile, store } from "../lib/store";
 import { registerShortcutHandler, runAction } from "../lib/shortcuts";
 import { usagesState, clearUsages, byteRangeToIndices, usageToTextMatch } from "../lib/usages";
+import { Spinner } from "./ui";
 
 type SearchItem =
   | { kind: "file"; file: FileEntry }
@@ -209,7 +210,7 @@ const OmniSearch: Component = () => {
     return (
       <>
         {match.text.slice(0, start)}
-        <span style={{ background: "rgba(240, 198, 116, .22)", color: "#f0c674", "border-radius": "3px" }}>
+        <span style={{ background: "rgba(240, 198, 116, .22)", color: "var(--status-mod)", "border-radius": "3px" }}>
           {match.text.slice(start, end)}
         </span>
         {match.text.slice(end)}
@@ -217,10 +218,12 @@ const OmniSearch: Component = () => {
     );
   }
 
-  const matchRow = (match: TextMatch, isActive: boolean, onclick: () => void) => (
+  const matchRow = (match: TextMatch, isActive: boolean, onclick: () => void, onHover?: () => void) => (
     <button
       type="button"
+      class="hover-tint"
       onMouseDown={(e) => e.preventDefault()}
+      onMouseEnter={onHover}
       onclick={onclick}
       style={{
         width: "100%",
@@ -229,7 +232,7 @@ const OmniSearch: Component = () => {
         gap: "10px",
         padding: "8px 10px",
         "border-radius": "8px",
-        background: isActive ? "#1b1f2a" : "transparent",
+        background: isActive ? "var(--surface-4)" : "transparent",
         color: "var(--fg-default)",
         "text-align": "left",
         "font-size": "12px",
@@ -247,24 +250,25 @@ const OmniSearch: Component = () => {
   return (
     <Show when={visible() && store.currentProject}>
       <div
+        class="overlay-backdrop-in"
         onclick={close}
         style={{
           position: "fixed",
           inset: 0,
-          "z-index": "200",
+          "z-index": "var(--z-modal)",
           background: "rgba(0,0,0,.48)",
+          display: "flex",
+          "justify-content": "center",
+          "padding-top": "12vh",
         }}
       >
         <div
           ref={dialogRef}
+          class="overlay-pop-in"
           tabindex={-1}
           onclick={(e) => e.stopPropagation()}
           onKeyDown={handleKeyDown}
           style={{
-            position: "absolute",
-            top: "12vh",
-            left: "50%",
-            transform: "translateX(-50%)",
             width: "min(640px, calc(100vw - 32px))",
             "max-height": "60vh",
             display: "flex",
@@ -272,7 +276,7 @@ const OmniSearch: Component = () => {
             background: "var(--surface-3)",
             border: "1px solid var(--border-default)",
             "border-radius": "var(--radius-xl)",
-            "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+            "box-shadow": "var(--shadow-menu)",
             overflow: "hidden",
             outline: "none",
           }}
@@ -292,8 +296,8 @@ const OmniSearch: Component = () => {
                     }}>
                       <span>Scope</span>
                       <code style={{
-                        "font-family": "'JetBrains Mono', monospace",
-                        color: "#79c0ff",
+                        "font-family": "var(--font-mono)",
+                        color: "var(--accent-soft)",
                         background: "rgba(88,166,255,.14)",
                         padding: "2px 7px", "border-radius": "5px",
                         "font-size": "11px",
@@ -303,6 +307,7 @@ const OmniSearch: Component = () => {
                       </code>
                       <button
                         type="button"
+                        class="link-btn"
                         onclick={() => setScope(null)}
                         title="Search whole project"
                         style={{
@@ -343,6 +348,7 @@ const OmniSearch: Component = () => {
                 />
                 <button
                   type="button"
+                  class="press"
                   aria-pressed={regexMode()}
                   title="Regular expression"
                   onclick={() => setRegexMode((v) => !v)}
@@ -352,15 +358,17 @@ const OmniSearch: Component = () => {
                     "border-radius": "8px",
                     background: regexMode() ? "rgba(88,166,255,.18)" : "var(--surface-2)",
                     border: `1px solid ${regexMode() ? "rgba(88,166,255,.65)" : "var(--border-default)"}`,
-                    color: regexMode() ? "#79c0ff" : "var(--fg-muted)",
+                    color: regexMode() ? "var(--accent-soft)" : "var(--fg-muted)",
                     "font-size": "12px",
                     "font-weight": 700,
+                    transition: "background var(--dur-base) var(--ease-standard), border-color var(--dur-base) var(--ease-standard), color var(--dur-base) var(--ease-standard)",
                   }}
                 >
                   .*
                 </button>
                 <button
                   type="button"
+                  class="press"
                   aria-pressed={caseSensitive()}
                   title="Match case"
                   onclick={() => setCaseSensitive((v) => !v)}
@@ -370,9 +378,10 @@ const OmniSearch: Component = () => {
                     "border-radius": "8px",
                     background: caseSensitive() ? "rgba(88,166,255,.18)" : "var(--surface-2)",
                     border: `1px solid ${caseSensitive() ? "rgba(88,166,255,.65)" : "var(--border-default)"}`,
-                    color: caseSensitive() ? "#79c0ff" : "var(--fg-muted)",
+                    color: caseSensitive() ? "var(--accent-soft)" : "var(--fg-muted)",
                     "font-size": "12px",
                     "font-weight": 700,
+                    transition: "background var(--dur-base) var(--ease-standard), border-color var(--dur-base) var(--ease-standard), color var(--dur-base) var(--ease-standard)",
                   }}
                 >
                   Aa
@@ -395,9 +404,9 @@ const OmniSearch: Component = () => {
               }}>
                 <span style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Usages of</span>
                 <code style={{
-                  "font-family": "'JetBrains Mono', monospace",
+                  "font-family": "var(--font-mono)",
                   "font-size": "12.5px",
-                  color: "#f0c674",
+                  color: "var(--status-mod)",
                   background: "rgba(240, 198, 116, .14)",
                   padding: "2px 7px",
                   "border-radius": "5px",
@@ -431,6 +440,7 @@ const OmniSearch: Component = () => {
                         void openEditorFile(usage.rel_path, basename(usage.rel_path), usage.line);
                         close();
                       },
+                      () => setSelectedIndex(index()),
                     )}
                   </For>
                 </Show>
@@ -440,7 +450,7 @@ const OmniSearch: Component = () => {
             <Show when={!usagesState()}>
               <Show when={error()}>
                 {(message) => (
-                  <div style={{ color: "#ff7b72", "font-size": "12px", padding: "9px 10px" }}>
+                  <div style={{ color: "var(--status-del)", "font-size": "12px", padding: "9px 10px" }}>
                     {message()}
                   </div>
                 )}
@@ -453,8 +463,9 @@ const OmniSearch: Component = () => {
               </Show>
 
               <Show when={!error() && query().trim() && loading() && items().length === 0}>
-                <div style={{ color: "var(--fg-subtle)", "font-size": "12px", padding: "9px 10px" }}>
-                  Searching...
+                <div style={{ display: "flex", "align-items": "center", gap: "8px", color: "var(--fg-subtle)", "font-size": "12px", padding: "9px 10px" }}>
+                  <Spinner size={12} />
+                  Searching…
                 </div>
               </Show>
 
@@ -474,7 +485,9 @@ const OmniSearch: Component = () => {
                     return (
                       <button
                         type="button"
+                        class="hover-tint"
                         onMouseDown={(e) => e.preventDefault()}
+                        onMouseEnter={() => setSelectedIndex(index())}
                         onclick={() => void activate({ kind: "file", file })}
                         style={{
                           width: "100%",
@@ -482,7 +495,7 @@ const OmniSearch: Component = () => {
                           "align-items": "center",
                           padding: "8px 10px",
                           "border-radius": "8px",
-                          background: active() ? "#1b1f2a" : "transparent",
+                          background: active() ? "var(--surface-4)" : "transparent",
                           color: "var(--fg-default)",
                           "text-align": "left",
                           "font-size": "12px",
@@ -509,6 +522,7 @@ const OmniSearch: Component = () => {
                       match,
                       active(),
                       () => void activate({ kind: "match", match }),
+                      () => setSelectedIndex(offset() + index()),
                     );
                   }}
                 </For>

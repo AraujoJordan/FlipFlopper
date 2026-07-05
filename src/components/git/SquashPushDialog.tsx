@@ -126,6 +126,7 @@ export const SquashPushDialogHost: Component = () => {
     <Show when={state()}>
       {(s) => (
         <div
+          class="overlay-backdrop-in"
           onclick={close}
           style={{
             // Below Menu's z-index (150) — the agent-picker dropdown is a
@@ -137,13 +138,14 @@ export const SquashPushDialogHost: Component = () => {
           }}
         >
           <div
+            class="overlay-pop-in"
             onclick={(e) => e.stopPropagation()}
             style={{
               width: "440px",
               background: "var(--surface-3)",
               border: "1px solid var(--border-default)",
               "border-radius": "var(--radius-xl)",
-              "box-shadow": "0 24px 60px rgba(0,0,0,.65)",
+              "box-shadow": "var(--shadow-menu)",
               padding: "20px",
             }}
           >

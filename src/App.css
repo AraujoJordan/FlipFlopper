@@ -11,6 +11,7 @@
   --fg-faint:   #484f58;   /* scale.gray[5] */
   --accent:     #58a6ff;   /* accent blue */
   --accent-soft: #79c0ff;
+  --fg-on-accent: #0d1117; /* text drawn on solid accent-colored surfaces */
 
   /* Surfaces, dark → light */
   --surface-0: #08090c;   /* app root */
@@ -40,6 +41,26 @@
   --radius-xl: 12px;
 
   --font-mono: 'JetBrains Mono', 'Fira Mono', monospace;
+
+  /* Motion */
+  --dur-fast: 120ms;
+  --dur-base: 160ms;
+  --dur-slow: 220ms;
+  --dur-enter: 300ms;
+  --ease-standard: cubic-bezier(.2, .8, .2, 1);
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+  --ease-in: cubic-bezier(.4, 0, 1, 1);
+
+  /* Elevation */
+  --shadow-sm: 0 4px 14px rgba(0,0,0,.32);
+  --shadow-menu: 0 24px 60px rgba(0,0,0,.65);
+  --shadow-toast: 0 12px 32px rgba(0,0,0,.5);
+  --shadow-pop: 0 16px 40px rgba(0,0,0,.55);
+
+  /* Z-index scale */
+  --z-toast: 100;
+  --z-menu: 150;
+  --z-modal: 200;
 }
 
 html, body {
@@ -99,6 +120,333 @@ html, body {
   }
 }
 
+@keyframes empty-agent-content-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(.985);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes empty-agent-button-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(.92);
+    filter: blur(7px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+/* ── Overlay entrance keyframes ───────────────────────────────────────────── */
+
+@keyframes overlay-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(.97) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px) scale(.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+/* ── Reusable interaction utilities ───────────────────────────────────────── */
+/* Prefer these over per-component inline hover hacks so easing stays uniform
+ * and reduced-motion is handled in one place (see the media query below). */
+
+/* NOTE on !important: these utilities are meant to bolt hover/active feedback
+ * onto a codebase that is ~95% inline `style={{}}` objects. An inline style
+ * declaration always outranks an external selector's specificity — including
+ * :hover/:active pseudo-classes — no matter how the selector is written. So
+ * wherever a component sets e.g. `background` inline (even to "transparent"),
+ * a plain `.hover-tint:hover { background: … }` rule would silently no-op.
+ * `!important` is the deliberate, minimal escape hatch to guarantee these
+ * shared hover/active states actually take effect everywhere they're applied. */
+
+.hover-lift {
+  transition:
+    background var(--dur-base) var(--ease-standard),
+    box-shadow var(--dur-base) var(--ease-standard),
+    transform var(--dur-base) var(--ease-standard);
+}
+
+.hover-lift:hover {
+  background: var(--surface-4) !important;
+  transform: translateY(-1px);
+}
+
+.hover-tint {
+  transition: background var(--dur-base) var(--ease-standard), color var(--dur-base) var(--ease-standard);
+}
+
+.hover-tint:hover {
+  background: var(--surface-4) !important;
+}
+
+.icon-btn {
+  color: var(--fg-subtle);
+  border-radius: var(--radius-md);
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--surface-4) !important;
+  color: var(--fg-default) !important;
+}
+
+.icon-btn-danger {
+  color: var(--fg-subtle);
+  border-radius: var(--radius-md);
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+
+.icon-btn-danger:hover:not(:disabled) {
+  background: var(--status-del-bg) !important;
+  color: var(--status-del) !important;
+}
+
+.press {
+  transition: transform var(--dur-fast) var(--ease-standard);
+}
+
+.press:active:not(:disabled) {
+  transform: scale(.96) !important;
+}
+
+.ui-btn {
+  transition:
+    background var(--dur-base) var(--ease-standard),
+    border-color var(--dur-base) var(--ease-standard),
+    filter var(--dur-base) var(--ease-standard),
+    color var(--dur-base) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-standard);
+}
+
+.ui-btn:active:not(:disabled) {
+  transform: scale(.96) !important;
+}
+
+.ui-btn-outline:hover:not(:disabled) {
+  border-color: var(--border-strong) !important;
+  filter: brightness(1.14);
+}
+
+.ui-btn-solid:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.ui-btn-ghost:hover:not(:disabled) {
+  background: var(--surface-4) !important;
+  color: var(--fg-default) !important;
+}
+
+/* Stacked-icon crossfade: mount every state's icon absolutely in the same
+ * slot and toggle opacity via classList, instead of a hard <Show> swap. */
+.icon-fade {
+  opacity: 0;
+  transition: opacity var(--dur-base) var(--ease-standard);
+}
+
+.icon-fade-visible {
+  opacity: 1;
+}
+
+@keyframes subtle-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
+}
+
+.running-pulse {
+  animation: subtle-pulse 1.8s ease-in-out infinite;
+}
+
+/* ── Title bar window controls ────────────────────────────────────────────── */
+
+.mac-traffic-light {
+  transition: filter var(--dur-fast) var(--ease-standard);
+}
+
+.mac-traffic-light:hover {
+  filter: brightness(1.08);
+}
+
+.mac-traffic-glyph {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+.mac-traffic-light:hover .mac-traffic-glyph {
+  opacity: 1;
+}
+
+.win-ctrl {
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+
+.win-ctrl:hover {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.win-ctrl-close:hover {
+  background-color: #e81123 !important;
+  color: #ffffff !important;
+}
+
+.linux-ctrl {
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+
+.linux-ctrl:hover {
+  background-color: rgba(255, 255, 255, 0.15) !important;
+}
+
+.linux-ctrl-close:hover {
+  background-color: var(--status-del) !important;
+  color: #ffffff !important;
+}
+
+/* ── Git panel rows ────────────────────────────────────────────────────────── */
+
+/* Per-row hover-reveal actions (stage/unstage/discard, commit actions): the
+ * action cluster stays mounted and reserves its space, crossfading opacity on
+ * row hover instead of popping in/out via <Show>, so nothing shifts layout. */
+.git-row-actions {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+.git-row:hover .git-row-actions,
+.git-row-actions-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Opposite of .git-row-actions: content (e.g. a relative-time label) shown
+ * only while the row is at rest, faded out when actions take its place. */
+.hover-time-label {
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+.git-row:hover .hover-time-label {
+  opacity: 0;
+}
+
+/* Ahead/behind counters in the sync header: shrink away instead of popping
+ * out when a push/pull clears the count to zero. */
+.ahead-behind-count {
+  display: inline-flex;
+  overflow: hidden;
+  max-width: 40px;
+  opacity: 1;
+  transition:
+    max-width var(--dur-base) var(--ease-standard),
+    opacity var(--dur-base) var(--ease-standard);
+}
+
+.ahead-behind-count-hidden {
+  max-width: 0;
+  opacity: 0;
+}
+
+/* Small count badges (changed-files count, etc.) pop in on mount instead of
+ * appearing instantly. */
+@keyframes badge-pop {
+  from { opacity: 0; transform: scale(.5); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.badge-pop {
+  animation: badge-pop 220ms var(--ease-out) both;
+}
+
+/* Exit animation for a staged/discarded row: collapse before the underlying
+ * status refetch actually removes it, so the action reads as landing. */
+.git-row {
+  transition:
+    opacity var(--dur-base) var(--ease-standard),
+    max-height var(--dur-base) var(--ease-standard),
+    padding-top var(--dur-base) var(--ease-standard),
+    padding-bottom var(--dur-base) var(--ease-standard);
+  max-height: 40px;
+}
+
+.git-row-removing {
+  opacity: 0 !important;
+  max-height: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  pointer-events: none;
+}
+
+/* Brief success flash for commit/push confirmations. */
+@keyframes success-flash {
+  0% { color: var(--status-add); transform: scale(1); }
+  35% { color: var(--status-add); transform: scale(1.18); }
+  100% { color: inherit; transform: scale(1); }
+}
+
+.success-flash {
+  animation: success-flash 650ms var(--ease-standard);
+}
+
+/* Plain text-link buttons (e.g. "Stage all"/"Unstage all"). */
+.link-btn {
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+.link-btn:hover {
+  opacity: .72;
+}
+
+.overlay-backdrop-in {
+  animation: backdrop-in var(--dur-slow) var(--ease-standard) both;
+}
+
+.overlay-pop-in {
+  animation: pop-in var(--dur-slow) var(--ease-out) both;
+}
+
+.toast-item {
+  animation: toast-in var(--dur-slow) var(--ease-out) both;
+  transition: opacity var(--dur-base) var(--ease-in), transform var(--dur-base) var(--ease-in);
+}
+
+.toast-item-leaving {
+  opacity: 0;
+  transform: translateX(24px) scale(.98);
+}
+
 .app-yolo-mode {
   --surface-0: rgba(8, 9, 12, .82);
   --surface-1: rgba(10, 10, 8, .82);
@@ -136,7 +484,7 @@ html, body {
 }
 
 .yolo-toggle-active {
-  color: #0d1117;
+  color: var(--fg-on-accent);
   background:
     linear-gradient(105deg, transparent 34%, rgba(255,255,255,.38) 48%, transparent 62%),
     linear-gradient(180deg, #facc15, #f59e0b);
@@ -220,6 +568,223 @@ textarea:focus-visible {
   transform: translateY(0) scale(1);
   visibility: visible;
   transition-delay: 0s;
+}
+
+/* ── Empty agent workspace ───────────────────────────────────────────────── */
+
+.empty-agent-workspace {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 34px;
+  color: var(--fg-default);
+  background:
+    radial-gradient(circle at 50% 44%, rgba(2, 128, 43, .19), transparent 34%),
+    radial-gradient(circle at 68% 28%, rgba(254, 206, 3, .14), transparent 31%),
+    linear-gradient(135deg, rgba(0, 0, 0, .82), rgba(10, 12, 18, .96));
+}
+
+.empty-agent-liquid-canvas {
+  position: absolute;
+  inset: -8%;
+  width: 116%;
+  height: 116%;
+  pointer-events: none;
+  opacity: .9;
+  filter: saturate(1.35);
+}
+
+.empty-agent-content {
+  position: relative;
+  z-index: 1;
+  width: min(760px, 100%);
+  padding: 8px;
+  text-align: center;
+  animation: empty-agent-content-rise 520ms cubic-bezier(.16, 1, .3, 1) both;
+}
+
+.empty-agent-icon {
+  display: block;
+  margin: 0 auto;
+  filter: drop-shadow(0 10px 26px rgba(0,0,0,.55));
+}
+
+.empty-agent-content h2 {
+  margin-top: 14px;
+  font-size: clamp(26px, 4.2vw, 42px);
+  line-height: 1;
+  letter-spacing: -.04em;
+  text-shadow: 0 18px 60px rgba(0,0,0,.78);
+  -webkit-text-stroke: .6px rgba(0,0,0,.55);
+}
+
+.empty-agent-content p {
+  margin-top: 10px;
+  color: var(--fg-muted);
+  font-size: 13.5px;
+  text-shadow: 0 10px 32px rgba(0,0,0,.72);
+  -webkit-text-stroke: .35px rgba(0,0,0,.4);
+}
+
+.empty-agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
+  gap: 11px;
+  margin-top: 24px;
+}
+
+.empty-agent-detecting {
+  grid-column: 1 / -1;
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px solid rgba(121, 192, 255, .13);
+  border-radius: 16px;
+  background: rgba(20, 22, 29, .52);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.empty-agent-launch-button {
+  --agent-color: var(--accent);
+  position: relative;
+  isolation: isolate;
+  min-height: 70px;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 13px;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--agent-color) 72%, transparent);
+  background:
+    radial-gradient(circle at 12% 20%, color-mix(in srgb, var(--agent-color) 36%, transparent), transparent 30%),
+    linear-gradient(140deg, color-mix(in srgb, var(--agent-color) 18%, rgba(255,255,255,.08)), rgba(255,255,255,.025) 44%, color-mix(in srgb, var(--agent-color) 12%, rgba(255,255,255,.04))),
+    color-mix(in srgb, var(--agent-color) 10%, rgba(20, 22, 29, .9));
+  color: var(--fg-default);
+  box-shadow:
+    0 18px 46px rgba(0,0,0,.24),
+    inset 0 1px 0 rgba(255,255,255,.08),
+    0 0 0 1px color-mix(in srgb, var(--agent-color) 28%, transparent),
+    0 0 30px color-mix(in srgb, var(--agent-color) 18%, transparent);
+  opacity: 0;
+  transform: translateY(18px) scale(.92);
+  animation: empty-agent-button-rise 520ms cubic-bezier(.16, 1, .3, 1) both;
+  transition:
+    transform 170ms ease,
+    border-color 170ms ease,
+    background 170ms ease,
+    filter 170ms ease;
+}
+
+.empty-agent-launch-button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(110deg, transparent 20%, rgba(255,255,255,.11) 48%, transparent 72%);
+  transform: translateX(-130%);
+  transition: transform 520ms ease;
+}
+
+.empty-agent-launch-button:not(:disabled):hover {
+  transform: translateY(-3px) scale(1.015);
+  background:
+    radial-gradient(circle at 12% 20%, color-mix(in srgb, var(--agent-color) 48%, transparent), transparent 32%),
+    linear-gradient(140deg, color-mix(in srgb, var(--agent-color) 26%, rgba(255,255,255,.11)), rgba(255,255,255,.04) 44%, color-mix(in srgb, var(--agent-color) 18%, rgba(255,255,255,.07))),
+    color-mix(in srgb, var(--agent-color) 14%, rgba(26, 29, 37, .95));
+  box-shadow:
+    0 22px 54px rgba(0,0,0,.32),
+    inset 0 1px 0 rgba(255,255,255,.1),
+    0 0 0 1px color-mix(in srgb, var(--agent-color) 48%, transparent),
+    0 0 42px color-mix(in srgb, var(--agent-color) 28%, transparent);
+}
+
+.empty-agent-launch-button:not(:disabled):hover::after {
+  transform: translateX(130%);
+}
+
+.empty-agent-launch-button:disabled {
+  cursor: default;
+}
+
+.empty-agent-launch-button-disabled {
+  filter: saturate(.38) brightness(.72);
+}
+
+.empty-agent-launch-button-active {
+  filter: saturate(1.1);
+}
+
+.empty-agent-launch-glow {
+  position: absolute;
+  inset: auto auto -50% -20%;
+  width: 145px;
+  height: 145px;
+  z-index: -1;
+  opacity: .7;
+  background: radial-gradient(circle, color-mix(in srgb, var(--agent-color) 58%, transparent), transparent 64%);
+}
+
+.empty-agent-launch-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+}
+
+.empty-agent-launch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.empty-agent-launch-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg-subtle);
+}
+
+.empty-agent-launch-arrow {
+  opacity: .82;
+}
+
+@media (max-width: 700px) {
+  .empty-agent-workspace {
+    padding: 18px;
+  }
+
+  .empty-agent-content {
+    padding: 20px;
+  }
+
+  .empty-agent-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .empty-agent-content,
+  .empty-agent-launch-button {
+    animation: none !important;
+  }
+
+  .empty-agent-launch-button {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* ── Collapsible side panels (Explorer / Source Control) ─────────────────── */
@@ -320,7 +885,11 @@ textarea:focus-visible {
 .agent-tab, .editor-tab {
   animation: tab-enter 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
   overflow: hidden;
-  transition: max-width 150ms ease, padding 150ms ease, opacity 150ms ease, transform 150ms ease;
+  transition:
+    max-width 150ms ease, padding 150ms ease, opacity 150ms ease, transform 150ms ease,
+    background var(--dur-base) var(--ease-standard),
+    border-color var(--dur-base) var(--ease-standard),
+    color var(--dur-base) var(--ease-standard);
   max-width: 240px;
 }
 
@@ -364,9 +933,40 @@ textarea:focus-visible {
   .panel-rail,
   .preview-resize-handle::after,
   .agent-tab,
-  .editor-tab {
+  .editor-tab,
+  .hover-lift,
+  .hover-tint,
+  .icon-btn,
+  .icon-btn-danger,
+  .press,
+  .ui-btn,
+  .overlay-pop-in,
+  .overlay-backdrop-in,
+  .toast-item,
+  .icon-fade,
+  .running-pulse,
+  .mac-traffic-light,
+  .mac-traffic-glyph,
+  .win-ctrl,
+  .linux-ctrl,
+  .git-row-actions,
+  .git-row,
+  .success-flash,
+  .link-btn,
+  .hover-time-label,
+  .ahead-behind-count,
+  .badge-pop {
     transition: none;
     animation: none;
+  }
+
+  .hover-lift:hover {
+    transform: none !important;
+  }
+
+  .press:active:not(:disabled),
+  .ui-btn:active:not(:disabled) {
+    transform: none !important;
   }
 }
 

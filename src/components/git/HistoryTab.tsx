@@ -158,13 +158,11 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
             const dotColor = () => agentColor(activeAgentId());
             const isRenaming = () => renamingSha() === commit.sha;
             const isBusy = () => busySha() === commit.sha;
-            const [hovered, setHovered] = createSignal(false);
 
             return (
               <div
+                class="git-row"
                 onclick={() => !isRenaming() && openReview(`${commit.sha}~1..${commit.sha}`, commit.short_sha)}
-                onmouseenter={() => setHovered(true)}
-                onmouseleave={() => setHovered(false)}
                 title={`Review commit ${commit.short_sha} — ${new Date(commit.date_iso).toLocaleString()}`}
                 style={{
                   position: "relative",
@@ -172,6 +170,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                   background: isFirst() ? "var(--surface-3)" : "transparent",
                   "border-left": isFirst() ? `2px solid ${dotColor()}` : "2px solid transparent",
                   cursor: isRenaming() ? "default" : "pointer",
+                  "max-height": "none",
                 }}
               >
                 {/* Timeline dot */}
@@ -214,7 +213,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                   <span style={{
                     width: "14px", height: "14px", "border-radius": "4px",
                     background: dotColor(),
-                    color: "#0d1117",
+                    color: "var(--fg-on-accent)",
                     "font-family": "var(--font-mono)",
                     "font-weight": "700", "font-size": "8.5px",
                     display: "flex", "align-items": "center", "justify-content": "center",
@@ -229,13 +228,23 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
 
                   <span style={{
                     "margin-left": "auto",
-                    display: "flex", "align-items": "center", gap: "6px",
+                    position: "relative",
+                    display: "flex", "align-items": "center",
+                    height: "16px", "min-width": "88px",
                   }}>
-                    <Show when={hovered() && !isRenaming() && !isBusy()}>
+                    <span
+                      class="git-row-actions"
+                      style={{
+                        display: (isRenaming() || isBusy()) ? "none" : "flex",
+                        position: "absolute", inset: "0",
+                        "align-items": "center", "justify-content": "flex-end", gap: "6px",
+                      }}
+                    >
                       <button
+                        class="icon-btn press"
                         onclick={(e) => { e.stopPropagation(); copySha(commit.sha); }}
                         title="Copy full SHA"
-                        style={{ color: "var(--fg-subtle)", display: "flex", "align-items": "center", padding: "2px", "border-radius": "var(--radius-sm)" }}
+                        style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                           <rect x="9" y="9" width="13" height="13" rx="2" />
@@ -243,9 +252,10 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         </svg>
                       </button>
                       <button
+                        class="icon-btn press"
                         onclick={(e) => { e.stopPropagation(); checkoutCommit(commit.sha, commit.short_sha); }}
                         title="Checkout (detached HEAD)"
-                        style={{ color: "var(--fg-subtle)", display: "flex", "align-items": "center", padding: "2px", "border-radius": "var(--radius-sm)" }}
+                        style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                           <circle cx="12" cy="12" r="3" />
@@ -253,9 +263,10 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         </svg>
                       </button>
                       <button
+                        class="icon-btn press"
                         onclick={(e) => { e.stopPropagation(); startRename(commit.sha, commit.message); }}
                         title="Rename commit message"
-                        style={{ color: "var(--fg-subtle)", display: "flex", "align-items": "center", padding: "2px", "border-radius": "var(--radius-sm)" }}
+                        style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                           <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
@@ -263,23 +274,28 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         </svg>
                       </button>
                       <button
+                        class="icon-btn-danger press"
                         onclick={(e) => { e.stopPropagation(); rollbackTo(commit.sha, commit.short_sha); }}
                         title="Roll back to this commit"
-                        style={{ color: "var(--fg-subtle)", display: "flex", "align-items": "center", padding: "2px", "border-radius": "var(--radius-sm)" }}
+                        style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                           <path d="M3 12a9 9 0 1 0 3-6.7M3 12V5m0 7h7" />
                         </svg>
                       </button>
-                    </Show>
-                    <Show when={!hovered() || isRenaming()}>
-                      <span style={{
+                    </span>
+                    <span
+                      class="hover-time-label"
+                      style={{
+                        position: "absolute", inset: "0",
+                        display: "flex", "align-items": "center", "justify-content": "flex-end",
                         "font-family": "var(--font-mono)",
                         "font-size": "10px", color: "var(--fg-subtle)",
-                      }}>
-                        {relativeTime(commit.time)}
-                      </span>
-                    </Show>
+                        opacity: isRenaming() ? "1" : undefined,
+                      }}
+                    >
+                      {relativeTime(commit.time)}
+                    </span>
                   </span>
                 </div>
 

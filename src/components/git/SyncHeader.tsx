@@ -1,7 +1,7 @@
 import { Component, Show, createSignal } from "solid-js";
 import type { Resource } from "solid-js";
 import { store, bumpGitStatus, toggleGitPanelCollapsed, updateCurrentBranch } from "../../lib/store";
-import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, commitsAheadOfRemote, type SyncStatus } from "../../lib/ipc";
+import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, commitsAheadOfRemote, type SyncStatus, triggerHaptic } from "../../lib/ipc";
 import { Button, Spinner, toast } from "../ui";
 import { openConflictDialog } from "./ConflictFixDialog";
 import { openSquashPushDialog } from "./SquashPushDialog";
@@ -12,6 +12,7 @@ type BusyOp = "fetch" | "pull" | "push" | null;
 /** Branch / ahead-behind / fetch-pull-push strip pinned to the top of the git panel. */
 const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => {
   const [busyOp, setBusyOp] = createSignal<BusyOp>(null);
+  const [pushFlash, setPushFlash] = createSignal(false);
 
   const s = () => props.sync();
   const detached = () => s()?.detached ?? false;
@@ -21,12 +22,15 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
   async function run(op: Exclude<BusyOp, null>, fn: () => Promise<string>) {
     if (!store.currentProject || busyOp()) return;
     setBusyOp(op);
+    void triggerHaptic("generic");
     try {
       const msg = await fn();
       bumpGitStatus();
       await updateCurrentBranch();
+      void triggerHaptic("alignment");
       toast(msg, "success");
     } catch (e) {
+      void triggerHaptic("levelChange");
       toast(String(e), "error");
     } finally {
       setBusyOp(null);
@@ -46,6 +50,7 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
     const branch = s()?.branch ?? "";
     const isPublish = !upstream();
     setBusyOp("push");
+    void triggerHaptic("generic");
     try {
       // Squashing is refused on main/master server-side anyway (mirrors the
       // rollback/rename guards), so skip the dialog there and push directly.
@@ -59,8 +64,12 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
       const msg = await gitPush(project.path);
       bumpGitStatus();
       await updateCurrentBranch();
+      void triggerHaptic("alignment");
       toast(msg || "Pushed", "success");
+      setPushFlash(true);
+      setTimeout(() => setPushFlash(false), 700);
     } catch (e) {
+      void triggerHaptic("levelChange");
       toast(String(e), "error");
     } finally {
       setBusyOp(null);
@@ -73,16 +82,20 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
   async function doPull() {
     if (!store.currentProject || busyOp()) return;
     setBusyOp("pull");
+    void triggerHaptic("generic");
     try {
       const outcome = await gitPull(store.currentProject.path);
       bumpGitStatus();
       await updateCurrentBranch();
       if (outcome.conflicted) {
+        void triggerHaptic("levelChange");
         openConflictDialog(outcome.conflicted_paths);
       } else {
+        void triggerHaptic("alignment");
         toast(outcome.message || (outcome.merged ? "Merged" : "Pulled"), "success");
       }
     } catch (e) {
+      void triggerHaptic("levelChange");
       toast(String(e), "error");
     } finally {
       setBusyOp(null);
@@ -112,7 +125,7 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
         when={!detached()}
         fallback={
           <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
-            <span style={{
+            <span class="running-pulse" style={{
               width: "7px", height: "7px", "border-radius": "50%",
               background: "var(--status-mod)", "box-shadow": "0 0 7px var(--status-mod)",
               "flex-shrink": "0",
@@ -148,12 +161,20 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
           }
         >
           <span style={{ "font-family": "var(--font-mono)", "font-size": "10.5px", display: "flex", gap: "5px" }}>
-            <Show when={(s()?.ahead ?? 0) > 0}>
-              <span style={{ color: "var(--status-add)" }}>↑{s()?.ahead}</span>
-            </Show>
-            <Show when={(s()?.behind ?? 0) > 0}>
-              <span style={{ color: "var(--status-mod)" }}>↓{s()?.behind}</span>
-            </Show>
+            <span
+              class="ahead-behind-count"
+              classList={{ "ahead-behind-count-hidden": (s()?.ahead ?? 0) === 0 }}
+              style={{ color: "var(--status-add)" }}
+            >
+              ↑{s()?.ahead ?? 0}
+            </span>
+            <span
+              class="ahead-behind-count"
+              classList={{ "ahead-behind-count-hidden": (s()?.behind ?? 0) === 0 }}
+              style={{ color: "var(--status-mod)" }}
+            >
+              ↓{s()?.behind ?? 0}
+            </span>
           </span>
         </Show>
       </Show>
@@ -192,6 +213,7 @@ const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => 
           disabled={!hasRemote() || busyOp() !== null}
           onClick={doPush}
           title={upstream() ? "Push" : "Publish branch to origin"}
+          classList={{ "success-flash": pushFlash() }}
         >
           <Show when={busyOp() === "push"} fallback={
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">

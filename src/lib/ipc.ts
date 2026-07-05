@@ -199,6 +199,11 @@ export const pickProjectFolder = (): Promise<string | null> =>
 export const pickPromptFile = (projectPath: string | null, imageOnly = false): Promise<string | null> =>
   invoke("pick_prompt_file", { projectPath, imageOnly });
 
+export const triggerHaptic = (pattern: "generic" | "alignment" | "level-change" | "levelChange"): Promise<void> =>
+  invoke<void>("trigger_haptic", { pattern }).catch(() => {});
+
+
+
 // ── Editor ───────────────────────────────────────────────────────────────────
 
 export interface FileContent {

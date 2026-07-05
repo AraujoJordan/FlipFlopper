@@ -439,14 +439,16 @@ export function agentModeShortLabel(agentId: string, mode: AgentMode) {
 // AgentTaskDialog.tsx.
 
 const AGENT_COLORS: Record<string, string> = {
-  claude: "#58a6ff",
+  claude: "#D97756",
   qwen: "#a371f7",
-  gemini: "#2f81f7",
-  codex: "#3fb950",
-  cursor: "#f0f6fc",
-  agy: "#2f81f7",
+  gemini: "#1A73E8",
+  codex: "#10A37F",
+  cursor: "#8b949e", // Cursor's mark is monochrome black/white; #0A0A0A was
+                     // near-invisible on the app's dark surfaces, so this uses
+                     // a neutral light gray for legible contrast instead.
+  agy: "#1A73E8",
   aider: "#f0883e",
-  opencode: "#bc8cff",
+  opencode: "#0052CC",
   cline: "#39c5cf",
   goose: "#56d364",
   plandex: "#a5d6ff",
@@ -477,6 +479,7 @@ export const AgentLogo: Component<{
   radius?: number;
 }> = (props) => {
   const [imageFailed, setImageFailed] = createSignal(false);
+  const [imageLoaded, setImageLoaded] = createSignal(false);
   const size = () => props.size ?? 24;
   const radius = () => props.radius ?? 7;
 
@@ -504,10 +507,13 @@ export const AgentLogo: Component<{
           src={props.icon ?? ""}
           alt={props.name ? `${props.name} logo` : ""}
           onError={() => setImageFailed(true)}
+          onLoad={() => setImageLoaded(true)}
           style={{
             width: "100%", height: "100%",
             "object-fit": "contain",
             display: "block",
+            opacity: imageLoaded() ? "1" : "0",
+            transition: "opacity var(--dur-base) var(--ease-standard)",
           }}
         />
       </Show>

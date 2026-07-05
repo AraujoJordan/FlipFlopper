@@ -129,7 +129,7 @@ const AgentBar: Component = () => {
             <div
               role="tab"
               class="agent-tab"
-              classList={{ "tab-closing": tab.isClosing }}
+              classList={{ "tab-closing": tab.isClosing, "hover-tint": !isActive() }}
               tabIndex={0}
               aria-selected={isActive()}
               onclick={() => setActiveTab(tab.sessionId)}
@@ -193,11 +193,12 @@ const AgentBar: Component = () => {
 
               {/* Close button */}
               <button
+                class="icon-btn-danger press"
                 onclick={(e) => { e.stopPropagation(); removeTab(tab.sessionId); }}
                 title="Close session"
                 style={{
                   "margin-left": "4px",
-  color: isActive() ? "var(--fg-subtle)" : "#3a3d47",
+                  color: isActive() ? "var(--fg-subtle)" : "var(--border-strong)",
                   width: "18px", height: "18px",
                   display: "flex", "align-items": "center", "justify-content": "center",
                   "border-radius": "var(--radius-sm)",
@@ -216,6 +217,7 @@ const AgentBar: Component = () => {
       <div style={{ position: "relative", "align-self": "center" }}>
         <button
           ref={toggleRef}
+          class="icon-btn press"
           onclick={() => setMenuOpen((o) => !o)}
           title="New agent session (⌘T)"
           style={{

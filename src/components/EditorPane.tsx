@@ -12,7 +12,18 @@ import {
   hoverTooltip,
 } from "@codemirror/view";
 import { EditorState, Compartment } from "@codemirror/state";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  indentWithTab,
+  indentLess,
+  indentMore,
+  redo,
+  selectAll,
+  toggleComment,
+  undo,
+} from "@codemirror/commands";
 import { bracketMatching, indentOnInput, foldGutter, foldKeymap } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import {
@@ -65,10 +76,27 @@ import { getFileIcon } from "../lib/fileIcons";
 import PreviewPanel from "./PreviewPanel";
 import { openUsages, byteOffsetToUtf16, type UsageItem } from "../lib/usages";
 import { flipflopperTheme } from "../lib/cmTheme";
+import { ContextMenu, MenuDivider, MenuItem, toast } from "./ui";
+import { openAgentTaskDialog } from "./AgentTaskDialog";
 
 const POLL_MS = 3000;
 const AUTO_SAVE_MS = 500;
 const LSP_SYNC_MS = 350;
+
+interface EditorContextMenuState {
+  x: number;
+  y: number;
+  pos: number;
+  ref: string;
+  startLine: number;
+  endLine: number;
+  from: number;
+  to: number;
+  hasSelection: boolean;
+  symbol: string | null;
+}
+
+type EditorAiAction = "explain" | "refactor" | "fix" | "tests" | "document" | "simplify" | "review" | "custom";
 
 function diagnosticSeverity(severity: number | null): Diagnostic["severity"] {
   if (severity === 1) return "error";
@@ -117,6 +145,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
 
   const [saveError, setSaveError] = createSignal<string | null>(null);
   const [conflict, setConflict] = createSignal(false);
+  const [contextMenu, setContextMenu] = createSignal<EditorContextMenuState | null>(null);
 
 
 
@@ -198,6 +227,159 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     let end = start;
     while (end < text.length && isIdent(text[end])) end++;
     return end > start ? text.slice(start, end) : null;
+  }
+
+  function lineRangeRef(startLine: number, endLine: number): string {
+    return startLine === endLine
+      ? `${props.file.path}:${startLine}`
+      : `${props.file.path}:${startLine}-${endLine}`;
+  }
+
+  function buildContextMenuState(event: MouseEvent, v: EditorView): EditorContextMenuState | null {
+    const pos = v.posAtCoords({ x: event.clientX, y: event.clientY });
+    if (pos == null) return null;
+
+    const sel = v.state.selection.main;
+    const useSelection = sel.from !== sel.to && pos >= sel.from && pos <= sel.to;
+    const clickedLine = v.state.doc.lineAt(pos);
+    const from = useSelection ? sel.from : clickedLine.from;
+    const to = useSelection ? sel.to : clickedLine.to;
+    const startLine = v.state.doc.lineAt(from).number;
+    const endLine = v.state.doc.lineAt(to).number;
+
+    return {
+      x: event.clientX,
+      y: event.clientY,
+      pos,
+      ref: lineRangeRef(startLine, endLine),
+      startLine,
+      endLine,
+      from,
+      to,
+      hasSelection: useSelection,
+      symbol: wordAt(pos),
+    };
+  }
+
+  function closeContextMenu() {
+    setContextMenu(null);
+  }
+
+  function runEditorCommand(command: (view: EditorView) => boolean) {
+    closeContextMenu();
+    if (!view) return;
+    command(view);
+    view.focus();
+  }
+
+  function selectedOrLineText(ctx: EditorContextMenuState): string {
+    if (!view) return "";
+    return view.state.sliceDoc(ctx.from, ctx.to);
+  }
+
+  async function copyText(text: string, success: string) {
+    closeContextMenu();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(success, "success");
+    } catch {
+      toast("Failed to copy", "error");
+    }
+  }
+
+  async function cutContext(ctx: EditorContextMenuState) {
+    closeContextMenu();
+    if (!view) return;
+    const line = view.state.doc.line(ctx.startLine);
+    const from = ctx.hasSelection ? ctx.from : line.from;
+    const to = ctx.hasSelection
+      ? ctx.to
+      : Math.min(line.to + (ctx.startLine < view.state.doc.lines ? 1 : 0), view.state.doc.length);
+    const text = view.state.sliceDoc(from, to);
+    try {
+      await navigator.clipboard.writeText(text);
+      view.dispatch({ changes: { from, to, insert: "" } });
+      view.focus();
+    } catch {
+      toast("Failed to cut", "error");
+    }
+  }
+
+  async function pasteClipboard() {
+    closeContextMenu();
+    if (!view) return;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return;
+      view.dispatch(view.state.replaceSelection(text));
+      view.focus();
+    } catch {
+      toast("Failed to paste", "error");
+    }
+  }
+
+  function addContextToPrompt(ctx: EditorContextMenuState) {
+    closeContextMenu();
+    setPendingPromptInsert({
+      path: props.file.path,
+      startLine: ctx.startLine,
+      endLine: ctx.endLine,
+    });
+  }
+
+  function aiInstruction(action: EditorAiAction, ctx: EditorContextMenuState): string | undefined {
+    const target = ctx.hasSelection
+      ? "this selection"
+      : ctx.symbol
+        ? `the ${ctx.symbol} symbol`
+        : "this line";
+    switch (action) {
+      case "explain":
+        return `Explain ${target} and how it fits into the surrounding file.`;
+      case "refactor":
+        return `Refactor ${target} to improve readability without changing behavior.`;
+      case "fix":
+        return `Review ${target} for bugs, type errors, lint issues, and failing-test risks, then fix what you find.`;
+      case "tests":
+        return `Generate focused tests for ${target}.`;
+      case "document":
+        return `Add or improve useful documentation for ${target}.`;
+      case "simplify":
+        return `Simplify ${target} and improve performance where it is clearly safe, preserving behavior.`;
+      case "review":
+        return `Review ${target} for correctness, edge cases, security, and maintainability risks.`;
+      case "custom":
+        return undefined;
+    }
+  }
+
+  function openAiAction(action: EditorAiAction, ctx: EditorContextMenuState) {
+    closeContextMenu();
+    const titles: Record<EditorAiAction, string> = {
+      explain: "Explain with AI",
+      refactor: "Refactor with AI",
+      fix: "Fix with AI",
+      tests: "Generate tests",
+      document: "Document with AI",
+      simplify: "Simplify with AI",
+      review: "Review with AI",
+      custom: "Custom AI task",
+    };
+    void openAgentTaskDialog({
+      title: titles[action],
+      files: [ctx.ref],
+      initialInstruction: aiInstruction(action, ctx),
+      suggestions: action === "refactor" ? [
+        "Extract this into smaller functions",
+        "Simplify and remove duplication",
+        "Improve naming and update call sites",
+        "Add type safety without changing behavior",
+      ] : undefined,
+      placeholder: action === "custom"
+        ? "Describe what the agent should do with this code..."
+        : "Adjust the instruction before sending...",
+    });
   }
 
   /** Resolve a symbol's usages: LSP references first, ripgrep word search as a
@@ -417,7 +599,6 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
               },
             };
           }, { hoverTime: 450, hideOnChange: true }),
-          EditorView.lineWrapping,
           EditorView.domEventHandlers({
             mousedown: (event, v) => {
               if (!event.metaKey && !event.ctrlKey) return false;
@@ -425,6 +606,14 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
               if (pos == null) return false;
               event.preventDefault();
               void smartClick(pos);
+              return true;
+            },
+            contextmenu: (event, v) => {
+              const menuState = buildContextMenuState(event, v);
+              if (!menuState) return false;
+              event.preventDefault();
+              event.stopPropagation();
+              setContextMenu(menuState);
               return true;
             },
           }),
@@ -580,6 +769,71 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       >
         <div ref={host} style={{ flex: "1", "min-height": 0, overflow: "hidden" }} />
       </Show>
+
+      <ContextMenu
+        open={contextMenu() !== null}
+        onClose={closeContextMenu}
+        x={contextMenu()?.x ?? 0}
+        y={contextMenu()?.y ?? 0}
+        width={238}
+      >
+        <Show when={contextMenu()} keyed>
+          {(ctx) => {
+            const menuPad = { padding: "7px 9px" };
+            const copyLabel = ctx.hasSelection ? "Copy Selection" : "Copy Line";
+            const selectedText = () => selectedOrLineText(ctx);
+            return (
+              <>
+                <Show when={ctx.symbol}>
+                  <MenuItem onSelect={() => { closeContextMenu(); void gotoDefinition(ctx.pos); }} style={menuPad}>
+                    Go to Definition
+                  </MenuItem>
+                  <MenuItem onSelect={() => { closeContextMenu(); void findUsages(ctx.pos, ctx.symbol); }} style={menuPad}>
+                    Find Usages
+                  </MenuItem>
+                  <MenuDivider />
+                </Show>
+
+                <MenuItem onSelect={() => runEditorCommand(undo)} style={menuPad}>Undo</MenuItem>
+                <MenuItem onSelect={() => runEditorCommand(redo)} style={menuPad}>Redo</MenuItem>
+                <MenuDivider />
+                <MenuItem onSelect={() => void cutContext(ctx)} style={menuPad}>
+                  {ctx.hasSelection ? "Cut" : "Cut Line"}
+                </MenuItem>
+                <MenuItem onSelect={() => void copyText(selectedText(), `Copied ${ctx.hasSelection ? "selection" : "line"}`)} style={menuPad}>
+                  {copyLabel}
+                </MenuItem>
+                <MenuItem onSelect={() => void pasteClipboard()} style={menuPad}>Paste</MenuItem>
+                <MenuItem onSelect={() => runEditorCommand(selectAll)} style={menuPad}>Select All</MenuItem>
+                <MenuDivider />
+                <MenuItem onSelect={() => runEditorCommand(toggleComment)} style={menuPad}>Toggle Comment</MenuItem>
+                <MenuItem onSelect={() => runEditorCommand(indentMore)} style={menuPad}>Indent</MenuItem>
+                <MenuItem onSelect={() => runEditorCommand(indentLess)} style={menuPad}>Outdent</MenuItem>
+                <MenuDivider />
+                <MenuItem onSelect={() => void copyText(props.file.path, "Copied relative path")} style={menuPad}>
+                  Copy Relative Path
+                </MenuItem>
+                <MenuItem onSelect={() => void copyText(`@${ctx.ref}`, "Copied @path reference")} style={menuPad}>
+                  Copy @path Reference
+                </MenuItem>
+                <MenuItem onSelect={() => addContextToPrompt(ctx)} style={menuPad}>Add to Prompt</MenuItem>
+                <MenuItem onSelect={() => { closeContextMenu(); openReview("HEAD", props.file.name, props.file.path); }} style={menuPad}>
+                  Review File Diff
+                </MenuItem>
+                <MenuDivider />
+                <MenuItem onSelect={() => openAiAction("explain", ctx)} style={menuPad}>Explain with AI</MenuItem>
+                <MenuItem onSelect={() => openAiAction("refactor", ctx)} style={menuPad}>Refactor with AI</MenuItem>
+                <MenuItem onSelect={() => openAiAction("fix", ctx)} style={menuPad}>Fix with AI</MenuItem>
+                <MenuItem onSelect={() => openAiAction("tests", ctx)} style={menuPad}>Generate Tests</MenuItem>
+                <MenuItem onSelect={() => openAiAction("document", ctx)} style={menuPad}>Document</MenuItem>
+                <MenuItem onSelect={() => openAiAction("simplify", ctx)} style={menuPad}>Simplify / Optimize</MenuItem>
+                <MenuItem onSelect={() => openAiAction("review", ctx)} style={menuPad}>Review for Risks</MenuItem>
+                <MenuItem onSelect={() => openAiAction("custom", ctx)} style={menuPad}>Custom AI Task...</MenuItem>
+              </>
+            );
+          }}
+        </Show>
+      </ContextMenu>
     </div>
   );
 };
@@ -697,7 +951,7 @@ const EditorPane: Component = () => {
               return (
                 <div
                   class="editor-tab"
-                  classList={{ "tab-closing": file.isClosing }}
+                  classList={{ "tab-closing": file.isClosing, "hover-tint": !isActive() }}
                   onclick={() => setActiveEditorFile(file.path)}
                   oncontextmenu={(e) => {
                     e.preventDefault();
@@ -707,7 +961,7 @@ const EditorPane: Component = () => {
                   style={{
                     display: "flex", "align-items": "center", gap: "7px",
                     padding: "0 12px",
-                    "font-family": "'JetBrains Mono', monospace",
+                    "font-family": "var(--font-mono)",
                     "font-size": "12px",
                     color: isActive() ? "var(--fg-default)" : "var(--fg-muted)",
                     background: isActive() ? "var(--surface-4)" : "transparent",
@@ -732,6 +986,7 @@ const EditorPane: Component = () => {
                     }} />
                   </Show>
                   <button
+                    class="icon-btn-danger press"
                     onclick={(e) => { e.stopPropagation(); closeEditorFile(file.path); }}
                     title="Close"
                     style={{
