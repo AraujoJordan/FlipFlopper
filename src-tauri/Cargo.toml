@@ -1,6 +1,6 @@
 [package]
 name = "flipflopper"
-version = "0.1.3"
+version = "0.1.4"
 description = "Multi-agent CLI cockpit — better UX for AI coding tools"
 authors = ["araujojordan"]
 edition = "2021"
