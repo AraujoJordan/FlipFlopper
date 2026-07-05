@@ -1,6 +1,6 @@
 {
   "name": "flipflopper",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "One cockpit for every CLI AI coding agent. A blazingly fast Tauri + SolidJS desktop GUI that wraps Claude Code, Codex, agy, Aider, and friends.",
   "type": "module",
   "author": "Jordan L. Araujo Jr.",
