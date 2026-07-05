@@ -11,7 +11,7 @@ import {
   duplicateEntry, copyEntry, moveEntry, gitStage, gitUnstage, gitDiscard, openTerminal,
   type FileEntry, type FileStatus,
 } from "../lib/ipc";
-import { Button, Spinner, toast, ContextMenu, MenuItem, MenuDivider, confirmDialog } from "./ui";
+import { Button, Spinner, toast, ContextMenu, MenuItem, MenuDivider, SubMenuItem, confirmDialog } from "./ui";
 import { revealItemInDir, openPath } from "@tauri-apps/plugin-opener";
 import { openOmniSearchInScope } from "./OmniSearch";
 import { openAgentTaskDialog } from "./AgentTaskDialog";
@@ -1183,6 +1183,21 @@ const FileTree: Component = () => {
             const menuPad = { padding: "7px 9px" };
             return (
               <>
+                {/* AI actions */}
+                <SubMenuItem label="AI Actions" style={menuPad}>
+                  <Show when={!multi()}>
+                    <MenuItem onSelect={() => seedAi("Explain", entry())} style={menuPad}>Explain with AI</MenuItem>
+                    <MenuItem onSelect={() => seedAi("Generate unit tests for", entry())} style={menuPad}>Generate tests</MenuItem>
+                    <MenuItem onSelect={() => seedAi("Add documentation to", entry())} style={menuPad}>Document</MenuItem>
+                    <MenuItem onSelect={() => seedAi("Review and fix any lint, type, or test errors in", entry())} style={menuPad}>Fix issues</MenuItem>
+                  </Show>
+                  <MenuItem onSelect={() => void handleRefactor(entry())} style={menuPad}>
+                    {multi() ? `Refactor ${targetPaths(entry()).length} files with AI…` : "Refactor with AI…"}
+                  </MenuItem>
+                  <MenuItem onSelect={() => void handleCustomAI(entry())} style={menuPad}>Custom AI task…</MenuItem>
+                </SubMenuItem>
+                <MenuDivider />
+
                 {/* File-only open/review/history/selection block */}
                 <Show when={!entry().is_dir}>
                   <Show when={!multi()}>
@@ -1231,12 +1246,14 @@ const FileTree: Component = () => {
                 </Show>
                 <MenuItem onSelect={() => handleCut(entry())} style={menuPad}>Cut</MenuItem>
                 <MenuItem onSelect={() => handleCopy(entry())} style={menuPad}>Copy</MenuItem>
-                <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(entry().path); }} style={menuPad}>Copy path</MenuItem>
-                <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(relPath(entry())); }} style={menuPad}>Copy relative path</MenuItem>
-                <Show when={!entry().is_dir && !multi()}>
-                  <MenuItem onSelect={() => handleCopyFilename(entry())} style={menuPad}>Copy filename</MenuItem>
-                </Show>
-                <MenuItem onSelect={() => handleCopyAsRef(entry())} style={menuPad}>Copy as @path ref</MenuItem>
+                <SubMenuItem label="Copy Path" style={menuPad}>
+                  <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(entry().path); }} style={menuPad}>Copy path</MenuItem>
+                  <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(relPath(entry())); }} style={menuPad}>Copy relative path</MenuItem>
+                  <Show when={!entry().is_dir && !multi()}>
+                    <MenuItem onSelect={() => handleCopyFilename(entry())} style={menuPad}>Copy filename</MenuItem>
+                  </Show>
+                  <MenuItem onSelect={() => handleCopyAsRef(entry())} style={menuPad}>Copy as @path ref</MenuItem>
+                </SubMenuItem>
                 <Show when={clipboard() && clipboard()!.paths.length > 0}>
                   <MenuItem onSelect={() => void handlePaste(destDirFor(entry()))} style={menuPad}>
                     Paste {clipboard()!.paths.length} item{clipboard()!.paths.length === 1 ? "" : "s"} here
@@ -1258,19 +1275,6 @@ const FileTree: Component = () => {
                 <Show when={!multi()}>
                   <MenuItem onSelect={() => handleFindInFolder(entry())} style={menuPad}>Find in Folder…</MenuItem>
                 </Show>
-                <MenuDivider />
-
-                {/* AI actions */}
-                <Show when={!multi()}>
-                  <MenuItem onSelect={() => seedAi("Explain", entry())} style={menuPad}>Explain with AI</MenuItem>
-                  <MenuItem onSelect={() => seedAi("Generate unit tests for", entry())} style={menuPad}>Generate tests</MenuItem>
-                  <MenuItem onSelect={() => seedAi("Add documentation to", entry())} style={menuPad}>Document</MenuItem>
-                  <MenuItem onSelect={() => seedAi("Review and fix any lint, type, or test errors in", entry())} style={menuPad}>Fix issues</MenuItem>
-                </Show>
-                <MenuItem onSelect={() => void handleRefactor(entry())} style={menuPad}>
-                  {multi() ? `Refactor ${targetPaths(entry()).length} files with AI…` : "Refactor with AI…"}
-                </MenuItem>
-                <MenuItem onSelect={() => void handleCustomAI(entry())} style={menuPad}>Custom AI task…</MenuItem>
                 <MenuDivider />
 
                 {/* Rename / delete (single-target only) */}

@@ -2,6 +2,7 @@ import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
 import { getAgents, getToolCatalog, installTool, onPtyExit, ptyKill, readFileText, getCurrentBranch } from "./ipc";
 import { confirmDialog } from "../components/ui";
+import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import {
   detectModeMarker,
   nextMode,
@@ -16,6 +17,7 @@ export interface Tab {
   agentId: string;
   agentIcon: string;
   isClosing?: boolean;
+  needsAttention?: boolean;
 }
 
 export type TerminalKind = "run" | "validate" | "install" | "shell";
@@ -54,6 +56,15 @@ export interface EditorFile {
   isClosing?: boolean;
 }
 
+export interface EditorSelectionInfo {
+  path: string;
+  startLine: number;
+  endLine: number;
+  cursorLine: number;
+  cursorColumn: number;
+  hasSelection: boolean;
+}
+
 export interface AppStore {
   currentProject: ProjectInfo | null;
   recentProjects: ProjectInfo[];
@@ -83,7 +94,7 @@ export interface AppStore {
    *  PromptComposer inserts the token into the textarea and clears it. */
   pendingPromptInsert: { path: string; startLine: number; endLine: number } | null;
   /** Live editor selection state — drives the "+" button visibility. */
-  editorSelectionInfo: { path: string; startLine: number; endLine: number; hasSelection: boolean } | null;
+  editorSelectionInfo: EditorSelectionInfo | null;
   /** Clipboard for cut/copy/paste of file-tree entries (absolute paths). */
   fileClipboard: { paths: string[]; mode: "cut" | "copy" } | null;
   /** One-shot channel: external components seed the prompt composer with a
@@ -408,6 +419,9 @@ export function removeTab(sessionId: string) {
 
     // Mark tab as closing
     setStore("tabs", (t) => t.map((x) => x.sessionId === sessionId ? { ...x, isClosing: true } : x));
+    
+    // Clear attention immediately
+    setTabNeedsAttention(sessionId, false);
 
     // Delay the actual removal to let the animation play
     setTimeout(() => {
@@ -417,11 +431,68 @@ export function removeTab(sessionId: string) {
   }
 }
 
+let notificationPermissionRequested = false;
+
+async function requestNotificationPermissionIfNeeded() {
+  if (notificationPermissionRequested) return;
+  if (typeof window !== "undefined" && "Notification" in window) {
+    if (Notification.permission === "default") {
+      notificationPermissionRequested = true;
+      try {
+        await Notification.requestPermission();
+      } catch (err) {
+        console.error("Error requesting notification permission", err);
+      }
+    }
+  }
+}
+
+export function setTabNeedsAttention(sessionId: string, needsAttention: boolean) {
+  setStore("tabs", (t) => t.sessionId === sessionId, "needsAttention", needsAttention);
+  
+  if (needsAttention) {
+    const tab = store.tabs.find((x) => x.sessionId === sessionId);
+    const label = tab?.label ?? "Agent";
+    const isActive = store.activeTabId === sessionId && store.workspaceMode === "agent";
+    const isAppBackground = !document.hasFocus();
+    
+    if (!isActive || isAppBackground) {
+      void requestNotificationPermissionIfNeeded();
+      
+      try {
+        void getCurrentWindow().requestUserAttention(UserAttentionType.Critical);
+      } catch (e) {
+        console.error("Failed to request window attention:", e);
+      }
+      
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+        try {
+          new Notification("Agent Needs Attention", {
+            body: `Agent "${label}" requires your attention.`,
+          });
+        } catch (e) {
+          console.error("Failed to send native notification:", e);
+        }
+      }
+    }
+  } else {
+    const anyOtherNeedsAttention = store.tabs.some((t) => t.sessionId !== sessionId && t.needsAttention);
+    if (!anyOtherNeedsAttention) {
+      try {
+        void getCurrentWindow().requestUserAttention(null);
+      } catch (e) {
+        console.error("Failed to clear window attention:", e);
+      }
+    }
+  }
+}
+
 export function setActiveTab(sessionId: string) {
   const tab = store.tabs.find((x) => x.sessionId === sessionId);
   const projectPath = store.currentProject?.path;
   if (tab && projectPath) recordLastAgentUse(projectPath, tab.agentId);
   setStore("activeTabId", sessionId);
+  setTabNeedsAttention(sessionId, false);
   showAgent();
 }
 
@@ -440,6 +511,9 @@ export function clearAllTabs() {
   setStore("agentModes", {});
   setStore("activeTabId", null);
   for (const sessionId of Object.keys(agentModeTails)) delete agentModeTails[sessionId];
+  try {
+    void getCurrentWindow().requestUserAttention(null);
+  } catch {}
 }
 
 export async function killAndClearAllTabs() {
@@ -471,6 +545,10 @@ export function removeTerminal(sessionId: string) {
   });
   if (store.runSessionId === sessionId) setStore("runSessionId", null);
   if (store.validationSessionId === sessionId) setStore("validationSessionId", null);
+}
+
+export function renameTerminal(sessionId: string, newLabel: string) {
+  setStore("terminals", (t) => t.map((x) => x.sessionId === sessionId ? { ...x, label: newLabel } : x));
 }
 
 export function toggleTerminalPanel() {
@@ -644,7 +722,7 @@ export function setPendingPromptInsert(info: { path: string; startLine: number; 
 
 /** Live editor selection — updated on every CodeMirror selectionSet. Drives
  *  the "+" button visibility in the editor header. */
-export function setEditorSelectionInfo(info: { path: string; startLine: number; endLine: number; hasSelection: boolean } | null) {
+export function setEditorSelectionInfo(info: EditorSelectionInfo | null) {
   setStore("editorSelectionInfo", info);
 }
 

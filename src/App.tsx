@@ -89,8 +89,38 @@ const WORKSPACE_MODES: { mode: WorkspaceMode; label: string }[] = [
   { mode: "review", label: "Code Review" },
 ];
 
+const WORKSPACE_MODE_THEMES: Record<WorkspaceMode, {
+  accent: string;
+  bg: string;
+  bgSoft: string;
+  border: string;
+  glow: string;
+}> = {
+  code: {
+    accent: "#3fb950",
+    bg: "rgba(63, 185, 80, .24)",
+    bgSoft: "rgba(63, 185, 80, .10)",
+    border: "rgba(63, 185, 80, .54)",
+    glow: "rgba(63, 185, 80, .20)",
+  },
+  agent: {
+    accent: "#c084fc",
+    bg: "rgba(192, 132, 252, .24)",
+    bgSoft: "rgba(192, 132, 252, .10)",
+    border: "rgba(192, 132, 252, .54)",
+    glow: "rgba(192, 132, 252, .20)",
+  },
+  review: {
+    accent: "#f0883e",
+    bg: "rgba(240, 136, 62, .24)",
+    bgSoft: "rgba(240, 136, 62, .10)",
+    border: "rgba(240, 136, 62, .54)",
+    glow: "rgba(240, 136, 62, .20)",
+  },
+};
+
 const ModeIcon: Component<{ mode: WorkspaceMode; active: boolean }> = (props) => {
-  const color = () => props.active ? "var(--accent)" : "var(--fg-subtle)";
+  const color = () => props.active ? WORKSPACE_MODE_THEMES[props.mode].accent : "var(--fg-subtle)";
 
   return (
     <svg
@@ -127,14 +157,18 @@ const WorkspaceModeSwitch: Component = () => {
     <div style={{
       display: "flex", "align-items": "center", gap: "2px",
       padding: "2px",
-      background: "var(--surface-2)",
-      border: "1px solid var(--border-muted)",
+      background: "rgba(14, 16, 21, .68)",
+      border: "1px solid rgba(58, 62, 74, .52)",
       "border-radius": "var(--radius-md)",
+      "backdrop-filter": "blur(18px) saturate(130%)",
+      "-webkit-backdrop-filter": "blur(18px) saturate(130%)",
       height: "28px",
     }}>
       <For each={WORKSPACE_MODES}>
         {(item) => {
           const active = () => store.workspaceMode === item.mode;
+          const theme = () => WORKSPACE_MODE_THEMES[item.mode];
+          const hasAttentionTab = () => store.tabs.some((t) => t.needsAttention);
           return (
             <button
               class="workspace-mode-button"
@@ -145,16 +179,35 @@ const WorkspaceModeSwitch: Component = () => {
                 display: "flex", "align-items": "center", gap: "6px",
                 padding: "0 10px",
                 "border-radius": "var(--radius-sm)",
-                background: active() ? "var(--surface-4)" : "transparent",
+                border: active() ? `1px solid ${theme().border}` : "1px solid transparent",
+                background: active()
+                  ? `linear-gradient(135deg, ${theme().bg}, ${theme().bgSoft}), rgba(22, 25, 32, .72)`
+                  : "transparent",
                 color: active() ? "var(--fg-default)" : "var(--fg-subtle)",
                 "font-size": "11px",
                 "font-weight": "500",
+                "box-shadow": active()
+                  ? `0 0 0 1px ${theme().glow}, 0 10px 24px ${theme().glow}`
+                  : "none",
+                "backdrop-filter": active() ? "blur(14px) saturate(145%)" : "none",
+                "-webkit-backdrop-filter": active() ? "blur(14px) saturate(145%)" : "none",
                 cursor: "pointer",
                 "white-space": "nowrap",
               }}
             >
               <ModeIcon mode={item.mode} active={active()} />
               <span>{item.label}</span>
+              <Show when={item.mode === "agent" && !active() && hasAttentionTab()}>
+                <span style={{
+                  width: "6px",
+                  height: "6px",
+                  background: "var(--warning, #d29922)",
+                  "border-radius": "50%",
+                  "margin-left": "2px",
+                  display: "inline-block",
+                  animation: "subtle-pulse 1.5s ease-in-out infinite",
+                }} />
+              </Show>
             </button>
           );
         }}

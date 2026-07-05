@@ -1,5 +1,6 @@
 import {
   Component, JSX, For, Show, createSignal, createEffect, onMount, onCleanup,
+  createContext, useContext,
 } from "solid-js";
 import { Portal } from "solid-js/web";
 
@@ -229,6 +230,127 @@ export const MenuDivider: Component = () => (
   <div style={{ height: "1px", background: "var(--border-muted)", margin: "5px 4px" }} />
 );
 
+// ── SubMenuItem ───────────────────────────────────────────────────────────────
+// A `MenuItem` row that opens a nested flyout panel on hover (or click), used to
+// group related-but-secondary actions inside `ContextMenu`/`Menu`. The flyout is
+// portal-rendered (so it isn't clipped by the parent menu's own scroll box) and
+// registers itself with `MenuEscapeContext` so the parent menu's outside-click
+// dismissal doesn't treat clicks/scrolls inside the flyout as "outside".
+type MenuEscapeRegistry = { register: (el: HTMLElement) => () => void };
+const MenuEscapeContext = createContext<MenuEscapeRegistry>();
+const SUBMENU_OPEN_DELAY = 60;
+const SUBMENU_CLOSE_DELAY = 200;
+
+export const SubMenuItem: Component<{
+  label: JSX.Element;
+  disabled?: boolean;
+  width?: number;
+  style?: JSX.CSSProperties;
+  children: JSX.Element;
+}> = (props) => {
+  const [open, setOpen] = createSignal(false);
+  const [panelPos, setPanelPos] = createSignal<{ left: number; top: number } | null>(null);
+  const registry = useContext(MenuEscapeContext);
+  let rowRef: HTMLButtonElement | undefined;
+  let panelRef: HTMLDivElement | undefined;
+  let timer: number | undefined;
+
+  const clearTimer = () => {
+    if (timer !== undefined) { window.clearTimeout(timer); timer = undefined; }
+  };
+  const openNow = () => {
+    clearTimer();
+    if (!props.disabled) setOpen(true);
+  };
+  const openSoon = () => {
+    clearTimer();
+    if (props.disabled) return;
+    timer = window.setTimeout(() => setOpen(true), SUBMENU_OPEN_DELAY);
+  };
+  const closeSoon = () => {
+    clearTimer();
+    timer = window.setTimeout(() => setOpen(false), SUBMENU_CLOSE_DELAY);
+  };
+  onCleanup(clearTimer);
+
+  createEffect(() => {
+    if (!open() || !rowRef) return;
+    const width = props.width ?? 210;
+    const rowRect = rowRef.getBoundingClientRect();
+    const height = panelRef?.getBoundingClientRect().height ?? 200;
+    let left = rowRect.right + 2;
+    if (left + width > window.innerWidth - CONTEXT_MENU_MARGIN) {
+      left = Math.max(CONTEXT_MENU_MARGIN, rowRect.left - width - 2);
+    }
+    const top = Math.max(
+      CONTEXT_MENU_MARGIN,
+      Math.min(rowRect.top - 6, window.innerHeight - height - CONTEXT_MENU_MARGIN)
+    );
+    setPanelPos({ left, top });
+
+    if (panelRef) {
+      const unregister = registry?.register(panelRef);
+      onCleanup(() => unregister?.());
+    }
+  });
+
+  return (
+    <div onMouseEnter={openSoon} onMouseLeave={closeSoon}>
+      <button
+        ref={rowRef}
+        role="menuitem"
+        aria-haspopup="true"
+        aria-expanded={open()}
+        class={props.disabled ? undefined : "hover-tint"}
+        disabled={props.disabled}
+        onClick={(e) => { e.stopPropagation(); openNow(); }}
+        style={{
+          width: "100%", display: "flex", "align-items": "center",
+          gap: "11px", padding: "9px 10px",
+          "border-radius": "var(--radius-lg)",
+          "text-align": "left",
+          background: "transparent",
+          opacity: props.disabled ? ".5" : "1",
+          cursor: props.disabled ? "default" : "pointer",
+          ...(props.style ?? {}),
+        }}
+      >
+        <span style={{ flex: "1", display: "flex", "align-items": "center", gap: "11px" }}>
+          {props.label}
+        </span>
+        <span style={{ opacity: ".55", "font-size": "11px" }}>▸</span>
+      </button>
+      <Show when={open()}>
+        <Portal>
+          <div
+            ref={panelRef}
+            role="menu"
+            class="overlay-pop-in"
+            onMouseEnter={openNow}
+            onMouseLeave={closeSoon}
+            style={{
+              position: "fixed",
+              left: `${panelPos()?.left ?? -9999}px`,
+              top: `${panelPos()?.top ?? -9999}px`,
+              width: `${props.width ?? 210}px`,
+              "max-height": "70vh",
+              overflow: "auto",
+              background: "var(--surface-3)",
+              border: "1px solid var(--border-default)",
+              "border-radius": "var(--radius-xl)",
+              "box-shadow": "var(--shadow-menu)",
+              padding: "6px",
+              "z-index": "var(--z-menu)",
+            }}
+          >
+            {props.children}
+          </div>
+        </Portal>
+      </Show>
+    </div>
+  );
+};
+
 // ── ContextMenu ───────────────────────────────────────────────────────────────
 // Same Portal / outside-click / Escape / viewport-clamp pattern as `Menu`, but
 // anchored to cursor coordinates (e.g. a right-click) instead of a toggle element.
@@ -246,6 +368,13 @@ export const ContextMenu: Component<{
 }> = (props) => {
   let ref: HTMLDivElement | undefined;
   const [pos, setPos] = createSignal<{ left: number; top: number } | null>(null);
+  const escapedNodes = new Set<HTMLElement>();
+  const registry: MenuEscapeRegistry = {
+    register(el) {
+      escapedNodes.add(el);
+      return () => escapedNodes.delete(el);
+    },
+  };
 
   createEffect(() => {
     if (!props.open) return;
@@ -265,6 +394,9 @@ export const ContextMenu: Component<{
       if (!props.open) return;
       const target = e.target as Node;
       if (ref?.contains(target)) return;
+      for (const el of escapedNodes) {
+        if (el.contains(target)) return;
+      }
       props.onClose();
     }
     function handleKey(e: KeyboardEvent) {
@@ -326,7 +458,9 @@ export const ContextMenu: Component<{
               ...(props.style ?? {}),
             }}
           >
-            {props.children}
+            <MenuEscapeContext.Provider value={registry}>
+              {props.children}
+            </MenuEscapeContext.Provider>
           </div>
         </Portal>
       )}

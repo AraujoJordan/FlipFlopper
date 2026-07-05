@@ -1,9 +1,10 @@
 import { Component, Show, createResource, createSignal, onCleanup } from "solid-js";
-import { store, setGitPanelTab, toggleGitPanelCollapsed } from "../../lib/store";
-import { getSyncStatus, getGitStatusV2 } from "../../lib/ipc";
+import { store, setGitPanelTab, toggleGitPanelCollapsed, addTerminal, toggleTerminalPanel } from "../../lib/store";
+import { getSyncStatus, getGitStatusV2, openTerminal } from "../../lib/ipc";
 import SyncHeader from "./SyncHeader";
 import ChangesTab from "./ChangesTab";
 import HistoryTab from "./HistoryTab";
+import { Button, Spinner, toast } from "../ui";
 
 const tabBtnStyle = (active: boolean) => ({
   display: "flex", "align-items": "center", gap: "6px",
@@ -50,6 +51,37 @@ const GitPanel: Component = () => {
 
   const changedCount = () => (status() ?? []).length;
   const collapsed = () => store.gitPanelCollapsed;
+
+  const [openingTerminal, setOpeningTerminal] = createSignal(false);
+
+  async function handleToggleTerminal() {
+    if (store.terminalPanelOpen) {
+      toggleTerminalPanel();
+    } else {
+      if (store.terminals.length === 0) {
+        const project = store.currentProject;
+        if (!project) {
+          toast("Please open a project first to open a terminal", "error");
+          return;
+        }
+        if (openingTerminal()) return;
+        setOpeningTerminal(true);
+        try {
+          const sessionId = await openTerminal(project.path);
+          addTerminal({ sessionId, label: "Terminal", kind: "shell" });
+          if (!store.terminalPanelOpen) {
+            toggleTerminalPanel();
+          }
+        } catch (e) {
+          toast(`Failed to open terminal: ${String(e)}`, "error");
+        } finally {
+          setOpeningTerminal(false);
+        }
+      } else {
+        toggleTerminalPanel();
+      }
+    }
+  }
 
   return (
     <div
@@ -112,6 +144,31 @@ const GitPanel: Component = () => {
       <Show when={store.gitPanelTab === "changes"} fallback={<HistoryTab tick={tick} />}>
         <ChangesTab status={status} sync={sync} />
       </Show>
+
+      {/* Toggle Terminal Bottom Button (Expanded Panel) */}
+      <div style={{
+        padding: "10px",
+        "border-top": "1px solid var(--border-muted)",
+        display: "flex",
+        "justify-content": "center",
+        background: "var(--surface-2)"
+      }}>
+        <Button
+          onClick={handleToggleTerminal}
+          style={{ width: "100%" }}
+          disabled={openingTerminal()}
+        >
+          <Show when={openingTerminal()} fallback={
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="4 17 10 11 4 5" />
+              <line x1="12" y1="19" x2="20" y2="19" />
+            </svg>
+          }>
+            <Spinner size={12} />
+          </Show>
+          <span>{store.terminalPanelOpen ? "Hide Terminal" : "Show Terminal"}</span>
+        </Button>
+      </div>
       </div>
 
       {/* Collapsed rail */}
@@ -136,6 +193,38 @@ const GitPanel: Component = () => {
             {changedCount()}
           </span>
         </Show>
+
+        {/* Collapsed state terminal toggle button */}
+        <button
+          class="icon-btn press"
+          onclick={(e) => {
+            e.stopPropagation();
+            handleToggleTerminal();
+          }}
+          disabled={openingTerminal()}
+          title={store.terminalPanelOpen ? "Hide Terminal" : "Show Terminal"}
+          style={{
+            "margin-top": "auto",
+            "margin-bottom": "8px",
+            display: "flex",
+            "align-items": "center",
+            "justify-content": "center",
+            width: "28px",
+            height: "28px",
+            background: store.terminalPanelOpen ? "var(--surface-4)" : "transparent",
+            color: store.terminalPanelOpen ? "var(--accent)" : "var(--fg-subtle)",
+            "border-radius": "var(--radius-md)",
+          }}
+        >
+          <Show when={openingTerminal()} fallback={
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="4 17 10 11 4 5" />
+              <line x1="12" y1="19" x2="20" y2="19" />
+            </svg>
+          }>
+            <Spinner size={12} />
+          </Show>
+        </button>
       </div>
     </div>
   );

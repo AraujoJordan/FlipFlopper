@@ -19,7 +19,10 @@ use tauri_plugin_dialog::DialogExt;
 use agents::AgentInfo;
 use editor::FileContent;
 use git::{CommitEntry, CommitResult, FileStatus, PullOutcome, StatusEntry, SyncStatus};
-use lsp::{LspCompletion, LspDefinition, LspDiagnostic, LspManager, LspStatus};
+use lsp::{
+    LspCompletion, LspCompletionDetail, LspDefinition, LspDiagnostic, LspManager,
+    LspSignatureHelp, LspStatus,
+};
 use project::{FileEntry, ProjectInfo, SkillEntry, TextMatch};
 use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
@@ -779,12 +782,12 @@ fn stat_file(project_path: String, rel_path: String) -> Result<u64, String> {
 }
 
 #[tauri::command]
-fn lsp_status(project_path: String, rel_path: String) -> LspStatus {
+async fn lsp_status(project_path: String, rel_path: String) -> LspStatus {
     lsp::status(&project_path, &rel_path)
 }
 
 #[tauri::command]
-fn lsp_open_document(
+async fn lsp_open_document(
     state: State<'_, LspManager>,
     project_path: String,
     rel_path: String,
@@ -794,7 +797,7 @@ fn lsp_open_document(
 }
 
 #[tauri::command]
-fn lsp_change_document(
+async fn lsp_change_document(
     state: State<'_, LspManager>,
     project_path: String,
     rel_path: String,
@@ -804,18 +807,40 @@ fn lsp_change_document(
 }
 
 #[tauri::command]
-fn lsp_completion(
+async fn lsp_completion(
     state: State<'_, LspManager>,
     project_path: String,
     rel_path: String,
     line: u64,
     character: u64,
+    trigger_character: Option<String>,
 ) -> Result<Vec<LspCompletion>, String> {
-    lsp::completion(&state, &project_path, &rel_path, line, character)
+    lsp::completion(&state, &project_path, &rel_path, line, character, trigger_character)
 }
 
 #[tauri::command]
-fn lsp_hover(
+async fn lsp_completion_resolve(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    item: serde_json::Value,
+) -> Result<LspCompletionDetail, String> {
+    lsp::completion_resolve(&state, &project_path, &rel_path, item)
+}
+
+#[tauri::command]
+async fn lsp_signature_help(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    line: u64,
+    character: u64,
+) -> Result<Option<LspSignatureHelp>, String> {
+    lsp::signature_help(&state, &project_path, &rel_path, line, character)
+}
+
+#[tauri::command]
+async fn lsp_hover(
     state: State<'_, LspManager>,
     project_path: String,
     rel_path: String,
@@ -826,7 +851,7 @@ fn lsp_hover(
 }
 
 #[tauri::command]
-fn lsp_definition(
+async fn lsp_definition(
     state: State<'_, LspManager>,
     project_path: String,
     rel_path: String,
@@ -837,7 +862,7 @@ fn lsp_definition(
 }
 
 #[tauri::command]
-fn lsp_references(
+async fn lsp_references(
     state: State<'_, LspManager>,
     project_path: String,
     rel_path: String,
@@ -848,7 +873,7 @@ fn lsp_references(
 }
 
 #[tauri::command]
-fn lsp_diagnostics(
+async fn lsp_diagnostics(
     state: State<'_, LspManager>,
     project_path: String,
     rel_path: String,
@@ -857,8 +882,9 @@ fn lsp_diagnostics(
 }
 
 #[tauri::command]
-fn lsp_shutdown_project(state: State<'_, LspManager>, project_path: String) {
+async fn lsp_shutdown_project(state: State<'_, LspManager>, project_path: String) -> Result<(), ()> {
     lsp::shutdown_project(&state, &project_path);
+    Ok(())
 }
 
 // ════════════════════════════════════════════════
@@ -1236,75 +1262,284 @@ async fn pick_prompt_file(
     })
 }
 
+#[cfg(target_os = "macos")]
+mod trackpad_haptics {
+    //! Drives the trackpad's Taptic Engine through the private
+    //! MultitouchSupport framework. Unlike NSHapticFeedbackManager, this
+    //! fires without a finger resting on the trackpad, which is what makes
+    //! event-driven haptics (bell, exit, run finished) feelable at all.
+    //! Private API: symbols are resolved at runtime and every failure path
+    //! degrades to "unavailable" so callers can fall back to the public API.
+
+    use std::ffi::{c_char, c_void, CString};
+    use std::sync::OnceLock;
+
+    type CFTypeRef = *const c_void;
+    type ActuateFn = unsafe extern "C" fn(CFTypeRef, i32, u32, f32, f32) -> i32;
+
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+        fn IOServiceGetMatchingServices(
+            main_port: u32,
+            matching: *mut c_void,
+            iterator: *mut u32,
+        ) -> i32;
+        fn IOIteratorNext(iterator: u32) -> u32;
+        fn IOObjectRelease(object: u32) -> i32;
+        fn IORegistryEntryCreateCFProperty(
+            entry: u32,
+            key: CFTypeRef,
+            allocator: CFTypeRef,
+            options: u32,
+        ) -> CFTypeRef;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(
+            alloc: CFTypeRef,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> CFTypeRef;
+        fn CFNumberGetValue(number: CFTypeRef, number_type: isize, out: *mut c_void) -> bool;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    extern "C" {
+        fn dlopen(filename: *const c_char, flag: i32) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+
+    const RTLD_NOW: i32 = 2;
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_CF_NUMBER_SINT64_TYPE: isize = 4;
+
+    struct Actuator {
+        actuator: CFTypeRef,
+        actuate: ActuateFn,
+    }
+    // Held once in the process-wide OnceLock; the MTActuator connection is a
+    // plain IOKit user client and actuation is a single fire-and-forget call.
+    unsafe impl Send for Actuator {}
+    unsafe impl Sync for Actuator {}
+
+    static ACTUATOR: OnceLock<Option<Actuator>> = OnceLock::new();
+
+    fn find_multitouch_device_id() -> Option<u64> {
+        unsafe {
+            let class = CString::new("AppleMultitouchDevice").ok()?;
+            let matching = IOServiceMatching(class.as_ptr());
+            if matching.is_null() {
+                return None;
+            }
+            let mut iterator: u32 = 0;
+            // Port 0 is the default main port; the call consumes `matching`.
+            if IOServiceGetMatchingServices(0, matching, &mut iterator) != 0 {
+                return None;
+            }
+            let key_name = CString::new("Multitouch ID").ok()?;
+            let key = CFStringCreateWithCString(
+                std::ptr::null(),
+                key_name.as_ptr(),
+                K_CF_STRING_ENCODING_UTF8,
+            );
+            let mut device_id = None;
+            loop {
+                let service = IOIteratorNext(iterator);
+                if service == 0 {
+                    break;
+                }
+                let prop = IORegistryEntryCreateCFProperty(service, key, std::ptr::null(), 0);
+                IOObjectRelease(service);
+                if prop.is_null() {
+                    continue;
+                }
+                let mut value: u64 = 0;
+                let got = CFNumberGetValue(
+                    prop,
+                    K_CF_NUMBER_SINT64_TYPE,
+                    &mut value as *mut u64 as *mut c_void,
+                );
+                CFRelease(prop);
+                if got {
+                    device_id = Some(value);
+                    break;
+                }
+            }
+            if !key.is_null() {
+                CFRelease(key);
+            }
+            IOObjectRelease(iterator);
+            device_id
+        }
+    }
+
+    fn init() -> Option<Actuator> {
+        unsafe {
+            let path = CString::new(
+                "/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport",
+            )
+            .ok()?;
+            let handle = dlopen(path.as_ptr(), RTLD_NOW);
+            if handle.is_null() {
+                return None;
+            }
+
+            let create_name = CString::new("MTActuatorCreateFromDeviceID").ok()?;
+            let open_name = CString::new("MTActuatorOpen").ok()?;
+            let actuate_name = CString::new("MTActuatorActuate").ok()?;
+            let create_sym = dlsym(handle, create_name.as_ptr());
+            let open_sym = dlsym(handle, open_name.as_ptr());
+            let actuate_sym = dlsym(handle, actuate_name.as_ptr());
+            if create_sym.is_null() || open_sym.is_null() || actuate_sym.is_null() {
+                return None;
+            }
+
+            let create: unsafe extern "C" fn(u64) -> CFTypeRef = std::mem::transmute(create_sym);
+            let open: unsafe extern "C" fn(CFTypeRef) -> i32 = std::mem::transmute(open_sym);
+            let actuate: ActuateFn = std::mem::transmute(actuate_sym);
+
+            let device_id = find_multitouch_device_id()?;
+            let actuator = create(device_id);
+            if actuator.is_null() {
+                return None;
+            }
+            if open(actuator) != 0 {
+                CFRelease(actuator);
+                return None;
+            }
+            Some(Actuator { actuator, actuate })
+        }
+    }
+
+    /// Fire one trackpad tap. Known actuation IDs are 3, 4, and 6; 6 feels
+    /// the strongest on current Force Touch trackpads. Returns false when
+    /// the private API is unavailable (no Force Touch trackpad, or a future
+    /// macOS removed the symbols).
+    pub fn actuate(actuation_id: i32) -> bool {
+        match ACTUATOR.get_or_init(init) {
+            Some(a) => unsafe { (a.actuate)(a.actuator, actuation_id, 0, 0.0, 0.0) == 0 },
+            None => false,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn perform_haptic_feedback(pattern: &str) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+
+    // Fallback path only: public NSHapticFeedbackManager, felt only while a
+    // finger is touching the trackpad. The preferred private-actuator burst
+    // lives in trigger_haptic.
+
+    type ObjcId = *mut std::ffi::c_void;
+    type Sel = *mut std::ffi::c_void;
+
+    #[link(name = "AppKit", kind = "framework")]
+    extern "C" {}
+
+    #[link(name = "objc", kind = "dylib")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> ObjcId;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_msgSend();
+    }
+
+    const NS_HAPTIC_FEEDBACK_PATTERN_GENERIC: isize = 0;
+    const NS_HAPTIC_FEEDBACK_PATTERN_ALIGNMENT: isize = 1;
+    const NS_HAPTIC_FEEDBACK_PATTERN_LEVEL_CHANGE: isize = 2;
+    const NS_HAPTIC_FEEDBACK_PERFORMANCE_TIME_NOW: usize = 1;
+
+    let pattern_val: isize = match pattern {
+        "generic" => NS_HAPTIC_FEEDBACK_PATTERN_GENERIC,
+        "alignment" => NS_HAPTIC_FEEDBACK_PATTERN_ALIGNMENT,
+        "level-change" | "levelChange" => NS_HAPTIC_FEEDBACK_PATTERN_LEVEL_CHANGE,
+        _ => return Err(format!("Invalid haptic pattern: {}", pattern)),
+    };
+
+    unsafe {
+        let class_name = CString::new("NSHapticFeedbackManager").map_err(|e| e.to_string())?;
+        let class_ptr = objc_getClass(class_name.as_ptr());
+        if class_ptr.is_null() {
+            return Err("Failed to get NSHapticFeedbackManager class".to_string());
+        }
+
+        let sel_default_performer = sel_registerName(
+            CString::new("defaultPerformer")
+                .map_err(|e| e.to_string())?
+                .as_ptr(),
+        );
+        if sel_default_performer.is_null() {
+            return Err("Failed to register defaultPerformer selector".to_string());
+        }
+
+        let msg_send_performer: extern "C" fn(ObjcId, Sel) -> ObjcId =
+            std::mem::transmute(objc_msgSend as *const std::ffi::c_void);
+        let performer = msg_send_performer(class_ptr, sel_default_performer);
+        if performer.is_null() {
+            return Err("Failed to get defaultPerformer".to_string());
+        }
+
+        let sel_perform_pattern = sel_registerName(
+            CString::new("performFeedbackPattern:performanceTime:")
+                .map_err(|e| e.to_string())?
+                .as_ptr(),
+        );
+        if sel_perform_pattern.is_null() {
+            return Err(
+                "Failed to register performFeedbackPattern:performanceTime: selector".to_string(),
+            );
+        }
+
+        let msg_send_perform: extern "C" fn(ObjcId, Sel, isize, usize) =
+            std::mem::transmute(objc_msgSend as *const std::ffi::c_void);
+        msg_send_perform(
+            performer,
+            sel_perform_pattern,
+            pattern_val,
+            NS_HAPTIC_FEEDBACK_PERFORMANCE_TIME_NOW,
+        );
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
-fn trigger_haptic(pattern: String) -> Result<(), String> {
+async fn trigger_haptic(app: tauri::AppHandle, pattern: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        use std::ffi::CString;
-        use std::os::raw::c_char;
-
-        #[link(name = "objc", kind = "dylib")]
-        extern "C" {
-            fn objc_getClass(name: *const c_char) -> *mut std::ffi::c_void;
-            fn sel_registerName(name: *const c_char) -> *mut std::ffi::c_char;
-            fn objc_msgSend();
+        if !matches!(
+            pattern.as_str(),
+            "generic" | "alignment" | "level-change" | "levelChange"
+        ) {
+            return Err(format!("Invalid haptic pattern: {}", pattern));
         }
 
-        let pattern_val: isize = match pattern.as_str() {
-            "generic" => 0,
-            "alignment" => 1,
-            "level-change" | "levelChange" => 2,
-            _ => return Err(format!("Invalid haptic pattern: {}", pattern)),
-        };
-
-        unsafe {
-            let class_name = CString::new("NSHapticFeedbackManager").map_err(|e| e.to_string())?;
-            let class_ptr = objc_getClass(class_name.as_ptr());
-            if class_ptr.is_null() {
-                return Err("Failed to get NSHapticFeedbackManager class".to_string());
-            }
-
-            let sel_default_performer = sel_registerName(
-                CString::new("defaultPerformer")
-                    .map_err(|e| e.to_string())?
-                    .as_ptr(),
-            ) as *mut std::ffi::c_void;
-            if sel_default_performer.is_null() {
-                return Err("Failed to register defaultPerformer selector".to_string());
-            }
-
-            let msg_send_performer: extern "C" fn(
-                *mut std::ffi::c_void,
-                *mut std::ffi::c_void,
-            ) -> *mut std::ffi::c_void = std::mem::transmute(objc_msgSend as *const std::ffi::c_void);
-            let performer = msg_send_performer(class_ptr, sel_default_performer);
-            if performer.is_null() {
-                return Err("Failed to get defaultPerformer".to_string());
-            }
-
-            let sel_perform_pattern = sel_registerName(
-                CString::new("performFeedbackPattern:performanceTime:")
-                    .map_err(|e| e.to_string())?
-                    .as_ptr(),
-            ) as *mut std::ffi::c_void;
-            if sel_perform_pattern.is_null() {
-                return Err(
-                    "Failed to register performFeedbackPattern:performanceTime: selector".to_string(),
-                );
-            }
-
-            let msg_send_perform: extern "C" fn(
-                *mut std::ffi::c_void,
-                *mut std::ffi::c_void,
-                isize,
-                isize,
-            ) = std::mem::transmute(objc_msgSend as *const std::ffi::c_void);
-            msg_send_perform(performer, sel_perform_pattern, pattern_val, 0);
+        // Preferred: one strong tap via the private actuator, which works
+        // with no finger on the trackpad. ID 6 is the strongest-feeling
+        // actuation in practice (despite folklore calling it "weak"; IDs
+        // 3/4 feel softer on current Force Touch trackpads). Off the main
+        // thread to keep IOKit work out of the UI.
+        let tapped = tauri::async_runtime::spawn_blocking(|| trackpad_haptics::actuate(6))
+            .await
+            .map_err(|e| format!("Failed to schedule haptic tap: {}", e))?;
+        if tapped {
+            return Ok(());
         }
-        Ok(())
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(perform_haptic_feedback(&pattern));
+        })
+        .map_err(|e| format!("Failed to schedule haptic feedback: {}", e))?;
+        rx.await
+            .map_err(|_| "Failed to receive haptic feedback result".to_string())?
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = app;
         let _ = pattern;
         Ok(())
     }
@@ -1374,6 +1609,8 @@ pub fn run() {
             lsp_open_document,
             lsp_change_document,
             lsp_completion,
+            lsp_completion_resolve,
+            lsp_signature_help,
             lsp_hover,
             lsp_definition,
             lsp_references,

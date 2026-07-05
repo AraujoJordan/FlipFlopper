@@ -2,9 +2,9 @@ import { onMount, onCleanup, createEffect, type Component } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { onPtyOutput, onPtyExit, ptyInput, ptyResize } from "../lib/ipc";
+import { onPtyOutput, onPtyExit, ptyInput, ptyResize, triggerHaptic } from "../lib/ipc";
 import { runAction } from "../lib/shortcuts";
-import { clearAgentMode, cycleAgentModeOptimistic, sniffAgentMode } from "../lib/store";
+import { clearAgentMode, cycleAgentModeOptimistic, sniffAgentMode, setTabNeedsAttention, store } from "../lib/store";
 
 interface Props {
   sessionId: string;
@@ -22,6 +22,7 @@ const TerminalPane: Component<Props> = (props) => {
   let unlisten: (() => void) | null = null;
   let unlistenExit: (() => void) | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  let idleTimeoutId: number | null = null;
 
   onMount(async () => {
     terminal = new Terminal({
@@ -82,13 +83,63 @@ const TerminalPane: Component<Props> = (props) => {
       else runAction("focus-prompt");
     }
 
+    function resetIdleTimer() {
+      if (isShell) return;
+      if (idleTimeoutId !== null) {
+        window.clearTimeout(idleTimeoutId);
+        idleTimeoutId = null;
+      }
+      idleTimeoutId = window.setTimeout(() => {
+        setTabNeedsAttention(props.sessionId, true);
+        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+          try {
+            new Notification("Agent Idle Alert", {
+              body: `The agent has been running but silent for 5 minutes. It may need attention.`,
+            });
+          } catch (e) {
+            console.error("Failed to send idle notification:", e);
+          }
+        }
+      }, 5 * 60 * 1000);
+    }
+
     unlisten = await onPtyOutput(props.sessionId, (data) => {
       terminal.write(data);
       sniffAgentMode(props.sessionId, data);
+      
+      resetIdleTimer();
+
+      if (/(?:\? \(y\/n\)|\? \[y\/N\]|Password:)\s*$/i.test(data)) {
+        setTabNeedsAttention(props.sessionId, true);
+      }
     });
+    // Agent rings the bell (\x07) when it needs attention (permission prompt,
+    // turn finished); tap the trackpad so it is noticeable while unfocused.
+    terminal.onBell(() => {
+      void triggerHaptic("level-change");
+      setTabNeedsAttention(props.sessionId, true);
+    });
+
     unlistenExit = await onPtyExit(props.sessionId, () => {
+      if (idleTimeoutId !== null) {
+        window.clearTimeout(idleTimeoutId);
+        idleTimeoutId = null;
+      }
       clearAgentMode(props.sessionId);
       terminal.writeln("\r\n\x1b[90m[process exited]\x1b[0m");
+      void triggerHaptic("generic");
+      
+      const tab = store.tabs.find((x) => x.sessionId === props.sessionId);
+      if (tab) {
+        setTabNeedsAttention(props.sessionId, true);
+        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+          try {
+            new Notification("Agent Completed", {
+              body: `Agent "${tab.label}" has finished executing.`,
+            });
+          } catch {}
+        }
+      }
     });
 
     terminal.onData((data) => {
@@ -120,6 +171,9 @@ const TerminalPane: Component<Props> = (props) => {
   }
 
   onCleanup(() => {
+    if (idleTimeoutId !== null) {
+      window.clearTimeout(idleTimeoutId);
+    }
     unlisten?.();
     unlistenExit?.();
     resizeObserver?.disconnect();

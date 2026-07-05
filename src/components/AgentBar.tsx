@@ -158,13 +158,28 @@ const AgentBar: Component = () => {
               </Show>
 
               {/* Agent badge */}
-              <AgentLogo
-                agentId={tab.agentId}
-                icon={tab.agentIcon}
-                name={tab.label}
-                size={18}
-                radius={5}
-              />
+              <div style={{ position: "relative" }}>
+                <AgentLogo
+                  agentId={tab.agentId}
+                  icon={tab.agentIcon}
+                  name={tab.label}
+                  size={18}
+                  radius={5}
+                />
+                <Show when={tab.needsAttention && !isActive()}>
+                  <span style={{
+                    position: "absolute",
+                    top: "-4px",
+                    right: "-4px",
+                    width: "8px",
+                    height: "8px",
+                    background: "var(--warning, #d29922)",
+                    "border-radius": "50%",
+                    border: "1.5px solid var(--surface-1, #0b0c10)",
+                    animation: "subtle-pulse 1.5s ease-in-out infinite",
+                  }} />
+                </Show>
+              </div>
 
               <span style={{
                 "font-size": "13px",

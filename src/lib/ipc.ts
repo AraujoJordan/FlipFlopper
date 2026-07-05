@@ -200,7 +200,11 @@ export const pickPromptFile = (projectPath: string | null, imageOnly = false): P
   invoke("pick_prompt_file", { projectPath, imageOnly });
 
 export const triggerHaptic = (pattern: "generic" | "alignment" | "level-change" | "levelChange"): Promise<void> =>
-  invoke<void>("trigger_haptic", { pattern }).catch(() => {});
+  invoke<void>("trigger_haptic", { pattern }).catch((error) => {
+    if (import.meta.env.DEV) {
+      console.debug("Haptic feedback unavailable", error);
+    }
+  });
 
 
 
@@ -227,6 +231,10 @@ export interface LspStatus {
   available: boolean;
   server: string | null;
   message: string;
+  tool_id: string | null;
+  completion_trigger_characters: string[];
+  signature_trigger_characters: string[];
+  resolve_provider: boolean;
 }
 
 export interface LspPosition {
@@ -244,6 +252,33 @@ export interface LspCompletion {
   detail: string | null;
   kind: number | null;
   insert_text: string;
+  sort_text: string | null;
+  filter_text: string | null;
+  documentation: string | null;
+  replace_start: LspPosition | null;
+  raw: unknown;
+}
+
+export interface LspCompletionDetail {
+  detail: string | null;
+  documentation: string | null;
+}
+
+export interface LspSignatureParameter {
+  label: string;
+  documentation: string | null;
+}
+
+export interface LspSignature {
+  label: string;
+  documentation: string | null;
+  parameters: LspSignatureParameter[];
+}
+
+export interface LspSignatureHelp {
+  signatures: LspSignature[];
+  active_signature: number;
+  active_parameter: number;
 }
 
 export interface LspDiagnostic {
@@ -257,6 +292,9 @@ export interface LspDefinition {
   line: number;
   character: number;
 }
+
+export const lspStatus = (projectPath: string, relPath: string): Promise<LspStatus> =>
+  invoke("lsp_status", { projectPath, relPath });
 
 export const lspOpenDocument = (
   projectPath: string,
@@ -277,8 +315,24 @@ export const lspCompletion = (
   relPath: string,
   line: number,
   character: number,
+  triggerCharacter?: string,
 ): Promise<LspCompletion[]> =>
-  invoke("lsp_completion", { projectPath, relPath, line, character });
+  invoke("lsp_completion", { projectPath, relPath, line, character, triggerCharacter: triggerCharacter ?? null });
+
+export const lspCompletionResolve = (
+  projectPath: string,
+  relPath: string,
+  item: unknown,
+): Promise<LspCompletionDetail> =>
+  invoke("lsp_completion_resolve", { projectPath, relPath, item });
+
+export const lspSignatureHelp = (
+  projectPath: string,
+  relPath: string,
+  line: number,
+  character: number,
+): Promise<LspSignatureHelp | null> =>
+  invoke("lsp_signature_help", { projectPath, relPath, line, character });
 
 export const lspHover = (
   projectPath: string,

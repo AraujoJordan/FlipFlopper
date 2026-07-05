@@ -13,6 +13,17 @@ pub struct LspStatus {
     pub available: bool,
     pub server: Option<String>,
     pub message: String,
+    pub tool_id: Option<String>,
+    pub completion_trigger_characters: Vec<String>,
+    pub signature_trigger_characters: Vec<String>,
+    pub resolve_provider: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LspCapabilities {
+    completion_trigger_characters: Vec<String>,
+    signature_trigger_characters: Vec<String>,
+    resolve_provider: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -21,6 +32,37 @@ pub struct LspCompletion {
     pub detail: Option<String>,
     pub kind: Option<u64>,
     pub insert_text: String,
+    pub sort_text: Option<String>,
+    pub filter_text: Option<String>,
+    pub documentation: Option<String>,
+    pub replace_start: Option<LspPosition>,
+    pub raw: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspCompletionDetail {
+    pub detail: Option<String>,
+    pub documentation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspSignatureParameter {
+    pub label: String,
+    pub documentation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspSignature {
+    pub label: String,
+    pub documentation: Option<String>,
+    pub parameters: Vec<LspSignatureParameter>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspSignatureHelp {
+    pub signatures: Vec<LspSignature>,
+    pub active_signature: u64,
+    pub active_parameter: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +96,7 @@ struct ServerSpec {
     id: &'static str,
     command: &'static str,
     args: &'static [&'static str],
+    tool_id: Option<&'static str>,
 }
 
 struct LspSession {
@@ -62,6 +105,7 @@ struct LspSession {
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>,
     diagnostics: Arc<Mutex<HashMap<String, Vec<LspDiagnostic>>>>,
     open_docs: Mutex<HashMap<String, i32>>,
+    capabilities: LspCapabilities,
 }
 
 pub struct LspManager {
@@ -84,20 +128,40 @@ pub fn status(project_path: &str, rel_path: &str) -> LspStatus {
             available: false,
             server: None,
             message: "No configured language server for this file type".into(),
+            tool_id: None,
+            completion_trigger_characters: Vec::new(),
+            signature_trigger_characters: Vec::new(),
+            resolve_provider: false,
         },
         Some(spec) => match resolve_command(project_path, spec.command) {
             Some(_) => LspStatus {
                 available: true,
                 server: Some(spec.id.into()),
                 message: format!("{} available", spec.command),
+                tool_id: spec.tool_id.map(String::from),
+                completion_trigger_characters: Vec::new(),
+                signature_trigger_characters: Vec::new(),
+                resolve_provider: false,
             },
             None => LspStatus {
                 available: false,
                 server: Some(spec.id.into()),
                 message: format!("{} not found on PATH", spec.command),
+                tool_id: spec.tool_id.map(String::from),
+                completion_trigger_characters: Vec::new(),
+                signature_trigger_characters: Vec::new(),
+                resolve_provider: false,
             },
         },
     }
+}
+
+fn status_with_capabilities(project_path: &str, rel_path: &str, session: &LspSession) -> LspStatus {
+    let mut base = status(project_path, rel_path);
+    base.completion_trigger_characters = session.capabilities.completion_trigger_characters.clone();
+    base.signature_trigger_characters = session.capabilities.signature_trigger_characters.clone();
+    base.resolve_provider = session.capabilities.resolve_provider;
+    base
 }
 
 pub fn open_document(
@@ -117,7 +181,7 @@ pub fn open_document(
     let language_id = language_id(rel_path);
     let mut versions = session.open_docs.lock().unwrap();
     if versions.contains_key(rel_path) {
-        return Ok(status(project_path, rel_path));
+        return Ok(status_with_capabilities(project_path, rel_path, session));
     }
     versions.insert(rel_path.to_string(), 1);
     drop(versions);
@@ -133,7 +197,7 @@ pub fn open_document(
             }
         }),
     )?;
-    Ok(status(project_path, rel_path))
+    Ok(status_with_capabilities(project_path, rel_path, session))
 }
 
 pub fn change_document(
@@ -165,7 +229,7 @@ pub fn change_document(
             "contentChanges": [{ "text": content }]
         }),
     )?;
-    Ok(status(project_path, rel_path))
+    Ok(status_with_capabilities(project_path, rel_path, session))
 }
 
 pub fn completion(
@@ -174,6 +238,7 @@ pub fn completion(
     rel_path: &str,
     line: u64,
     character: u64,
+    trigger_character: Option<String>,
 ) -> Result<Vec<LspCompletion>, String> {
     let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
         return Ok(Vec::new());
@@ -183,16 +248,74 @@ pub fn completion(
         .get(&key)
         .ok_or_else(|| "Language server session disappeared".to_string())?;
     let uri = file_uri(&absolute_path(project_path, rel_path)?);
+    let context = match trigger_character {
+        Some(trigger_character) => json!({ "triggerKind": 2, "triggerCharacter": trigger_character }),
+        None => json!({ "triggerKind": 1 }),
+    };
     let result = request(
         manager,
         session,
         "textDocument/completion",
         json!({
             "textDocument": { "uri": uri },
-            "position": { "line": line, "character": character }
+            "position": { "line": line, "character": character },
+            "context": context
         }),
     )?;
     Ok(parse_completions(result))
+}
+
+pub fn completion_resolve(
+    manager: &LspManager,
+    project_path: &str,
+    rel_path: &str,
+    item: Value,
+) -> Result<LspCompletionDetail, String> {
+    let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
+        return Ok(LspCompletionDetail { detail: None, documentation: None });
+    };
+    let sessions = manager.sessions.lock().unwrap();
+    let session = sessions
+        .get(&key)
+        .ok_or_else(|| "Language server session disappeared".to_string())?;
+    if !session.capabilities.resolve_provider {
+        return Ok(LspCompletionDetail {
+            detail: item.get("detail").and_then(|v| v.as_str()).map(String::from),
+            documentation: parse_documentation(&item),
+        });
+    }
+    let result = request(manager, session, "completionItem/resolve", item)?;
+    Ok(LspCompletionDetail {
+        detail: result.get("detail").and_then(|v| v.as_str()).map(String::from),
+        documentation: parse_documentation(&result),
+    })
+}
+
+pub fn signature_help(
+    manager: &LspManager,
+    project_path: &str,
+    rel_path: &str,
+    line: u64,
+    character: u64,
+) -> Result<Option<LspSignatureHelp>, String> {
+    let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
+        return Ok(None);
+    };
+    let sessions = manager.sessions.lock().unwrap();
+    let session = sessions
+        .get(&key)
+        .ok_or_else(|| "Language server session disappeared".to_string())?;
+    let uri = file_uri(&absolute_path(project_path, rel_path)?);
+    let result = request(
+        manager,
+        session,
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character }
+        }),
+    )?;
+    Ok(parse_signature_help(result))
 }
 
 pub fn hover(
@@ -372,12 +495,13 @@ fn spawn_session(
 
     start_reader(stdout, pending.clone(), diagnostics.clone());
 
-    let session = LspSession {
+    let mut session = LspSession {
         stdin,
         child,
         pending,
         diagnostics,
         open_docs: Mutex::new(HashMap::new()),
+        capabilities: LspCapabilities::default(),
     };
 
     let init = request(
@@ -390,19 +514,32 @@ fn spawn_session(
             "capabilities": {
                 "textDocument": {
                     "synchronization": { "didSave": false },
-                    "completion": { "completionItem": { "snippetSupport": false } },
+                    "completion": {
+                        "contextSupport": true,
+                        "completionItem": {
+                            "snippetSupport": false,
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "resolveSupport": { "properties": ["documentation", "detail"] }
+                        }
+                    },
                     "hover": { "contentFormat": ["markdown", "plaintext"] },
+                    "signatureHelp": {
+                        "signatureInformation": { "documentationFormat": ["markdown", "plaintext"] }
+                    },
                     "definition": {},
                     "references": {}
                 }
             }
         }),
     );
-    if init.is_err() {
-        let mut dead = session;
-        let _ = dead.child.kill();
-        return Err(format!("Failed to initialize {}", spec.command));
-    }
+    let init_result = match init {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = session.child.kill();
+            return Err(format!("Failed to initialize {}", spec.command));
+        }
+    };
+    session.capabilities = parse_capabilities(&init_result);
     notify(&session, "initialized", json!({}))?;
     Ok(session)
 }
@@ -525,11 +662,13 @@ fn server_for_path(rel_path: &str) -> Option<ServerSpec> {
             id: "typescript",
             command: "typescript-language-server",
             args: &["--stdio"],
+            tool_id: Some("typescript-language-server"),
         }),
         "rs" => Some(ServerSpec {
             id: "rust",
             command: "rust-analyzer",
             args: &[],
+            tool_id: Some("rust-analyzer"),
         }),
         "py" | "pyw" => {
             if which::which("pylsp").is_ok() {
@@ -537,12 +676,14 @@ fn server_for_path(rel_path: &str) -> Option<ServerSpec> {
                     id: "python",
                     command: "pylsp",
                     args: &[],
+                    tool_id: None,
                 })
             } else {
                 Some(ServerSpec {
                     id: "python",
                     command: "pyright-langserver",
                     args: &["--stdio"],
+                    tool_id: Some("pyright"),
                 })
             }
         }
@@ -550,31 +691,37 @@ fn server_for_path(rel_path: &str) -> Option<ServerSpec> {
             id: "go",
             command: "gopls",
             args: &[],
+            tool_id: Some("gopls"),
         }),
         "json" | "jsonc" => Some(ServerSpec {
             id: "json",
             command: "vscode-json-language-server",
             args: &["--stdio"],
+            tool_id: Some("vscode-langservers-extracted"),
         }),
         "css" | "scss" | "sass" | "less" => Some(ServerSpec {
             id: "css",
             command: "vscode-css-language-server",
             args: &["--stdio"],
+            tool_id: Some("vscode-langservers-extracted"),
         }),
         "html" | "htm" => Some(ServerSpec {
             id: "html",
             command: "vscode-html-language-server",
             args: &["--stdio"],
+            tool_id: Some("vscode-langservers-extracted"),
         }),
         "kt" | "kts" => Some(ServerSpec {
             id: "kotlin",
             command: "kotlin-language-server",
             args: &[],
+            tool_id: None,
         }),
         "swift" => Some(ServerSpec {
             id: "swift",
             command: "sourcekit-lsp",
             args: &[],
+            tool_id: None,
         }),
         "cs" => {
             if which::which("csharp-ls").is_ok() {
@@ -582,12 +729,14 @@ fn server_for_path(rel_path: &str) -> Option<ServerSpec> {
                     id: "csharp",
                     command: "csharp-ls",
                     args: &[],
+                    tool_id: None,
                 })
             } else {
                 Some(ServerSpec {
                     id: "csharp",
                     command: "OmniSharp",
                     args: &["--languageserver"],
+                    tool_id: None,
                 })
             }
         }
@@ -595,6 +744,7 @@ fn server_for_path(rel_path: &str) -> Option<ServerSpec> {
             id: "c-cpp",
             command: "clangd",
             args: &[],
+            tool_id: Some("clangd"),
         }),
         _ => None,
     }
@@ -678,7 +828,7 @@ fn parse_completions(result: Value) -> Vec<LspCompletion> {
             .cloned()
             .unwrap_or_default()
     };
-    items
+    let mut completions: Vec<LspCompletion> = items
         .into_iter()
         .filter_map(|item| {
             let label = item.get("label")?.as_str()?.to_string();
@@ -692,18 +842,120 @@ fn parse_completions(result: Value) -> Vec<LspCompletion> {
                 })
                 .unwrap_or(&label)
                 .to_string();
+            let replace_start = item
+                .get("textEdit")
+                .and_then(|v| v.get("range").or_else(|| v.get("insert")))
+                .and_then(|r| r.get("start"))
+                .and_then(parse_position);
+            let sort_text = item.get("sortText").and_then(|v| v.as_str()).map(String::from);
+            let filter_text = item.get("filterText").and_then(|v| v.as_str()).map(String::from);
+            let documentation = parse_documentation(&item);
+            let detail = item.get("detail").and_then(|v| v.as_str()).map(String::from);
+            let kind = item.get("kind").and_then(|v| v.as_u64());
             Some(LspCompletion {
                 label,
-                detail: item
-                    .get("detail")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                kind: item.get("kind").and_then(|v| v.as_u64()),
+                detail,
+                kind,
                 insert_text,
+                sort_text,
+                filter_text,
+                documentation,
+                replace_start,
+                raw: item,
             })
         })
-        .take(80)
-        .collect()
+        .collect();
+    completions.sort_by(|a, b| {
+        let key_a = a.sort_text.as_deref().unwrap_or(&a.label);
+        let key_b = b.sort_text.as_deref().unwrap_or(&b.label);
+        key_a.cmp(key_b)
+    });
+    completions.truncate(150);
+    completions
+}
+
+fn parse_documentation(value: &Value) -> Option<String> {
+    let doc = value.get("documentation")?;
+    if let Some(s) = doc.as_str() {
+        return Some(s.to_string());
+    }
+    doc.get("value").and_then(|v| v.as_str()).map(String::from)
+}
+
+fn parse_capabilities(init_result: &Value) -> LspCapabilities {
+    let caps = init_result.get("capabilities");
+    let completion_trigger_characters = caps
+        .and_then(|c| c.get("completionProvider"))
+        .and_then(|c| c.get("triggerCharacters"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let resolve_provider = caps
+        .and_then(|c| c.get("completionProvider"))
+        .and_then(|c| c.get("resolveProvider"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let signature_trigger_characters = caps
+        .and_then(|c| c.get("signatureHelpProvider"))
+        .and_then(|c| c.get("triggerCharacters"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    LspCapabilities {
+        completion_trigger_characters,
+        signature_trigger_characters,
+        resolve_provider,
+    }
+}
+
+fn parse_signature_help(result: Value) -> Option<LspSignatureHelp> {
+    let signatures_value = result.get("signatures")?.as_array()?;
+    if signatures_value.is_empty() {
+        return None;
+    }
+    let signatures = signatures_value
+        .iter()
+        .map(|sig| {
+            let label = sig.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let documentation = parse_documentation(sig);
+            let parameters = sig
+                .get("parameters")
+                .and_then(|v| v.as_array())
+                .map(|params| {
+                    params
+                        .iter()
+                        .map(|param| {
+                            let param_label = match param.get("label") {
+                                Some(Value::String(s)) => s.clone(),
+                                Some(Value::Array(bounds)) if bounds.len() == 2 => {
+                                    let start = bounds[0].as_u64().unwrap_or(0) as usize;
+                                    let end = bounds[1].as_u64().unwrap_or(0) as usize;
+                                    label.get(start..end).unwrap_or("").to_string()
+                                }
+                                _ => String::new(),
+                            };
+                            LspSignatureParameter {
+                                label: param_label,
+                                documentation: parse_documentation(param),
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            LspSignature {
+                label,
+                documentation,
+                parameters,
+            }
+        })
+        .collect();
+    let active_signature = result.get("activeSignature").and_then(|v| v.as_u64()).unwrap_or(0);
+    let active_parameter = result.get("activeParameter").and_then(|v| v.as_u64()).unwrap_or(0);
+    Some(LspSignatureHelp {
+        signatures,
+        active_signature,
+        active_parameter,
+    })
 }
 
 fn parse_hover(result: Value) -> Option<String> {

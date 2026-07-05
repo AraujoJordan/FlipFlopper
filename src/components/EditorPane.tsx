@@ -10,8 +10,11 @@ import {
   rectangularSelection,
   crosshairCursor,
   hoverTooltip,
+  showTooltip,
+  type Tooltip,
+  type ViewUpdate,
 } from "@codemirror/view";
-import { EditorState, Compartment } from "@codemirror/state";
+import { EditorState, Compartment, StateField, StateEffect } from "@codemirror/state";
 import {
   defaultKeymap,
   history,
@@ -55,15 +58,19 @@ import {
   setEditorSelectionInfo,
   setPendingPromptInsert,
   setPendingLineFocus,
+  hiddenInstallTool,
   type EditorFile,
 } from "../lib/store";
 import {
   readFileText,
   writeFileText,
   statFile,
+  lspStatus,
   lspOpenDocument,
   lspChangeDocument,
   lspCompletion,
+  lspCompletionResolve,
+  lspSignatureHelp,
   lspHover,
   lspDefinition,
   lspReferences,
@@ -71,12 +78,16 @@ import {
   searchProjectText,
   detectPreview,
   type LspDiagnostic,
+  type LspStatus,
+  type LspCompletion,
+  type LspSignatureHelp as LspSignatureHelpType,
 } from "../lib/ipc";
+import { renderMarkdownLite } from "../lib/markdownLite";
 import { getFileIcon } from "../lib/fileIcons";
 import PreviewPanel from "./PreviewPanel";
 import { openUsages, byteOffsetToUtf16, type UsageItem } from "../lib/usages";
 import { flipflopperTheme } from "../lib/cmTheme";
-import { ContextMenu, MenuDivider, MenuItem, toast } from "./ui";
+import { ContextMenu, MenuDivider, MenuItem, SubMenuItem, toast } from "./ui";
 import { openAgentTaskDialog } from "./AgentTaskDialog";
 
 const POLL_MS = 3000;
@@ -103,6 +114,65 @@ function diagnosticSeverity(severity: number | null): Diagnostic["severity"] {
   if (severity === 2) return "warning";
   if (severity === 3) return "info";
   return "hint";
+}
+
+function diagnosticLine(diagnostic: LspDiagnostic): number {
+  return diagnostic.range.start.line + 1;
+}
+
+function diagnosticColumn(diagnostic: LspDiagnostic): number {
+  return diagnostic.range.start.character;
+}
+
+function sortedDiagnostics(items: readonly LspDiagnostic[]): LspDiagnostic[] {
+  return [...items].sort((a, b) => (
+    diagnosticLine(a) - diagnosticLine(b)
+    || diagnosticColumn(a) - diagnosticColumn(b)
+    || (a.severity ?? 4) - (b.severity ?? 4)
+  ));
+}
+
+function diagnosticCounts(items: readonly LspDiagnostic[]) {
+  return items.reduce((acc, item) => {
+    if (item.severity === 1) acc.errors += 1;
+    else if (item.severity === 2) acc.warnings += 1;
+    return acc;
+  }, { errors: 0, warnings: 0 });
+}
+
+function nextDiagnostic(
+  items: readonly LspDiagnostic[],
+  line: number,
+  column: number,
+  dir: 1 | -1,
+): LspDiagnostic | null {
+  const ordered = sortedDiagnostics(items);
+  if (ordered.length === 0) return null;
+
+  if (dir === 1) {
+    return ordered.find((item) => (
+      diagnosticLine(item) > line
+      || (diagnosticLine(item) === line && diagnosticColumn(item) > column)
+    )) ?? ordered[0];
+  }
+
+  for (let i = ordered.length - 1; i >= 0; i -= 1) {
+    const item = ordered[i];
+    if (
+      diagnosticLine(item) < line
+      || (diagnosticLine(item) === line && diagnosticColumn(item) < column)
+    ) return item;
+  }
+  return ordered[ordered.length - 1];
+}
+
+function pathSegments(path: string): string[] {
+  return path.split("/").filter(Boolean);
+}
+
+function breadcrumbSegments(path: string): string[] {
+  const segments = pathSegments(path);
+  return segments.length <= 4 ? segments : [segments[0], "...", ...segments.slice(-3)];
 }
 
 function completionType(kind: number | null): string | undefined {
@@ -134,6 +204,23 @@ function completionType(kind: number | null): string | undefined {
   }
 }
 
+const DEFAULT_SIGNATURE_TRIGGERS = ["(", ","];
+const SIGNATURE_CLOSE_CHARS = [")"];
+
+const setSignatureTooltip = StateEffect.define<Tooltip | null>();
+
+const signatureTooltipField = StateField.define<Tooltip | null>({
+  create: () => null,
+  update(tooltip, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setSignatureTooltip)) return effect.value;
+    }
+    if (tr.docChanged) return null;
+    return tooltip;
+  },
+  provide: (field) => showTooltip.from(field),
+});
+
 // ── Per-file buffer ───────────────────────────────────────────────────────────
 
 const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) => {
@@ -142,6 +229,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
   let applyingExternal = false;
   let saveTimer: number | undefined;
   let lspTimer: number | undefined;
+  let sessionStatus: LspStatus | undefined;
 
   const [saveError, setSaveError] = createSignal<string | null>(null);
   const [conflict, setConflict] = createSignal(false);
@@ -191,20 +279,36 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     return Math.min(line.from + point.character, line.to);
   }
 
+  async function sendLspChange(): Promise<void> {
+    const project = store.currentProject;
+    if (!project || !view) return;
+    try {
+      sessionStatus = await lspChangeDocument(project.path, props.file.path, view.state.doc.toString());
+    } catch { /* ignore */ }
+  }
+
   function scheduleLspSync() {
     if (!view || props.file.binary) return;
     if (lspTimer !== undefined) window.clearTimeout(lspTimer);
     lspTimer = window.setTimeout(() => {
       lspTimer = undefined;
-      const project = store.currentProject;
-      if (!project || !view) return;
-      void lspChangeDocument(project.path, props.file.path, view.state.doc.toString()).catch(() => {});
+      void sendLspChange();
     }, LSP_SYNC_MS);
+  }
+
+  /** Send any pending debounced edit immediately, so the server sees the
+   *  latest text before a completion/hover/definition/signature request. */
+  async function flushLspSync(): Promise<void> {
+    if (lspTimer === undefined) return;
+    window.clearTimeout(lspTimer);
+    lspTimer = undefined;
+    await sendLspChange();
   }
 
   async function gotoDefinition(pos: number) {
     const project = store.currentProject;
     if (!project || !view) return;
+    await flushLspSync();
     const point = lspPosition(pos);
     const def = await lspDefinition(project.path, props.file.path, point.line, point.character).catch(() => null);
     if (!def) return;
@@ -387,6 +491,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
   async function findUsages(pos: number, word: string | null) {
     const project = store.currentProject;
     if (!project || !view) return;
+    await flushLspSync();
     const point = lspPosition(pos);
     let items: UsageItem[] = [];
 
@@ -438,6 +543,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
   async function smartClick(pos: number) {
     const project = store.currentProject;
     if (!project) return;
+    await flushLspSync();
     const point = lspPosition(pos);
     const word = wordAt(pos);
 
@@ -456,26 +562,72 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     await findUsages(pos, word);
   }
 
+  function docNode(documentation: string | null | undefined, detail?: string | null): { dom: HTMLElement } | null {
+    if (!documentation && !detail) return null;
+    const dom = document.createElement("div");
+    dom.style.maxWidth = "420px";
+    dom.style.fontFamily = "var(--font-mono)";
+    dom.style.fontSize = "12px";
+    dom.style.lineHeight = "1.45";
+    dom.style.padding = "4px 2px";
+    if (detail) {
+      const detailEl = document.createElement("div");
+      detailEl.style.color = "var(--fg-muted)";
+      detailEl.style.marginBottom = "4px";
+      detailEl.textContent = detail;
+      dom.appendChild(detailEl);
+    }
+    if (documentation) {
+      const docEl = document.createElement("div");
+      docEl.innerHTML = renderMarkdownLite(documentation);
+      dom.appendChild(docEl);
+    }
+    return dom.childElementCount > 0 ? { dom } : null;
+  }
+
+  function completionInfo(item: LspCompletion) {
+    return async (): Promise<{ dom: HTMLElement } | null> => {
+      const project = store.currentProject;
+      if (!project) return docNode(item.documentation, item.detail);
+      try {
+        const resolved = await lspCompletionResolve(project.path, props.file.path, item.raw);
+        return docNode(resolved.documentation ?? item.documentation, resolved.detail ?? item.detail);
+      } catch {
+        return docNode(item.documentation, item.detail);
+      }
+    };
+  }
+
   async function lspCompletionSource(context: CompletionContext): Promise<CompletionResult | null> {
     const project = store.currentProject;
     if (!project) return null;
     const word = context.matchBefore(/[\w$]*/);
-    if (!context.explicit && (!word || word.from === word.to)) return null;
+    const before = context.state.sliceDoc(Math.max(0, context.pos - 1), context.pos);
+    const triggerChars = sessionStatus?.completion_trigger_characters ?? [];
+    const isTrigger = triggerChars.includes(before);
+    if (!context.explicit && !isTrigger && (!word || word.from === word.to)) return null;
+    await flushLspSync();
     const line = context.state.doc.lineAt(context.pos);
     const items = await lspCompletion(
       project.path,
       props.file.path,
       line.number - 1,
       context.pos - line.from,
+      isTrigger ? before : undefined,
     ).catch(() => []);
     if (items.length === 0) return null;
+    const replaceStart = items.find((item) => item.replace_start?.line === line.number - 1)?.replace_start;
+    const from = replaceStart ? line.from + replaceStart.character : (word?.from ?? context.pos);
     return {
-      from: word?.from ?? context.pos,
-      options: items.map((item) => ({
+      from,
+      validFor: /^[\w$]*$/,
+      options: items.map((item, index) => ({
         label: item.label,
         detail: item.detail ?? undefined,
         apply: item.insert_text || item.label,
         type: completionType(item.kind),
+        boost: -index,
+        info: completionInfo(item),
       })),
     };
   }
@@ -495,6 +647,130 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
         message: item.message,
       };
     });
+  }
+
+  async function jumpToDiagnostic(dir: 1 | -1) {
+    const project = store.currentProject;
+    if (!project || !view) return;
+    await flushLspSync();
+    const cursor = view.state.selection.main.head;
+    const cursorLine = view.state.doc.lineAt(cursor);
+    const items = await lspDiagnostics(project.path, props.file.path).catch(() => []);
+    const target = nextDiagnostic(items, cursorLine.number, cursor - cursorLine.from, dir);
+    if (!target || !view) return;
+    const lineNo = Math.min(diagnosticLine(target), view.state.doc.lines);
+    const line = view.state.doc.line(lineNo);
+    const pos = Math.min(line.from + diagnosticColumn(target), line.to);
+    view.dispatch({
+      selection: { anchor: pos, head: pos },
+      effects: EditorView.scrollIntoView(pos, { y: "center" }),
+    });
+    view.focus();
+  }
+
+  function selectCurrentLine(v: EditorView): boolean {
+    const line = v.state.doc.lineAt(v.state.selection.main.head);
+    v.dispatch({
+      selection: { anchor: line.from, head: line.to },
+      effects: EditorView.scrollIntoView(line.from, { y: "center" }),
+    });
+    return true;
+  }
+
+  function publishSelectionInfo() {
+    if (!view) return;
+    const sel = view.state.selection.main;
+    const cursorLine = view.state.doc.lineAt(sel.head);
+    setEditorSelectionInfo({
+      path: props.file.path,
+      startLine: view.state.doc.lineAt(sel.from).number,
+      endLine: view.state.doc.lineAt(sel.to).number,
+      cursorLine: cursorLine.number,
+      cursorColumn: sel.head - cursorLine.from + 1,
+      hasSelection: sel.from !== sel.to,
+    });
+  }
+
+  function dismissSignatureHelp() {
+    if (!view) return;
+    view.dispatch({ effects: setSignatureTooltip.of(null) });
+  }
+
+  function buildSignatureTooltip(pos: number, help: LspSignatureHelpType): Tooltip {
+    return {
+      pos,
+      above: true,
+      create() {
+        const dom = document.createElement("div");
+        dom.style.maxWidth = "480px";
+        dom.style.fontFamily = "var(--font-mono)";
+        dom.style.fontSize = "12px";
+        dom.style.lineHeight = "1.45";
+        dom.style.padding = "6px 8px";
+
+        const sig = help.signatures[Math.min(help.active_signature, help.signatures.length - 1)];
+        const activeParam = sig.parameters[help.active_parameter];
+        const labelEl = document.createElement("div");
+        const idx = activeParam?.label ? sig.label.indexOf(activeParam.label) : -1;
+        if (idx >= 0 && activeParam) {
+          labelEl.appendChild(document.createTextNode(sig.label.slice(0, idx)));
+          const strong = document.createElement("strong");
+          strong.style.color = "var(--accent)";
+          strong.textContent = activeParam.label;
+          labelEl.appendChild(strong);
+          labelEl.appendChild(document.createTextNode(sig.label.slice(idx + activeParam.label.length)));
+        } else {
+          labelEl.textContent = sig.label;
+        }
+        dom.appendChild(labelEl);
+
+        const doc = activeParam?.documentation ?? sig.documentation;
+        if (doc) {
+          const docEl = document.createElement("div");
+          docEl.style.marginTop = "4px";
+          docEl.style.color = "var(--fg-muted)";
+          docEl.innerHTML = renderMarkdownLite(doc);
+          dom.appendChild(docEl);
+        }
+        return { dom };
+      },
+    };
+  }
+
+  async function requestSignatureHelp(pos: number) {
+    const project = store.currentProject;
+    if (!project || !view) return;
+    await flushLspSync();
+    const point = lspPosition(pos);
+    const help = await lspSignatureHelp(project.path, props.file.path, point.line, point.character).catch(() => null);
+    if (!view) return;
+    if (!help || help.signatures.length === 0) {
+      dismissSignatureHelp();
+      return;
+    }
+    view.dispatch({ effects: setSignatureTooltip.of(buildSignatureTooltip(pos, help)) });
+  }
+
+  function handleSignatureTrigger(u: ViewUpdate) {
+    let insertedChar: string | null = null;
+    let insertPos = 0;
+    u.changes.iterChanges((_fromA, _toA, _fromB, toB, inserted) => {
+      const text = inserted.toString();
+      if (text.length === 1) {
+        insertedChar = text;
+        insertPos = toB;
+      }
+    });
+    if (insertedChar === null) return;
+    if (SIGNATURE_CLOSE_CHARS.includes(insertedChar)) {
+      dismissSignatureHelp();
+      return;
+    }
+    const triggerChars = sessionStatus?.signature_trigger_characters?.length
+      ? sessionStatus.signature_trigger_characters
+      : DEFAULT_SIGNATURE_TRIGGERS;
+    if (!triggerChars.includes(insertedChar)) return;
+    void requestSignatureHelp(insertPos);
   }
 
   async function flushAutoSave() {
@@ -554,7 +830,11 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
           autocompletion({ override: [lspCompletionSource, completeAnyWord] }),
           keymap.of([
             { key: "Mod-s", run: () => { void flushAutoSave(); return true; } },
+            { key: "Mod-l", run: selectCurrentLine },
+            { key: "Alt-ArrowUp", run: () => { void jumpToDiagnostic(-1); return true; } },
+            { key: "Alt-ArrowDown", run: () => { void jumpToDiagnostic(1); return true; } },
             { key: "F12", run: (v) => { void gotoDefinition(v.state.selection.main.head); return true; } },
+            { key: "Escape", run: () => { dismissSignatureHelp(); return false; } },
             ...defaultKeymap,
             ...historyKeymap,
             ...searchKeymap,
@@ -578,9 +858,11 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
           indentOnInput(),
           highlightSelectionMatches({ highlightWordAroundCursor: true, wholeWords: true }),
           linter(lspLintSource, { delay: 900 }),
+          signatureTooltipField,
           hoverTooltip(async (_view, pos) => {
             const project = store.currentProject;
             if (!project) return null;
+            await flushLspSync();
             const point = lspPosition(pos);
             const text = await lspHover(project.path, props.file.path, point.line, point.character).catch(() => null);
             if (!text) return null;
@@ -589,12 +871,11 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
               above: true,
               create() {
                 const dom = document.createElement("div");
-                dom.textContent = text;
                 dom.style.maxWidth = "520px";
-                dom.style.whiteSpace = "pre-wrap";
                 dom.style.fontFamily = "var(--font-mono)";
                 dom.style.fontSize = "12px";
                 dom.style.lineHeight = "1.45";
+                dom.innerHTML = renderMarkdownLite(text);
                 return { dom };
               },
             };
@@ -624,15 +905,10 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
               setEditorDirty(props.file.path, true);
               scheduleAutoSave();
               scheduleLspSync();
+              handleSignatureTrigger(u);
             }
             if (u.selectionSet && view) {
-              const sel = view.state.selection.main;
-              setEditorSelectionInfo({
-                path: props.file.path,
-                startLine: view.state.doc.lineAt(sel.from).number,
-                endLine: view.state.doc.lineAt(sel.to).number,
-                hasSelection: sel.from !== sel.to,
-              });
+              publishSelectionInfo();
             }
           }),
         ],
@@ -649,7 +925,9 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
 
     const project = store.currentProject;
     if (project) {
-      void lspOpenDocument(project.path, props.file.path, props.file.baseline).catch(() => {});
+      void lspOpenDocument(project.path, props.file.path, props.file.baseline)
+        .then((status) => { sessionStatus = status; })
+        .catch(() => {});
     }
 
     registerEditorSaveFlush(props.file.path, flushAutoSave);
@@ -673,6 +951,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     if (props.active && view) {
       view.requestMeasure();
       view.focus();
+      publishSelectionInfo();
       untrack(() => {
         void checkStale();
       });
@@ -784,6 +1063,18 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
             const selectedText = () => selectedOrLineText(ctx);
             return (
               <>
+                <SubMenuItem label="AI Actions" style={menuPad}>
+                  <MenuItem onSelect={() => openAiAction("explain", ctx)} style={menuPad}>Explain with AI</MenuItem>
+                  <MenuItem onSelect={() => openAiAction("refactor", ctx)} style={menuPad}>Refactor with AI</MenuItem>
+                  <MenuItem onSelect={() => openAiAction("fix", ctx)} style={menuPad}>Fix with AI</MenuItem>
+                  <MenuItem onSelect={() => openAiAction("tests", ctx)} style={menuPad}>Generate Tests</MenuItem>
+                  <MenuItem onSelect={() => openAiAction("document", ctx)} style={menuPad}>Document</MenuItem>
+                  <MenuItem onSelect={() => openAiAction("simplify", ctx)} style={menuPad}>Simplify / Optimize</MenuItem>
+                  <MenuItem onSelect={() => openAiAction("review", ctx)} style={menuPad}>Review for Risks</MenuItem>
+                  <MenuItem onSelect={() => openAiAction("custom", ctx)} style={menuPad}>Custom AI Task...</MenuItem>
+                </SubMenuItem>
+                <MenuDivider />
+
                 <Show when={ctx.symbol}>
                   <MenuItem onSelect={() => { closeContextMenu(); void gotoDefinition(ctx.pos); }} style={menuPad}>
                     Go to Definition
@@ -806,29 +1097,23 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
                 <MenuItem onSelect={() => void pasteClipboard()} style={menuPad}>Paste</MenuItem>
                 <MenuItem onSelect={() => runEditorCommand(selectAll)} style={menuPad}>Select All</MenuItem>
                 <MenuDivider />
-                <MenuItem onSelect={() => runEditorCommand(toggleComment)} style={menuPad}>Toggle Comment</MenuItem>
-                <MenuItem onSelect={() => runEditorCommand(indentMore)} style={menuPad}>Indent</MenuItem>
-                <MenuItem onSelect={() => runEditorCommand(indentLess)} style={menuPad}>Outdent</MenuItem>
-                <MenuDivider />
-                <MenuItem onSelect={() => void copyText(props.file.path, "Copied relative path")} style={menuPad}>
-                  Copy Relative Path
-                </MenuItem>
-                <MenuItem onSelect={() => void copyText(`@${ctx.ref}`, "Copied @path reference")} style={menuPad}>
-                  Copy @path Reference
-                </MenuItem>
+                <SubMenuItem label="Format" style={menuPad}>
+                  <MenuItem onSelect={() => runEditorCommand(toggleComment)} style={menuPad}>Toggle Comment</MenuItem>
+                  <MenuItem onSelect={() => runEditorCommand(indentMore)} style={menuPad}>Indent</MenuItem>
+                  <MenuItem onSelect={() => runEditorCommand(indentLess)} style={menuPad}>Outdent</MenuItem>
+                </SubMenuItem>
+                <SubMenuItem label="Copy Reference" style={menuPad}>
+                  <MenuItem onSelect={() => void copyText(props.file.path, "Copied relative path")} style={menuPad}>
+                    Copy Relative Path
+                  </MenuItem>
+                  <MenuItem onSelect={() => void copyText(`@${ctx.ref}`, "Copied @path reference")} style={menuPad}>
+                    Copy @path Reference
+                  </MenuItem>
+                </SubMenuItem>
                 <MenuItem onSelect={() => addContextToPrompt(ctx)} style={menuPad}>Add to Prompt</MenuItem>
                 <MenuItem onSelect={() => { closeContextMenu(); openReview("HEAD", props.file.name, props.file.path); }} style={menuPad}>
                   Review File Diff
                 </MenuItem>
-                <MenuDivider />
-                <MenuItem onSelect={() => openAiAction("explain", ctx)} style={menuPad}>Explain with AI</MenuItem>
-                <MenuItem onSelect={() => openAiAction("refactor", ctx)} style={menuPad}>Refactor with AI</MenuItem>
-                <MenuItem onSelect={() => openAiAction("fix", ctx)} style={menuPad}>Fix with AI</MenuItem>
-                <MenuItem onSelect={() => openAiAction("tests", ctx)} style={menuPad}>Generate Tests</MenuItem>
-                <MenuItem onSelect={() => openAiAction("document", ctx)} style={menuPad}>Document</MenuItem>
-                <MenuItem onSelect={() => openAiAction("simplify", ctx)} style={menuPad}>Simplify / Optimize</MenuItem>
-                <MenuItem onSelect={() => openAiAction("review", ctx)} style={menuPad}>Review for Risks</MenuItem>
-                <MenuItem onSelect={() => openAiAction("custom", ctx)} style={menuPad}>Custom AI Task...</MenuItem>
               </>
             );
           }}
@@ -889,6 +1174,86 @@ const EditorPane: Component = () => {
   );
   const previewAvailable = () => (previewInfo()?.kind ?? "none") !== "none";
   const previewVisible = () => previewOpen() && previewAvailable() && !!activeFile();
+
+  const [serverStatus, { refetch: refetchServerStatus }] = createResource(
+    () => {
+      const p = store.currentProject?.path;
+      const f = store.activeEditorPath;
+      return p && f ? { p, f } : null;
+    },
+    ({ p, f }) => lspStatus(p, f).catch(() => null),
+  );
+  const missingServerToolId = () => {
+    const status = serverStatus();
+    return status && !status.available && status.tool_id ? status.tool_id : null;
+  };
+  const [installingServer, setInstallingServer] = createSignal(false);
+  async function installLanguageServer() {
+    const toolId = missingServerToolId();
+    const project = store.currentProject;
+    if (!toolId || !project) return;
+    setInstallingServer(true);
+    try {
+      await hiddenInstallTool(toolId, project.path);
+    } finally {
+      setInstallingServer(false);
+      refetchServerStatus();
+    }
+  }
+
+  const [diagnostics, { refetch: refetchDiagnostics }] = createResource(
+    () => {
+      const p = store.currentProject?.path;
+      const f = store.activeEditorPath;
+      return p && f ? { p, f, tick: savedTick() } : null;
+    },
+    ({ p, f }) => lspDiagnostics(p, f).catch(() => []),
+  );
+
+  let diagnosticsRefreshTimer: number | undefined;
+  createEffect(() => {
+    store.activeEditorPath;
+    if (diagnosticsRefreshTimer !== undefined) window.clearTimeout(diagnosticsRefreshTimer);
+    diagnosticsRefreshTimer = window.setTimeout(() => {
+      diagnosticsRefreshTimer = undefined;
+      refetchDiagnostics();
+    }, 1200);
+  });
+  onCleanup(() => { if (diagnosticsRefreshTimer !== undefined) window.clearTimeout(diagnosticsRefreshTimer); });
+
+  const activeSelectionInfo = () => {
+    const info = store.editorSelectionInfo;
+    return info && info.path === store.activeEditorPath ? info : null;
+  };
+  const activeDiagnostics = () => diagnostics() ?? [];
+  const activeDiagnosticCounts = () => diagnosticCounts(activeDiagnostics());
+
+  function jumpHeaderDiagnostic(dir: 1 | -1) {
+    const file = activeFile();
+    if (!file) return;
+    const info = activeSelectionInfo();
+    const target = nextDiagnostic(
+      activeDiagnostics(),
+      info?.cursorLine ?? 1,
+      Math.max(0, (info?.cursorColumn ?? 1) - 1),
+      dir,
+    );
+    if (!target) return;
+    setPendingLineFocus({
+      path: file.path,
+      line: diagnosticLine(target),
+      character: diagnosticColumn(target),
+    });
+  }
+
+  async function copyActiveFileRef(path: string) {
+    try {
+      await navigator.clipboard.writeText(`@${path}`);
+      toast("Copied @path reference", "success");
+    } catch {
+      toast("Failed to copy", "error");
+    }
+  }
 
   // Resize handle drag (mirrors TerminalPanel's pointer-capture pattern).
   const [dragging, setDragging] = createSignal(false);
@@ -1015,19 +1380,154 @@ const EditorPane: Component = () => {
               display: "flex", "align-items": "center", gap: "10px",
               padding: "0 16px",
               "border-bottom": "1px solid var(--border-muted)",
+              "min-width": 0,
             }}>
-              <span style={{
-                "font-family": "'JetBrains Mono', monospace",
-                "font-size": "11.5px", color: "var(--fg-muted)",
-                overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
-              }}>
-                {file().path}
-              </span>
+              <div
+                title={file().path}
+                style={{
+                  display: "flex",
+                  "align-items": "center",
+                  gap: "5px",
+                  flex: "1 1 auto",
+                  "min-width": 0,
+                  overflow: "hidden",
+                  "font-family": "var(--font-mono)",
+                  "font-size": "11.5px",
+                  color: "var(--fg-muted)",
+                }}
+              >
+                <For each={breadcrumbSegments(file().path)}>
+                  {(segment, index) => {
+                    const last = () => index() === breadcrumbSegments(file().path).length - 1;
+                    return (
+                      <>
+                        <span style={{
+                          overflow: "hidden",
+                          "text-overflow": "ellipsis",
+                          "white-space": "nowrap",
+                          color: last() ? "var(--fg-body)" : segment === "..." ? "var(--fg-faint)" : "var(--fg-muted)",
+                          "font-weight": last() ? "500" : "400",
+                        }}>
+                          {segment}
+                        </span>
+                        <Show when={!last()}>
+                          <span style={{ color: "var(--fg-faint)", flex: "0 0 auto" }}>/</span>
+                        </Show>
+                      </>
+                    );
+                  }}
+                </For>
+              </div>
+              <button
+                class="icon-btn press"
+                onclick={() => void copyActiveFileRef(file().path)}
+                title="Copy @path reference"
+                style={{
+                  width: "24px", height: "24px",
+                  display: "flex", "align-items": "center", "justify-content": "center",
+                  color: "var(--fg-subtle)",
+                  "border-radius": "6px",
+                  flex: "0 0 auto",
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                </svg>
+              </button>
               <Show when={file().dirty}>
                 <span style={{ "font-size": "11px", color: "var(--status-mod)" }}>modified</span>
               </Show>
 
-              <div style={{ "margin-left": "auto", display: "flex", gap: "8px" }}>
+              <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "8px", flex: "0 0 auto" }}>
+                <Show when={activeSelectionInfo()}>
+                  {(info) => (
+                    <span
+                      title={info().hasSelection ? `Selection ${info().startLine}-${info().endLine}` : "Cursor position"}
+                      style={{
+                        padding: "3px 8px",
+                        "border-radius": "6px",
+                        border: "1px solid var(--border-muted)",
+                        color: "var(--fg-muted)",
+                        background: "var(--surface-2)",
+                        "font-family": "var(--font-mono)",
+                        "font-size": "11px",
+                        "white-space": "nowrap",
+                      }}
+                    >
+                      Ln {info().cursorLine}, Col {info().cursorColumn}
+                    </span>
+                  )}
+                </Show>
+                <Show when={activeDiagnostics().length > 0}>
+                  <div style={{ display: "flex", "align-items": "center", gap: "4px" }}>
+                    <span
+                      title="Diagnostics in this file"
+                      style={{
+                        padding: "3px 8px",
+                        "border-radius": "6px",
+                        border: "1px solid var(--border-muted)",
+                        background: "var(--surface-2)",
+                        "font-family": "var(--font-mono)",
+                        "font-size": "11px",
+                        color: activeDiagnosticCounts().errors > 0 ? "var(--status-del)" : activeDiagnosticCounts().warnings > 0 ? "var(--status-mod)" : "var(--fg-muted)",
+                        "white-space": "nowrap",
+                      }}
+                    >
+                      {activeDiagnosticCounts().errors > 0 ? `${activeDiagnosticCounts().errors} err` : ""}
+                      {activeDiagnosticCounts().errors > 0 && activeDiagnosticCounts().warnings > 0 ? " / " : ""}
+                      {activeDiagnosticCounts().warnings > 0 ? `${activeDiagnosticCounts().warnings} warn` : activeDiagnosticCounts().errors === 0 ? `${activeDiagnostics().length} diag` : ""}
+                    </span>
+                    <button
+                      class="icon-btn press"
+                      onclick={() => jumpHeaderDiagnostic(-1)}
+                      title="Previous diagnostic (Alt+Up)"
+                      style={{
+                        width: "24px", height: "24px",
+                        display: "flex", "align-items": "center", "justify-content": "center",
+                        color: "var(--fg-subtle)", "border-radius": "6px",
+                      }}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M18 15l-6-6-6 6" />
+                      </svg>
+                    </button>
+                    <button
+                      class="icon-btn press"
+                      onclick={() => jumpHeaderDiagnostic(1)}
+                      title="Next diagnostic (Alt+Down)"
+                      style={{
+                        width: "24px", height: "24px",
+                        display: "flex", "align-items": "center", "justify-content": "center",
+                        color: "var(--fg-subtle)", "border-radius": "6px",
+                      }}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M6 9l6 6 6-6" />
+                      </svg>
+                    </button>
+                  </div>
+                </Show>
+                <Show when={missingServerToolId()}>
+                  {(toolId) => (
+                    <button
+                      onclick={() => void installLanguageServer()}
+                      disabled={installingServer()}
+                      title={serverStatus()?.message ?? "Language server not installed"}
+                      style={{
+                        padding: "4px 10px", "border-radius": "7px",
+                        border: "1px solid var(--status-mod)",
+                        color: "var(--status-mod)",
+                        background: "transparent",
+                        "font-size": "11.5px",
+                        cursor: installingServer() ? "default" : "pointer",
+                        opacity: installingServer() ? 0.6 : 1,
+                      }}
+                    >
+                      {installingServer() ? "Installing…" : `${serverStatus()?.server ?? toolId()} not installed`}
+                    </button>
+                  )}
+                </Show>
                 <Show when={store.editorSelectionInfo?.hasSelection && store.editorSelectionInfo?.path === file().path ? store.editorSelectionInfo : undefined}>
                   {(sel) => {
                     const label = () => sel().startLine === sel().endLine
