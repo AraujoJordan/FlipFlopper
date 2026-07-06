@@ -116,7 +116,7 @@ const TerminalPane: Component<Props> = (props) => {
     unlisten = await onPtyOutput(props.sessionId, (data) => {
       terminal.write(data);
       sniffAgentMode(props.sessionId, data);
-      
+
       resetIdleTimer();
 
       if (/(?:\? \(y\/n\)|\? \[y\/N\]|Password:)\s*$/i.test(data)) {
