@@ -53,6 +53,9 @@ const categoryLabel = (category: string) => {
     case "typecheck": return "Typecheck";
     case "format": return "Format check";
     case "build": return "Build check";
+    case "database": return "Database";
+    case "generate": return "Generate";
+    case "services": return "Services";
     default: return "Checks";
   }
 };

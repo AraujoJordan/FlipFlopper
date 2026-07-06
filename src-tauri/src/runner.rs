@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::env::resolve_executable;
+use crate::preview;
 use crate::tools;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,11 +36,55 @@ pub struct ValidationTarget {
     pub category: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AndroidDevice {
+    pub serial: String,
+    pub status: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AndroidEnvironment {
+    pub adb_path: Option<String>,
+    pub emulator_path: Option<String>,
+    pub scrcpy_path: Option<String>,
+    pub devices: Vec<AndroidDevice>,
+    pub avds: Vec<String>,
+    pub selected_device: Option<String>,
+    pub selected_avd: Option<String>,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IosDevice {
+    pub name: String,
+    pub udid: String,
+    pub state: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IosEnvironment {
+    pub xcrun_path: Option<String>,
+    pub physical_devices: Vec<IosDevice>,
+    pub simulators: Vec<IosDevice>,
+    pub selected_device: Option<String>,
+    pub selected_simulator: Option<String>,
+    pub issues: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct ValidationCandidate {
     tier: u8,
     order: usize,
     target: ValidationTarget,
+}
+
+#[derive(Debug, Clone)]
+struct ComposeDesktopModule {
+    name: String,
+    jvm_target: String,
+    hot_reload: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +98,7 @@ struct PackageJson {
 #[derive(Debug, Clone)]
 pub(crate) struct JsPackageManager {
     pub(crate) pm_run: String,
+    pub(crate) pm_exec: String,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +199,10 @@ impl ProjectFacts {
         self.package
             .as_ref()
             .and_then(|pkg| pkg.scripts.get(name).map(String::as_str))
+    }
+
+    pub(crate) fn has_any_pkg_script(&self, names: &[&str]) -> bool {
+        names.iter().any(|name| self.pkg_script(name).is_some())
     }
 
     pub(crate) fn preferred_pkg_script(&self) -> Option<&'static str> {
@@ -339,19 +389,61 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
         );
     }
 
-    if let Some(script) = facts.preferred_pkg_script() {
-        let label = format!("{} {}", js_framework_name(&facts), script);
+    for script in web_run_scripts(&facts) {
+        let label = web_run_label(&facts, script);
         let command = format!("{} {script}", js.pm_run);
         push_target(
             &mut candidates,
             &mut order,
-            30,
+            web_run_tier(script),
             &format!("npm-script:{script}"),
             &label,
             &command,
             "node",
             None,
         );
+    }
+    for script in backend_run_scripts(&facts) {
+        let label = backend_run_label(script);
+        let command = format!("{} {script}", js.pm_run);
+        push_target(
+            &mut candidates,
+            &mut order,
+            backend_run_tier(script),
+            &format!("npm-script:{script}"),
+            &label,
+            &command,
+            "node",
+            None,
+        );
+    }
+    if !facts.has_any_pkg_script(&["dev", "start", "serve"]) {
+        if let Some((label, command)) = web_framework_dev_command(&facts) {
+            push_target(
+                &mut candidates,
+                &mut order,
+                32,
+                "web-framework-dev",
+                &label,
+                &command,
+                "node",
+                None,
+            );
+        }
+    }
+    if !facts.has_any_pkg_script(&node_backend_run_script_names()) {
+        if let Some((label, command)) = node_backend_dev_command(&facts) {
+            push_target(
+                &mut candidates,
+                &mut order,
+                31,
+                "node-backend-dev",
+                &label,
+                &command,
+                "node",
+                None,
+            );
+        }
     }
 
     if facts.exists("deno.json") || facts.exists("deno.jsonc") {
@@ -545,15 +637,52 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
         );
     }
 
-    for module_name in compose_desktop_modules(&facts) {
+    for module in compose_desktop_modules(&facts) {
         let gradle = facts.gradle_command().unwrap_or("./gradlew");
-        let command = format!("{gradle} :{module_name}:run");
+        if module.hot_reload {
+            let suffix = compose_hot_reload_suffix(&module.jvm_target);
+            let command = format!("{gradle} :{}:hotRun{suffix} --auto", module.name);
+            push_target(
+                &mut candidates,
+                &mut order,
+                18,
+                &format!("compose-hot-run:{}", module.name),
+                &format!("Compose Hot Reload ({})", module.name),
+                &command,
+                "desktop",
+                None,
+            );
+            let command = format!("{gradle} :{}:hotMcpServer{suffix}", module.name);
+            push_target(
+                &mut candidates,
+                &mut order,
+                19,
+                &format!("compose-hot-mcp:{}", module.name),
+                &format!("Compose Hot Reload MCP ({})", module.name),
+                &command,
+                "desktop",
+                None,
+            );
+        }
+
+        let command = format!("{gradle} :{}:run", module.name);
         push_target(
             &mut candidates,
             &mut order,
             30,
-            &format!("compose-desktop-run:{module_name}"),
-            &format!("Compose Desktop ({module_name})"),
+            &format!("compose-desktop-run:{}", module.name),
+            &format!("Compose Desktop ({})", module.name),
+            &command,
+            "desktop",
+            None,
+        );
+        let command = format!("{gradle} :{}:runDistributable", module.name);
+        push_target(
+            &mut candidates,
+            &mut order,
+            35,
+            &format!("compose-desktop-distributable:{}", module.name),
+            &format!("Compose distributable ({})", module.name),
             &command,
             "desktop",
             None,
@@ -692,7 +821,8 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
     }
 
     if facts.has_python_dep("fastapi") {
-        let command = format!("{}uvicorn main:app --reload", facts.command_prefix());
+        let app = python_asgi_app(&facts).unwrap_or_else(|| "main:app".to_string());
+        let command = format!("{}uvicorn {app} --reload", facts.command_prefix());
         push_target(
             &mut candidates,
             &mut order,
@@ -897,18 +1027,26 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
         );
     }
 
-    if (facts.exists("docker-compose.yml")
-        || facts.exists("compose.yaml")
-        || facts.exists("compose.yml"))
-        && resolve_executable("docker").is_some()
-    {
+    if let Some(command) = docker_compose_command(&facts, "up --build") {
         push_target(
             &mut candidates,
             &mut order,
             35,
             "docker-compose-up",
             "Docker Compose",
-            "docker compose up --build",
+            &command,
+            "docker",
+            None,
+        );
+    }
+    if let Some(command) = docker_compose_command(&facts, "up -d --build") {
+        push_target(
+            &mut candidates,
+            &mut order,
+            36,
+            "docker-compose-up-detached",
+            "Docker Compose detached",
+            &command,
             "docker",
             None,
         );
@@ -974,6 +1112,146 @@ pub fn resolve_run_command(
     Ok(target)
 }
 
+pub fn detect_android_environment(project_path: &str) -> Result<AndroidEnvironment, String> {
+    let root = PathBuf::from(project_path);
+    if !root.is_dir() {
+        return Err(format!("Project path is not a directory: {project_path}"));
+    }
+
+    let adb = find_android_tool("adb", "platform-tools/adb");
+    let emulator = find_android_tool("emulator", "emulator/emulator");
+    let scrcpy = resolve_executable("scrcpy");
+    let devices = adb.as_deref().map(list_android_devices).unwrap_or_default();
+    let avds = emulator
+        .as_deref()
+        .map(list_android_avds)
+        .unwrap_or_default();
+    let selected_device = preferred_android_device(&devices).map(|device| device.serial.clone());
+    let selected_avd = avds.first().cloned();
+
+    let mut issues = Vec::new();
+    if adb.is_none() {
+        issues.push(
+            "Android Debug Bridge (adb) was not found. Install Android platform-tools or set ANDROID_HOME."
+                .to_string(),
+        );
+    }
+    if selected_device.is_none() {
+        if tools::current_os() == "windows" {
+            issues.push(
+                "No Android device/emulator is online. Start one manually before running."
+                    .to_string(),
+            );
+        } else if emulator.is_none() {
+            issues.push(
+                "Android emulator binary was not found. Install Android Studio emulator tools or set ANDROID_HOME."
+                    .to_string(),
+            );
+        } else if avds.is_empty() {
+            issues.push(
+                "No Android virtual devices found. Create an AVD in Android Studio, then press Run again."
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(AndroidEnvironment {
+        adb_path: adb.map(|path| path.to_string_lossy().to_string()),
+        emulator_path: emulator.map(|path| path.to_string_lossy().to_string()),
+        scrcpy_path: scrcpy.map(|path| path.to_string_lossy().to_string()),
+        devices,
+        avds,
+        selected_device,
+        selected_avd,
+        issues,
+    })
+}
+
+pub fn resolve_android_scrcpy_command(
+    project_path: &str,
+    serial: Option<&str>,
+) -> Result<String, String> {
+    let env = detect_android_environment(project_path)?;
+    let scrcpy = env.scrcpy_path.as_deref().ok_or_else(|| {
+        "scrcpy was not found. Install it from the tool catalog, then try again.".to_string()
+    })?;
+    let selected = serial
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or(env.selected_device)
+        .ok_or_else(|| "No online Android device/emulator found for scrcpy.".to_string())?;
+    Ok(format!(
+        "{} --serial {}",
+        shell_quote(scrcpy),
+        shell_quote(&selected)
+    ))
+}
+
+pub fn detect_ios_environment(project_path: &str) -> Result<IosEnvironment, String> {
+    let root = PathBuf::from(project_path);
+    if !root.is_dir() {
+        return Err(format!("Project path is not a directory: {project_path}"));
+    }
+
+    let mut issues = Vec::new();
+    if tools::current_os() != "macos" {
+        issues.push("iOS simulator runs are only available on macOS.".to_string());
+        return Ok(IosEnvironment {
+            xcrun_path: None,
+            physical_devices: Vec::new(),
+            simulators: Vec::new(),
+            selected_device: None,
+            selected_simulator: None,
+            issues,
+        });
+    }
+
+    let xcrun = resolve_executable("xcrun");
+    if xcrun.is_none() {
+        issues.push(
+            "xcrun was not found. Install Xcode command line tools, then press Run again."
+                .to_string(),
+        );
+    }
+    let physical_devices = list_ios_physical_devices();
+    let simulators = xcrun
+        .as_deref()
+        .map(list_ios_simulators)
+        .unwrap_or_default();
+    let selected_device = physical_devices.first().map(|device| device.udid.clone());
+    let selected_simulator = preferred_ios_simulator(&simulators).map(|device| device.udid.clone());
+
+    if selected_device.is_none() && selected_simulator.is_none() && xcrun.is_some() {
+        issues.push(
+            "No available iPhone simulators found. Install a simulator in Xcode, then press Run again."
+                .to_string(),
+        );
+    }
+
+    Ok(IosEnvironment {
+        xcrun_path: xcrun.map(|path| path.to_string_lossy().to_string()),
+        physical_devices,
+        simulators,
+        selected_device,
+        selected_simulator,
+        issues,
+    })
+}
+
+pub fn resolve_ios_simulator_command(project_path: &str, udid: Option<&str>) -> Result<String, String> {
+    let env = detect_ios_environment(project_path)?;
+    let selected = udid
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or(env.selected_simulator)
+        .ok_or_else(|| "No available iOS simulator found.".to_string())?;
+    Ok(format!(
+        "xcrun simctl boot {} 2>/dev/null; open -a Simulator; xcrun simctl bootstatus {} -b",
+        shell_quote(&selected),
+        shell_quote(&selected),
+    ))
+}
+
 pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTarget>, String> {
     let root = PathBuf::from(project_path);
     if !root.is_dir() {
@@ -990,6 +1268,8 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
         "test",
         "test:unit",
         "unit",
+        "test:e2e",
+        "e2e",
         "lint",
         "typecheck",
         "type-check",
@@ -1011,6 +1291,253 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
                 category,
             );
         }
+    }
+    for script in backend_validation_scripts(&facts) {
+        let category = backend_validation_category(script);
+        let label = backend_validation_label(script);
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            backend_validation_tier(script),
+            &format!("npm-script:{script}"),
+            &label,
+            &format!("{} {script}", js.pm_run),
+            "node",
+            category,
+        );
+    }
+
+    if facts.has_pkg_dep("vitest") && !facts.has_any_pkg_script(&["test", "test:unit", "unit"]) {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            18,
+            "web-vitest",
+            "Vitest",
+            &format!("{} vitest run", js.pm_exec),
+            "node",
+            "test",
+        );
+    } else if facts.has_pkg_dep("jest") && !facts.has_any_pkg_script(&["test", "test:unit", "unit"]) {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            18,
+            "web-jest",
+            "Jest",
+            &format!("{} jest", js.pm_exec),
+            "node",
+            "test",
+        );
+    }
+    if facts.has_pkg_dep("@playwright/test") && !facts.has_any_pkg_script(&["test:e2e", "e2e"]) {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            19,
+            "web-playwright",
+            "Playwright",
+            &format!("{} playwright test", js.pm_exec),
+            "node",
+            "test",
+        );
+    } else if facts.has_pkg_dep("cypress") && !facts.has_any_pkg_script(&["test:e2e", "e2e"]) {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            19,
+            "web-cypress",
+            "Cypress",
+            &format!("{} cypress run", js.pm_exec),
+            "node",
+            "test",
+        );
+    }
+    if facts.has_pkg_dep("eslint") && !facts.has_any_pkg_script(&["lint"]) {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            25,
+            "web-eslint",
+            "ESLint",
+            &format!("{} eslint .", js.pm_exec),
+            "node",
+            "lint",
+        );
+    }
+    if facts.has_pkg_dep("typescript") && !facts.has_any_pkg_script(&["typecheck", "type-check"]) {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            26,
+            "web-tsc",
+            "TypeScript",
+            &format!("{} tsc --noEmit", js.pm_exec),
+            "node",
+            "typecheck",
+        );
+    }
+    if facts.has_pkg_dep("prettier") && !facts.has_any_pkg_script(&["format", "fmt"]) {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            30,
+            "web-prettier",
+            "Prettier check",
+            &format!("{} prettier --check .", js.pm_exec),
+            "node",
+            "format",
+        );
+    }
+    if !facts.has_any_pkg_script(&["build"]) {
+        if let Some((label, command)) = web_framework_build_command(&facts) {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                24,
+                "web-framework-build",
+                &label,
+                &command,
+                "node",
+                "build",
+            );
+        }
+    }
+    if facts.has_pkg_dep("@astrojs/check") && !facts.has_any_pkg_script(&["check", "typecheck", "type-check"]) {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            26,
+            "web-astro-check",
+            "Astro check",
+            &format!("{} astro check", js.pm_exec),
+            "node",
+            "typecheck",
+        );
+    }
+    if facts.has_pkg_dep("prisma")
+        || facts.has_pkg_dep("@prisma/client")
+        || facts.exists("prisma/schema.prisma")
+    {
+        if !facts.has_any_pkg_script(&["prisma:generate", "db:generate", "generate"]) {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                28,
+                "prisma-generate",
+                "Prisma generate",
+                &format!("{} prisma generate", js.pm_exec),
+                "node",
+                "generate",
+            );
+        }
+        if !facts.has_any_pkg_script(&["db:migrate", "migrate", "prisma:migrate"]) {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                32,
+                "prisma-migrate-dev",
+                "Prisma migrate dev",
+                &format!("{} prisma migrate dev", js.pm_exec),
+                "node",
+                "database",
+            );
+        }
+    }
+    if facts.has_pkg_dep("drizzle-kit") || drizzle_config_exists(&facts) {
+        if !facts.has_any_pkg_script(&["drizzle:generate", "db:generate", "generate"]) {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                28,
+                "drizzle-generate",
+                "Drizzle generate",
+                &format!("{} drizzle-kit generate", js.pm_exec),
+                "node",
+                "generate",
+            );
+        }
+        if !facts.has_any_pkg_script(&["drizzle:migrate", "db:migrate", "migrate"]) {
+            let command = if facts.is_dir("drizzle") || facts.is_dir("migrations") {
+                format!("{} drizzle-kit migrate", js.pm_exec)
+            } else {
+                format!("{} drizzle-kit push", js.pm_exec)
+            };
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                32,
+                "drizzle-db-sync",
+                "Drizzle database sync",
+                &command,
+                "node",
+                "database",
+            );
+        }
+    }
+    if facts.has_pkg_dep("typeorm") && !facts.has_any_pkg_script(&["db:migrate", "migrate"]) {
+        let data_source = first_existing_rel(
+            &facts,
+            &["src/data-source.ts", "src/data-source.js", "data-source.ts", "data-source.js"],
+        );
+        let command = if let Some(data_source) = data_source {
+            format!("{} typeorm migration:run -d {data_source}", js.pm_exec)
+        } else {
+            format!("{} typeorm migration:run", js.pm_exec)
+        };
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            33,
+            "typeorm-migrate",
+            "TypeORM migrations",
+            &command,
+            "node",
+            "database",
+        );
+    }
+    if (facts.has_pkg_dep("sequelize") || facts.has_pkg_dep("sequelize-cli"))
+        && !facts.has_any_pkg_script(&["db:migrate", "migrate"])
+    {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            33,
+            "sequelize-migrate",
+            "Sequelize migrations",
+            &format!("{} sequelize db:migrate", js.pm_exec),
+            "node",
+            "database",
+        );
+    }
+    if facts.has_pkg_dep("knex") && !facts.has_any_pkg_script(&["db:migrate", "migrate"]) {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            33,
+            "knex-migrate",
+            "Knex migrations",
+            &format!("{} knex migrate:latest", js.pm_exec),
+            "node",
+            "database",
+        );
     }
 
     for task in ["test", "lint", "check", "fmt", "format"] {
@@ -1196,6 +1723,44 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
                 "typecheck",
             );
         }
+        if facts.exists("alembic.ini") || facts.has_python_dep("alembic") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                32,
+                "alembic-upgrade",
+                "Alembic upgrade",
+                &format!("{}alembic upgrade head", facts.command_prefix()),
+                "python",
+                "database",
+            );
+        }
+    }
+
+    if facts.exists("manage.py") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            24,
+            "django-check",
+            "Django check",
+            &format!("{} manage.py check", facts.python_command()),
+            "python",
+            "check",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            32,
+            "django-migrate",
+            "Django migrate",
+            &format!("{} manage.py migrate", facts.python_command()),
+            "python",
+            "database",
+        );
     }
 
     if facts.exists("pubspec.yaml") && facts.file_contains("pubspec.yaml", "flutter:") {
@@ -1282,6 +1847,100 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
                 "lint",
             );
         }
+        for (module_name, module_dir) in android_app_modules(&facts) {
+            let task_prefix = android_task_prefix(&module_name);
+            let suffix = android_target_suffix(&module_name);
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                24,
+                &format!("android-assemble-debug{suffix}"),
+                &android_target_label("Android assembleDebug", &module_name),
+                &format!("{gradle} {task_prefix}assembleDebug"),
+                "android",
+                "build",
+            );
+            if let Some(setup) = android_module_screenshot_setup(&facts, &module_dir) {
+                if let Some((_, verify_task)) = preview::android_screenshot_task_names(&setup) {
+                    push_validation_target(
+                        &mut candidates,
+                        &mut seen,
+                        &mut order,
+                        24,
+                        &format!("android-screenshot-verify{suffix}"),
+                        &android_screenshot_verify_label(&setup, &module_name),
+                        &format!("{gradle} {task_prefix}{verify_task}"),
+                        "android",
+                        "test",
+                    );
+                }
+            }
+        }
+        for (module_name, module_dir) in kmp_modules(&facts) {
+            let task_prefix = android_task_prefix(&module_name);
+            let suffix = android_target_suffix(&module_name);
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                22,
+                &format!("kmp-all-tests{suffix}"),
+                &android_target_label("KMP all tests", &module_name),
+                &format!("{gradle} {task_prefix}allTests"),
+                "kmp",
+                "test",
+            );
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                26,
+                &format!("kmp-check{suffix}"),
+                &android_target_label("KMP check", &module_name),
+                &format!("{gradle} {task_prefix}check"),
+                "kmp",
+                "check",
+            );
+            let jvm_target = kotlin_jvm_target_name(&facts.module_gradle_text(&module_dir));
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                23,
+                &format!("kmp-jvm-test{suffix}"),
+                &android_target_label("KMP JVM tests", &module_name),
+                &format!("{gradle} {task_prefix}{}Test", jvm_target),
+                "kmp",
+                "test",
+            );
+        }
+        for module in compose_desktop_modules(&facts) {
+            let task_prefix = android_task_prefix(&module.name);
+            let suffix = android_target_suffix(&module.name);
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                27,
+                &format!("compose-package-current-os{suffix}"),
+                &android_target_label("Compose package current OS", &module.name),
+                &format!("{gradle} {task_prefix}packageDistributionForCurrentOS"),
+                "desktop",
+                "build",
+            );
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                28,
+                &format!("compose-suggest-modules{suffix}"),
+                &android_target_label("Compose suggest modules", &module.name),
+                &format!("{gradle} {task_prefix}suggestModules"),
+                "desktop",
+                "check",
+            );
+        }
     }
 
     if facts.exists("pom.xml") {
@@ -1308,6 +1967,32 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
             "jvm",
             "check",
         );
+        if facts.file_contains("pom.xml", "flyway") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                34,
+                "maven-flyway-migrate",
+                "Flyway migrate",
+                &format!("{mvn} flyway:migrate"),
+                "jvm",
+                "database",
+            );
+        }
+        if facts.file_contains("pom.xml", "liquibase") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                34,
+                "maven-liquibase-update",
+                "Liquibase update",
+                &format!("{mvn} liquibase:update"),
+                "jvm",
+                "database",
+            );
+        }
     }
 
     if facts.exists("build.sbt") {
@@ -1322,6 +2007,52 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
             "jvm",
             "test",
         );
+    }
+
+    if tools::current_os() == "macos" {
+        if let Some(xcode_file) = first_xcode_bundle(&facts) {
+            if let Some((xcode_flag, file_name, scheme)) = xcode_project_parts(&facts, &xcode_file)
+            {
+                let base = format!(
+                    "xcodebuild {xcode_flag} {} -scheme {} -destination 'platform=iOS Simulator'",
+                    shell_quote(&file_name),
+                    shell_quote(&scheme),
+                );
+                push_validation_target(
+                    &mut candidates,
+                    &mut seen,
+                    &mut order,
+                    20,
+                    &format!("xcode-test:{scheme}"),
+                    "Xcode test",
+                    &format!("{base} test"),
+                    "ios",
+                    "test",
+                );
+                push_validation_target(
+                    &mut candidates,
+                    &mut seen,
+                    &mut order,
+                    24,
+                    &format!("xcode-build-check:{scheme}"),
+                    "Xcode build",
+                    &format!("{base} build"),
+                    "ios",
+                    "build",
+                );
+                push_validation_target(
+                    &mut candidates,
+                    &mut seen,
+                    &mut order,
+                    28,
+                    &format!("xcode-analyze:{scheme}"),
+                    "Xcode analyze",
+                    &format!("{base} analyze"),
+                    "ios",
+                    "lint",
+                );
+            }
+        }
     }
 
     if facts.exists("Package.swift") {
@@ -1361,6 +2092,19 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
             "elixir",
             "format",
         );
+        if facts.file_contains("mix.exs", "ecto") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                32,
+                "mix-ecto-migrate",
+                "Ecto migrate",
+                "mix ecto.migrate",
+                "elixir",
+                "database",
+            );
+        }
     }
 
     if facts.exists("artisan") {
@@ -1374,6 +2118,17 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
             "php artisan test",
             "php",
             "test",
+        );
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            32,
+            "laravel-migrate",
+            "Laravel migrate",
+            "php artisan migrate",
+            "php",
+            "database",
         );
     } else if facts.exists("vendor/bin/phpunit") || facts.exists("phpunit.xml") {
         push_validation_target(
@@ -1394,6 +2149,19 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
     }
 
     if facts.exists("bin/rails") || facts.exists("Gemfile") {
+        if facts.exists("bin/rails") {
+            push_validation_target(
+                &mut candidates,
+                &mut seen,
+                &mut order,
+                32,
+                "rails-db-prepare",
+                "Rails db prepare",
+                "bin/rails db:prepare",
+                "ruby",
+                "database",
+            );
+        }
         if facts.exists("spec") {
             push_validation_target(
                 &mut candidates,
@@ -1439,6 +2207,38 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
             "dotnet test",
             "dotnet",
             "test",
+        );
+    }
+
+    if let Some(command) = docker_compose_command(&facts, "config --quiet") {
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            34,
+            "docker-compose-config",
+            "Docker Compose config",
+            &command,
+            "docker",
+            "services",
+        );
+    }
+    if facts.exists("Dockerfile") || facts.exists("Containerfile") {
+        let file = if facts.exists("Dockerfile") {
+            "Dockerfile"
+        } else {
+            "Containerfile"
+        };
+        push_validation_target(
+            &mut candidates,
+            &mut seen,
+            &mut order,
+            35,
+            "docker-build",
+            "Docker build",
+            &format!("docker build -f {file} -t {} .", docker_image_name(&facts)),
+            "docker",
+            "build",
         );
     }
 
@@ -1682,7 +2482,14 @@ fn js_pm(pm: &str) -> JsPackageManager {
         "bun" => "bun run".to_string(),
         other => format!("{other} run"),
     };
-    JsPackageManager { pm_run }
+    let pm_exec = match pm {
+        "npm" => "npx".to_string(),
+        "pnpm" => "pnpm exec".to_string(),
+        "yarn" => "yarn".to_string(),
+        "bun" => "bunx".to_string(),
+        other => format!("{other} exec"),
+    };
+    JsPackageManager { pm_run, pm_exec }
 }
 
 fn js_framework_name(facts: &ProjectFacts) -> &'static str {
@@ -1715,6 +2522,367 @@ fn js_framework_name(facts: &ProjectFacts) -> &'static str {
     }
 }
 
+fn web_run_scripts(facts: &ProjectFacts) -> Vec<&'static str> {
+    [
+        "dev",
+        "start",
+        "serve",
+        "storybook",
+        "storybook:dev",
+        "preview",
+        "e2e",
+        "test:e2e",
+    ]
+    .into_iter()
+    .filter(|script| facts.pkg_script(script).is_some())
+    .collect()
+}
+
+fn web_run_tier(script: &str) -> u8 {
+    match script {
+        "dev" | "start" | "serve" => 30,
+        "storybook" | "storybook:dev" => 31,
+        "preview" => 35,
+        "e2e" | "test:e2e" => 36,
+        _ => 40,
+    }
+}
+
+fn web_run_label(facts: &ProjectFacts, script: &str) -> String {
+    match script {
+        "storybook" | "storybook:dev" => "Storybook".to_string(),
+        "preview" => format!("{} preview", js_framework_name(facts)),
+        "e2e" | "test:e2e" => "E2E runner".to_string(),
+        _ => format!("{} {}", js_framework_name(facts), script),
+    }
+}
+
+fn node_backend_run_script_names() -> Vec<&'static str> {
+    vec![
+        "dev",
+        "start",
+        "serve",
+        "dev:api",
+        "api:dev",
+        "dev:server",
+        "server:dev",
+        "start:dev",
+        "start:debug",
+        "server",
+        "api",
+        "backend",
+        "worker",
+        "queue",
+        "jobs",
+    ]
+}
+
+fn backend_run_scripts(facts: &ProjectFacts) -> Vec<&'static str> {
+    [
+        "dev:api",
+        "api:dev",
+        "dev:server",
+        "server:dev",
+        "start:dev",
+        "start:debug",
+        "server",
+        "api",
+        "backend",
+        "worker",
+        "queue",
+        "jobs",
+    ]
+    .into_iter()
+    .filter(|script| facts.pkg_script(script).is_some())
+    .collect()
+}
+
+fn backend_run_tier(script: &str) -> u8 {
+    match script {
+        "dev:api" | "api:dev" | "dev:server" | "server:dev" | "start:dev" => 29,
+        "worker" | "queue" | "jobs" => 34,
+        _ => 32,
+    }
+}
+
+fn backend_run_label(script: &str) -> String {
+    if script.contains("worker") || script.contains("queue") || script.contains("jobs") {
+        "Worker".to_string()
+    } else if script.contains("api") {
+        "API server".to_string()
+    } else if script.contains("debug") {
+        "Backend debug".to_string()
+    } else {
+        "Backend server".to_string()
+    }
+}
+
+fn node_backend_dev_command(facts: &ProjectFacts) -> Option<(String, String)> {
+    let js = facts.js_package_manager();
+    if facts.has_pkg_dep("@nestjs/core") || facts.has_pkg_dep("@nestjs/cli") {
+        return Some(("NestJS dev".into(), format!("{} nest start --watch", js.pm_exec)));
+    }
+
+    if !(facts.has_pkg_dep("express")
+        || facts.has_pkg_dep("fastify")
+        || facts.has_pkg_dep("koa")
+        || facts.has_pkg_dep("hono"))
+    {
+        return None;
+    }
+
+    let entry = first_existing_rel(
+        facts,
+        &[
+            "src/server.ts",
+            "src/index.ts",
+            "src/app.ts",
+            "server.ts",
+            "index.ts",
+            "app.ts",
+            "src/server.js",
+            "src/index.js",
+            "src/app.js",
+            "server.js",
+            "index.js",
+            "app.js",
+        ],
+    )?;
+    if entry.ends_with(".ts") {
+        if facts.has_pkg_dep("tsx") {
+            Some(("Node API dev".into(), format!("{} tsx watch {entry}", js.pm_exec)))
+        } else if facts.has_pkg_dep("ts-node-dev") {
+            Some((
+                "Node API dev".into(),
+                format!("{} ts-node-dev --respawn {entry}", js.pm_exec),
+            ))
+        } else if facts.has_pkg_dep("ts-node") {
+            Some(("Node API".into(), format!("{} ts-node {entry}", js.pm_exec)))
+        } else {
+            None
+        }
+    } else if facts.exists("bun.lockb") || facts.exists("bun.lock") {
+        Some(("Node API dev".into(), format!("bun --watch {entry}")))
+    } else {
+        Some(("Node API".into(), format!("node {entry}")))
+    }
+}
+
+pub(crate) fn web_framework_dev_command(facts: &ProjectFacts) -> Option<(String, String)> {
+    let js = facts.js_package_manager();
+    if facts.has_pkg_dep("next") {
+        Some(("Next.js dev".into(), format!("{} next dev", js.pm_exec)))
+    } else if facts.has_pkg_dep("nuxt") {
+        Some(("Nuxt dev".into(), format!("{} nuxt dev", js.pm_exec)))
+    } else if facts.has_pkg_dep("astro") {
+        Some(("Astro dev".into(), format!("{} astro dev", js.pm_exec)))
+    } else if facts.has_pkg_dep("@remix-run/dev") {
+        let command = if facts.has_pkg_dep("vite") || has_vite_config(facts) {
+            format!("{} remix vite:dev", js.pm_exec)
+        } else {
+            format!("{} remix dev", js.pm_exec)
+        };
+        Some(("Remix dev".into(), command))
+    } else if facts.has_pkg_dep("gatsby") {
+        Some(("Gatsby develop".into(), format!("{} gatsby develop", js.pm_exec)))
+    } else if facts.has_pkg_dep("@angular/cli") || facts.has_pkg_dep("@angular/core") {
+        Some(("Angular serve".into(), format!("{} ng serve", js.pm_exec)))
+    } else if facts.has_pkg_dep("react-scripts") {
+        Some(("Create React App start".into(), format!("{} react-scripts start", js.pm_exec)))
+    } else if facts.has_pkg_dep("@sveltejs/kit") {
+        Some(("SvelteKit dev".into(), format!("{} vite dev", js.pm_exec)))
+    } else {
+        None
+    }
+}
+
+fn web_framework_build_command(facts: &ProjectFacts) -> Option<(String, String)> {
+    let js = facts.js_package_manager();
+    if facts.has_pkg_dep("next") {
+        Some(("Next.js build".into(), format!("{} next build", js.pm_exec)))
+    } else if facts.has_pkg_dep("nuxt") {
+        Some(("Nuxt build".into(), format!("{} nuxt build", js.pm_exec)))
+    } else if facts.has_pkg_dep("astro") {
+        Some(("Astro build".into(), format!("{} astro build", js.pm_exec)))
+    } else if facts.has_pkg_dep("@remix-run/dev") {
+        let command = if facts.has_pkg_dep("vite") || has_vite_config(facts) {
+            format!("{} remix vite:build", js.pm_exec)
+        } else {
+            format!("{} remix build", js.pm_exec)
+        };
+        Some(("Remix build".into(), command))
+    } else if facts.has_pkg_dep("gatsby") {
+        Some(("Gatsby build".into(), format!("{} gatsby build", js.pm_exec)))
+    } else if facts.has_pkg_dep("@angular/cli") || facts.has_pkg_dep("@angular/core") {
+        Some(("Angular build".into(), format!("{} ng build", js.pm_exec)))
+    } else if facts.has_pkg_dep("react-scripts") {
+        Some(("Create React App build".into(), format!("{} react-scripts build", js.pm_exec)))
+    } else if facts.has_pkg_dep("@sveltejs/kit") {
+        Some(("SvelteKit build".into(), format!("{} vite build", js.pm_exec)))
+    } else {
+        None
+    }
+}
+
+fn has_vite_config(facts: &ProjectFacts) -> bool {
+    ["vite.config.ts", "vite.config.js", "vite.config.mjs", "vite.config.mts"]
+        .iter()
+        .any(|path| facts.exists(path))
+}
+
+fn backend_validation_scripts(facts: &ProjectFacts) -> Vec<&'static str> {
+    [
+        "test:integration",
+        "test:int",
+        "test:api",
+        "test:contract",
+        "db:migrate",
+        "migrate",
+        "migration",
+        "migrations",
+        "db:seed",
+        "seed",
+        "db:reset",
+        "db:generate",
+        "generate",
+        "prisma:migrate",
+        "prisma:generate",
+        "drizzle:migrate",
+        "drizzle:generate",
+    ]
+    .into_iter()
+    .filter(|script| facts.pkg_script(script).is_some())
+    .collect()
+}
+
+fn backend_validation_category(script: &str) -> &'static str {
+    if script.contains("test") {
+        "test"
+    } else if script.contains("generate") {
+        "generate"
+    } else {
+        "database"
+    }
+}
+
+fn backend_validation_tier(script: &str) -> u8 {
+    if script.contains("test") {
+        18
+    } else if script.contains("generate") {
+        28
+    } else {
+        32
+    }
+}
+
+fn backend_validation_label(script: &str) -> String {
+    if script.contains("integration") || script == "test:int" {
+        "Integration tests".to_string()
+    } else if script.contains("contract") {
+        "Contract tests".to_string()
+    } else if script.contains("api") && script.contains("test") {
+        "API tests".to_string()
+    } else if script.contains("seed") {
+        "Database seed".to_string()
+    } else if script.contains("reset") {
+        "Database reset".to_string()
+    } else if script.contains("generate") {
+        "Generate clients".to_string()
+    } else {
+        "Database migrate".to_string()
+    }
+}
+
+fn first_existing_rel(facts: &ProjectFacts, rels: &[&str]) -> Option<String> {
+    rels.iter()
+        .copied()
+        .find(|rel| facts.exists(rel))
+        .map(str::to_string)
+}
+
+fn python_asgi_app(facts: &ProjectFacts) -> Option<String> {
+    for (rel, module) in [
+        ("main.py", "main"),
+        ("app.py", "app"),
+        ("src/main.py", "src.main"),
+        ("src/app.py", "src.app"),
+        ("app/main.py", "app.main"),
+        ("api/main.py", "api.main"),
+    ] {
+        let Some(content) = read_small_string(&facts.root.join(rel)) else {
+            continue;
+        };
+        if content.contains("FastAPI(") || content.contains("app =") {
+            return Some(format!("{module}:app"));
+        }
+    }
+    None
+}
+
+fn drizzle_config_exists(facts: &ProjectFacts) -> bool {
+    [
+        "drizzle.config.ts",
+        "drizzle.config.js",
+        "drizzle.config.mjs",
+        "drizzle.config.cjs",
+        "drizzle.config.json",
+    ]
+    .iter()
+    .any(|path| facts.exists(path))
+}
+
+fn docker_compose_command(facts: &ProjectFacts, args: &str) -> Option<String> {
+    if resolve_executable("docker").is_none() {
+        return None;
+    }
+    let compose_file = [
+        "compose.yaml",
+        "compose.yml",
+        "docker-compose.yaml",
+        "docker-compose.yml",
+        "compose.dev.yaml",
+        "compose.dev.yml",
+        "docker-compose.dev.yaml",
+        "docker-compose.dev.yml",
+        "compose.local.yaml",
+        "compose.local.yml",
+        "docker-compose.local.yaml",
+        "docker-compose.local.yml",
+    ]
+    .iter()
+    .copied()
+    .find(|rel| facts.exists(rel))?;
+
+    if matches!(
+        compose_file,
+        "compose.yaml" | "compose.yml" | "docker-compose.yaml" | "docker-compose.yml"
+    ) {
+        Some(format!("docker compose {args}"))
+    } else {
+        Some(format!("docker compose -f {compose_file} {args}"))
+    }
+}
+
+fn docker_image_name(facts: &ProjectFacts) -> String {
+    let raw = facts
+        .root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("app")
+        .to_ascii_lowercase();
+    let name = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if name.is_empty() {
+        "flipflopper-app".to_string()
+    } else {
+        format!("{name}:local")
+    }
+}
+
 fn android_app_modules(facts: &ProjectFacts) -> Vec<(String, PathBuf)> {
     if facts.gradle_command().is_none() {
         return Vec::new();
@@ -1743,7 +2911,59 @@ fn android_app_modules(facts: &ProjectFacts) -> Vec<(String, PathBuf)> {
     modules
 }
 
-fn compose_desktop_modules(facts: &ProjectFacts) -> Vec<String> {
+fn android_task_prefix(module_name: &str) -> String {
+    format!(":{}:", module_name)
+}
+
+fn android_target_suffix(module_name: &str) -> String {
+    if module_name == "app" {
+        String::new()
+    } else {
+        format!(":{module_name}")
+    }
+}
+
+fn android_target_label(base: &str, module_name: &str) -> String {
+    if module_name == "app" {
+        base.to_string()
+    } else {
+        format!("{base} ({module_name})")
+    }
+}
+
+fn android_screenshot_verify_label(setup: &str, module_name: &str) -> String {
+    let base = match setup {
+        "paparazzi" => "Verify Paparazzi screenshots",
+        "roborazzi" => "Verify Roborazzi screenshots",
+        "compose-screenshot" => "Validate Compose screenshots",
+        _ => "Verify Android screenshots",
+    };
+    android_target_label(base, module_name)
+}
+
+fn android_module_screenshot_setup(facts: &ProjectFacts, module_dir: &Path) -> Option<String> {
+    let mut text = ["build.gradle", "build.gradle.kts"]
+        .iter()
+        .filter_map(|path| read_small_string(&facts.root.join(path)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.push('\n');
+    text.push_str(&facts.module_gradle_text(module_dir));
+    for extra in [
+        "gradle/libs.versions.toml",
+        "settings.gradle.kts",
+        "settings.gradle",
+        "gradle.properties",
+    ] {
+        if let Some(extra_text) = read_small_string(&facts.root.join(extra)) {
+            text.push('\n');
+            text.push_str(&extra_text);
+        }
+    }
+    preview::android_screenshot_setup_from_text(&text)
+}
+
+fn kmp_modules(facts: &ProjectFacts) -> Vec<(String, PathBuf)> {
     if facts.gradle_command().is_none() {
         return Vec::new();
     }
@@ -1754,16 +2974,96 @@ fn compose_desktop_modules(facts: &ProjectFacts) -> Vec<String> {
         .filter_map(|dir| {
             let name = module_name(&dir)?;
             let text = facts.module_gradle_text(&dir);
-            if text.contains("compose.desktop {")
-                || text.contains("compose.desktop.application")
-                || (text.contains("composeHotReload") && text.contains("mainClass"))
-            {
-                Some(name)
+            if is_kmp_module(&dir, &text) {
+                Some((name, dir))
             } else {
                 None
             }
         })
         .collect()
+}
+
+fn is_kmp_module(dir: &Path, text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("org.jetbrains.kotlin.multiplatform")
+        || lower.contains("kotlin(\"multiplatform\")")
+        || lower.contains("kotlin('multiplatform')")
+        || lower.contains("com.android.kotlin.multiplatform.library")
+        || dir.join("src/commonMain").is_dir()
+        || dir.join("src/commonTest").is_dir()
+}
+
+fn compose_desktop_modules(facts: &ProjectFacts) -> Vec<ComposeDesktopModule> {
+    if facts.gradle_command().is_none() {
+        return Vec::new();
+    }
+
+    let shared_text = gradle_shared_text(facts);
+    facts
+        .root_dirs()
+        .into_iter()
+        .filter_map(|dir| {
+            let name = module_name(&dir)?;
+            let text = facts.module_gradle_text(&dir);
+            if text.contains("compose.desktop {")
+                || text.contains("compose.desktop.application")
+                || (text.contains("composeHotReload") && text.contains("mainClass"))
+            {
+                let hot_reload = compose_hot_reload_enabled(&shared_text, &text);
+                Some(ComposeDesktopModule {
+                    name,
+                    jvm_target: kotlin_jvm_target_name(&text),
+                    hot_reload,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn gradle_shared_text(facts: &ProjectFacts) -> String {
+    let mut text = facts.gradle_text();
+    for extra in [
+        "gradle/libs.versions.toml",
+        "settings.gradle.kts",
+        "settings.gradle",
+        "gradle.properties",
+    ] {
+        if let Some(extra_text) = read_small_string(&facts.root.join(extra)) {
+            text.push('\n');
+            text.push_str(&extra_text);
+        }
+    }
+    text
+}
+
+fn compose_hot_reload_enabled(shared_text: &str, module_text: &str) -> bool {
+    let lower = format!("{shared_text}\n{module_text}").to_ascii_lowercase();
+    lower.contains("org.jetbrains.compose.hot-reload")
+        || lower.contains("composehotreload")
+        || lower.contains("hotrunjvm")
+        || lower.contains("hotmcpserver")
+}
+
+fn kotlin_jvm_target_name(text: &str) -> String {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(idx) = trimmed.find("jvm(") {
+            if let Some(target) = extract_quoted_after(&trimmed[idx..], "jvm") {
+                return target;
+            }
+        }
+    }
+    "jvm".to_string()
+}
+
+fn compose_hot_reload_suffix(jvm_target: &str) -> String {
+    let mut chars = jvm_target.chars();
+    let Some(first) = chars.next() else {
+        return "Jvm".to_string();
+    };
+    format!("{}{}", first.to_uppercase(), chars.collect::<String>())
 }
 
 fn module_name(dir: &Path) -> Option<String> {
@@ -1937,23 +3237,16 @@ fn ios_emulator_prelude() -> Result<String, String> {
     let xcrun = resolve_executable("xcrun").ok_or_else(|| {
         "xcrun was not found. Install Xcode command line tools, then press Run again.".to_string()
     })?;
-    let devices = Command::new(&xcrun)
-        .args(["simctl", "list", "devices", "available"])
-        .output()
-        .map_err(|e| format!("Failed to list iOS simulators: {e}"))?;
-    let output = String::from_utf8_lossy(&devices.stdout);
-
-    if output
-        .lines()
-        .any(|line| line.contains("iPhone") && line.contains("(Booted)"))
+    let simulators = list_ios_simulators(&xcrun);
+    if simulators
+        .iter()
+        .any(|sim| sim.name.contains("iPhone") && sim.state == "Booted")
     {
         return Ok("open -a Simulator; ".to_string());
     }
 
-    let udid = output
-        .lines()
-        .filter(|line| line.contains("iPhone"))
-        .find_map(extract_sim_udid)
+    let udid = preferred_ios_simulator(&simulators)
+        .map(|sim| sim.udid.clone())
         .ok_or_else(|| "No available iPhone simulators found. Install an iOS simulator in Xcode, then press Run again.".to_string())?;
 
     Ok(format!(
@@ -1964,32 +3257,60 @@ fn ios_emulator_prelude() -> Result<String, String> {
 }
 
 fn android_online_device_serial(adb: &Path) -> Option<String> {
-    let output = Command::new(adb).arg("devices").output();
-    let Ok(output) = output else {
-        return None;
+    let devices = list_android_devices(adb);
+    preferred_android_device(&devices).map(|device| device.serial.clone())
+}
+
+fn list_android_devices(adb: &Path) -> Vec<AndroidDevice> {
+    let Ok(output) = Command::new(adb).arg("devices").output() else {
+        return Vec::new();
     };
-    let mut emulator = None;
-    let physical = String::from_utf8_lossy(&output.stdout)
+    parse_android_devices(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_android_devices(output: &str) -> Vec<AndroidDevice> {
+    output
         .lines()
         .skip(1)
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
             let serial = parts.next()?;
-            if parts.next() == Some("device") {
-                Some(serial.to_string())
+            let status = parts.next()?;
+            let kind = if serial.starts_with("emulator-") {
+                "emulator"
             } else {
-                None
-            }
+                "physical"
+            };
+            Some(AndroidDevice {
+                serial: serial.to_string(),
+                status: status.to_string(),
+                kind: kind.to_string(),
+            })
         })
-        .find(|serial| {
-            if serial.starts_with("emulator-") {
-                emulator = Some(serial.clone());
-                false
-            } else {
-                true
-            }
-        });
-    physical.or(emulator)
+        .collect()
+}
+
+fn preferred_android_device(devices: &[AndroidDevice]) -> Option<&AndroidDevice> {
+    devices
+        .iter()
+        .find(|device| device.status == "device" && device.kind == "physical")
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|device| device.status == "device" && device.kind == "emulator")
+        })
+}
+
+fn list_android_avds(emulator: &Path) -> Vec<String> {
+    let Ok(output) = Command::new(emulator).arg("-list-avds").output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn find_android_tool(binary: &str, sdk_rel: &str) -> Option<PathBuf> {
@@ -2015,35 +3336,74 @@ fn find_android_tool(binary: &str, sdk_rel: &str) -> Option<PathBuf> {
         .find(|path| path.exists())
 }
 
-fn extract_sim_udid(line: &str) -> Option<String> {
-    let mut rest = line;
-    while let Some(start) = rest.find('(') {
-        let after = &rest[start + 1..];
-        let Some(end) = after.find(')') else {
-            return None;
-        };
-        let token = &after[..end];
-        if token.contains('-') && !token.contains(' ') {
-            return Some(token.to_string());
-        }
-        rest = &after[end + 1..];
-    }
-    None
+fn list_ios_simulators(xcrun: &Path) -> Vec<IosDevice> {
+    let Ok(output) = Command::new(xcrun)
+        .args(["simctl", "list", "devices", "available"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    parse_ios_simulators(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn ios_physical_device_udid() -> Option<String> {
-    if tools::current_os() != "macos" {
-        return None;
-    }
-    let xcrun = resolve_executable("xcrun")?;
-    let output = Command::new(&xcrun)
-        .args(["xctrace", "list", "devices"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
+fn parse_ios_simulators(output: &str) -> Vec<IosDevice> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("--") {
+                return None;
+            }
+            let mut parts = parenthesized_tokens(trimmed);
+            let udid = parts
+                .iter()
+                .find(|token| token.contains('-') && !token.contains(' '))
+                .cloned()?;
+            let state = parts
+                .pop()
+                .filter(|token| !token.contains('-'))
+                .unwrap_or_else(|| "Unknown".to_string());
+            let name = trimmed
+                .split(" (")
+                .next()
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
+            Some(IosDevice {
+                name,
+                udid,
+                state,
+                kind: "simulator".to_string(),
+            })
+        })
+        .collect()
+}
 
+fn preferred_ios_simulator(simulators: &[IosDevice]) -> Option<&IosDevice> {
+    simulators
+        .iter()
+        .find(|sim| sim.name.contains("iPhone") && sim.state == "Booted")
+        .or_else(|| simulators.iter().find(|sim| sim.name.contains("iPhone")))
+        .or_else(|| simulators.first())
+}
+
+fn list_ios_physical_devices() -> Vec<IosDevice> {
+    if tools::current_os() != "macos" {
+        return Vec::new();
+    }
+    let Some(xcrun) = resolve_executable("xcrun") else {
+        return Vec::new();
+    };
+    let Ok(output) = Command::new(&xcrun).args(["xctrace", "list", "devices"]).output() else {
+        return Vec::new();
+    };
+    parse_ios_physical_devices(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_ios_physical_devices(output: &str) -> Vec<IosDevice> {
     let mut in_devices = false;
-    for line in text.lines() {
+    let mut devices = Vec::new();
+    for line in output.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("== Devices ==") {
             in_devices = true;
@@ -2060,28 +3420,52 @@ fn ios_physical_device_udid() -> Option<String> {
         {
             continue;
         }
-        if let Some(udid) = extract_last_parenthesized_token(trimmed) {
-            return Some(udid);
+        if let Some(udid) = last_device_token(trimmed) {
+            let name = trimmed
+                .split(" (")
+                .next()
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
+            devices.push(IosDevice {
+                name,
+                udid,
+                state: "device".to_string(),
+                kind: "physical".to_string(),
+            });
         }
     }
-    None
+    devices
 }
 
-fn extract_last_parenthesized_token(line: &str) -> Option<String> {
-    let mut token = None;
+fn ios_physical_device_udid() -> Option<String> {
+    list_ios_physical_devices()
+        .into_iter()
+        .next()
+        .map(|device| device.udid)
+}
+
+fn parenthesized_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
     let mut rest = line;
     while let Some(start) = rest.find('(') {
         let after = &rest[start + 1..];
         let Some(end) = after.find(')') else {
             break;
         };
-        let value = after[..end].trim();
-        if value.len() >= 16 && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            token = Some(value.to_string());
-        }
+        tokens.push(after[..end].trim().to_string());
         rest = &after[end + 1..];
     }
-    token
+    tokens
+}
+
+fn last_device_token(line: &str) -> Option<String> {
+    parenthesized_tokens(line)
+        .into_iter()
+        .filter(|value| {
+            value.len() >= 16 && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+        .last()
 }
 
 fn retarget_ios_device_command(target: &mut RunTarget, udid: &str) {
@@ -2117,7 +3501,11 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_run_targets, detect_validation_targets};
+    use super::{
+        detect_run_targets, detect_validation_targets, parse_android_devices,
+        parse_ios_physical_devices, parse_ios_simulators, preferred_android_device,
+        preferred_ios_simulator,
+    };
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -2194,6 +3582,122 @@ mod tests {
         let ids = ids_for(&project.path);
         assert!(ids.contains(&"android-gradle-install:androidApp".to_string()));
         assert!(ids.contains(&"compose-desktop-run:desktopApp".to_string()));
+        assert!(ids.contains(&"compose-desktop-distributable:desktopApp".to_string()));
+    }
+
+    #[test]
+    fn detects_compose_hot_reload_and_kmp_targets() {
+        let project = TempProject::new("compose-hot-reload");
+        project.write("gradlew", "#!/bin/sh\n");
+        project.write("settings.gradle.kts", "include(\":shared\")\n");
+        project.write(
+            "shared/build.gradle.kts",
+            r#"
+plugins {
+    id("org.jetbrains.kotlin.multiplatform")
+    id("org.jetbrains.compose")
+    id("org.jetbrains.compose.hot-reload")
+}
+kotlin { jvm("desktop") }
+compose.desktop { application { mainClass = "com.example.MainKt" } }
+"#,
+        );
+        project.write("shared/src/commonMain/kotlin/App.kt", "fun app() = Unit\n");
+
+        let run_targets = detect_run_targets(project.path.to_str().unwrap()).unwrap();
+        assert!(run_targets.iter().any(|target| {
+            target.id == "compose-hot-run:shared"
+                && target.command == "./gradlew :shared:hotRunDesktop --auto"
+        }));
+        assert!(run_targets.iter().any(|target| {
+            target.id == "compose-hot-mcp:shared"
+                && target.command == "./gradlew :shared:hotMcpServerDesktop"
+        }));
+
+        let validation_targets = detect_validation_targets(project.path.to_str().unwrap()).unwrap();
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "kmp-all-tests:shared" && target.command == "./gradlew :shared:allTests"
+        }));
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "kmp-jvm-test:shared" && target.command == "./gradlew :shared:desktopTest"
+        }));
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "compose-package-current-os:shared"
+                && target.command == "./gradlew :shared:packageDistributionForCurrentOS"
+        }));
+    }
+
+    #[test]
+    fn detects_android_build_and_screenshot_validation_targets() {
+        let project = TempProject::new("android-validation");
+        project.write("gradlew", "#!/bin/sh\n");
+        project.write(
+            "settings.gradle.kts",
+            "include(\":app\")\ninclude(\":androidApp\")\n",
+        );
+        project.write("app/src/main/AndroidManifest.xml", "<manifest />\n");
+        project.write(
+            "app/build.gradle.kts",
+            "plugins { id(\"app.cash.paparazzi\") }\nandroid { namespace = \"com.example.app\" }\n",
+        );
+        project.write("androidApp/src/main/AndroidManifest.xml", "<manifest />\n");
+        project.write(
+            "androidApp/build.gradle.kts",
+            "plugins { id(\"com.android.compose.screenshot\") }\n",
+        );
+
+        let targets = detect_validation_targets(project.path.to_str().unwrap()).unwrap();
+        let ids = targets
+            .iter()
+            .map(|target| target.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&"android-assemble-debug"));
+        assert!(ids.contains(&"android-screenshot-verify"));
+        assert!(ids.contains(&"android-assemble-debug:androidApp"));
+        assert!(ids.contains(&"android-screenshot-verify:androidApp"));
+        assert!(targets.iter().any(|target| {
+            target.id == "android-screenshot-verify"
+                && target.command == "./gradlew :app:verifyPaparazziDebug"
+        }));
+        assert!(targets.iter().any(|target| {
+            target.id == "android-screenshot-verify:androidApp"
+                && target.command == "./gradlew :androidApp:validateDebugScreenshotTest"
+        }));
+    }
+
+    #[test]
+    fn android_device_parser_prefers_online_physical_device() {
+        let devices = parse_android_devices(
+            "List of devices attached\nemulator-5554\tdevice\nABC123\tdevice\nXYZ789\toffline\n",
+        );
+
+        let selected = preferred_android_device(&devices).unwrap();
+        assert_eq!(selected.serial, "ABC123");
+        assert_eq!(selected.kind, "physical");
+    }
+
+    #[test]
+    fn ios_simulator_parser_prefers_booted_iphone() {
+        let simulators = parse_ios_simulators(
+            "-- iOS 18.0 --\n    iPad Pro (AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE) (Shutdown)\n    iPhone 16 (11111111-2222-3333-4444-555555555555) (Shutdown)\n    iPhone 16 Pro (99999999-8888-7777-6666-555555555555) (Booted)\n",
+        );
+
+        assert_eq!(simulators.len(), 3);
+        let selected = preferred_ios_simulator(&simulators).unwrap();
+        assert_eq!(selected.name, "iPhone 16 Pro");
+        assert_eq!(selected.state, "Booted");
+    }
+
+    #[test]
+    fn ios_physical_device_parser_ignores_simulators() {
+        let devices = parse_ios_physical_devices(
+            "== Devices ==\nJordan's iPhone (17.5) (00008110-001234567890801E)\nMacBook Pro (00000000-0000-0000-0000-000000000000)\n== Simulators ==\niPhone 16 Pro Simulator (18.0) (99999999-8888-7777-6666-555555555555)\n",
+        );
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].name, "Jordan's iPhone");
+        assert_eq!(devices[0].kind, "physical");
     }
 
     #[test]
@@ -2223,6 +3727,189 @@ mod tests {
     }
 
     #[test]
+    fn detects_web_run_scripts_and_tool_fallbacks() {
+        let project = TempProject::new("web-frontend");
+        project.write(
+            "package.json",
+            r#"{
+                "scripts": {
+                    "dev": "vite --host 127.0.0.1",
+                    "storybook": "storybook dev -p 6006",
+                    "preview": "vite preview",
+                    "e2e": "playwright test"
+                },
+                "devDependencies": {
+                    "vite": "latest",
+                    "@playwright/test": "latest",
+                    "eslint": "latest",
+                    "typescript": "latest",
+                    "prettier": "latest"
+                }
+            }"#,
+        );
+
+        let run_ids = ids_for(&project.path);
+        assert!(run_ids.contains(&"npm-script:dev".to_string()));
+        assert!(run_ids.contains(&"npm-script:storybook".to_string()));
+        assert!(run_ids.contains(&"npm-script:preview".to_string()));
+        assert!(run_ids.contains(&"npm-script:e2e".to_string()));
+
+        let validation_targets = detect_validation_targets(project.path.to_str().unwrap()).unwrap();
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "web-eslint" && target.command == "npx eslint ."
+        }));
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "web-tsc" && target.command == "npx tsc --noEmit"
+        }));
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "web-prettier" && target.command == "npx prettier --check ."
+        }));
+        assert!(!validation_targets
+            .iter()
+            .any(|target| target.id == "web-playwright"));
+    }
+
+    #[test]
+    fn detects_backend_node_scripts_and_database_tasks() {
+        let project = TempProject::new("node-backend");
+        project.write(
+            "package.json",
+            r#"{
+                "scripts": {
+                    "dev:api": "tsx watch src/server.ts",
+                    "worker": "tsx watch src/worker.ts",
+                    "db:migrate": "prisma migrate dev"
+                },
+                "dependencies": {
+                    "@prisma/client": "latest",
+                    "express": "latest"
+                },
+                "devDependencies": {
+                    "prisma": "latest",
+                    "tsx": "latest"
+                }
+            }"#,
+        );
+        project.write("src/server.ts", "import express from 'express';\n");
+        project.write("prisma/schema.prisma", "datasource db { provider = \"postgresql\" }\n");
+
+        let run_targets = detect_run_targets(project.path.to_str().unwrap()).unwrap();
+        assert!(run_targets.iter().any(|target| {
+            target.id == "npm-script:dev:api" && target.command == "npm run dev:api"
+        }));
+        assert!(run_targets.iter().any(|target| {
+            target.id == "npm-script:worker" && target.command == "npm run worker"
+        }));
+
+        let validation_targets = detect_validation_targets(project.path.to_str().unwrap()).unwrap();
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "npm-script:db:migrate"
+                && target.command == "npm run db:migrate"
+                && target.category == "database"
+        }));
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "prisma-generate" && target.command == "npx prisma generate"
+        }));
+        assert!(!validation_targets
+            .iter()
+            .any(|target| target.id == "prisma-migrate-dev"));
+    }
+
+    #[test]
+    fn detects_backend_fallbacks_for_node_python_and_docker() {
+        let node = TempProject::new("node-api-fallback");
+        node.write(
+            "package.json",
+            r#"{
+                "dependencies": { "fastify": "latest" },
+                "devDependencies": { "tsx": "latest" }
+            }"#,
+        );
+        node.write("src/server.ts", "import Fastify from 'fastify';\n");
+        let run_targets = detect_run_targets(node.path.to_str().unwrap()).unwrap();
+        assert!(run_targets.iter().any(|target| {
+            target.id == "node-backend-dev" && target.command == "npx tsx watch src/server.ts"
+        }));
+
+        let python = TempProject::new("fastapi");
+        python.write("requirements.txt", "fastapi\nuvicorn\nalembic\n");
+        python.write("app/main.py", "from fastapi import FastAPI\napp = FastAPI()\n");
+        python.write("alembic.ini", "[alembic]\n");
+        let run_targets = detect_run_targets(python.path.to_str().unwrap()).unwrap();
+        assert!(run_targets.iter().any(|target| {
+            target.id == "fastapi-uvicorn" && target.command == "uvicorn app.main:app --reload"
+        }));
+        let validation_targets = detect_validation_targets(python.path.to_str().unwrap()).unwrap();
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "alembic-upgrade" && target.category == "database"
+        }));
+
+        let docker = TempProject::new("docker-api");
+        docker.write("Dockerfile", "FROM scratch\n");
+        let validation_targets = detect_validation_targets(docker.path.to_str().unwrap()).unwrap();
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "docker-build"
+                && target.command.starts_with("docker build -f Dockerfile -t ")
+                && target.command.ends_with(" .")
+        }));
+    }
+
+    #[test]
+    fn detects_non_vite_framework_fallbacks_without_scripts() {
+        let project = TempProject::new("next-fallback");
+        project.write(
+            "package.json",
+            r#"{
+                "packageManager": "pnpm@9.0.0",
+                "dependencies": { "next": "latest", "react": "latest", "react-dom": "latest" },
+                "devDependencies": { "typescript": "latest" }
+            }"#,
+        );
+
+        let run_targets = detect_run_targets(project.path.to_str().unwrap()).unwrap();
+        assert!(run_targets.iter().any(|target| {
+            target.id == "web-framework-dev" && target.command == "pnpm exec next dev"
+        }));
+
+        let validation_targets = detect_validation_targets(project.path.to_str().unwrap()).unwrap();
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "web-framework-build" && target.command == "pnpm exec next build"
+        }));
+        assert!(validation_targets.iter().any(|target| {
+            target.id == "web-tsc" && target.command == "pnpm exec tsc --noEmit"
+        }));
+    }
+
+    #[test]
+    fn detects_remix_vite_and_angular_fallbacks() {
+        let remix = TempProject::new("remix-fallback");
+        remix.write(
+            "package.json",
+            r#"{ "dependencies": { "@remix-run/dev": "latest", "vite": "latest" } }"#,
+        );
+        remix.write("vite.config.ts", "export default {}\n");
+        let remix_run_targets = detect_run_targets(remix.path.to_str().unwrap()).unwrap();
+        assert!(remix_run_targets.iter().any(|target| {
+            target.id == "web-framework-dev" && target.command == "npx remix vite:dev"
+        }));
+        let remix_validation_targets =
+            detect_validation_targets(remix.path.to_str().unwrap()).unwrap();
+        assert!(remix_validation_targets.iter().any(|target| {
+            target.id == "web-framework-build" && target.command == "npx remix vite:build"
+        }));
+
+        let angular = TempProject::new("angular-fallback");
+        angular.write(
+            "package.json",
+            r#"{ "dependencies": { "@angular/core": "latest", "@angular/cli": "latest" } }"#,
+        );
+        let angular_run_targets = detect_run_targets(angular.path.to_str().unwrap()).unwrap();
+        assert!(angular_run_targets.iter().any(|target| {
+            target.id == "web-framework-dev" && target.command == "npx ng serve"
+        }));
+    }
+
+    #[test]
     fn detects_rust_validation_targets() {
         let project = TempProject::new("rust-validation");
         project.write(
@@ -2244,5 +3931,9 @@ mod tests {
 
         let ids = ids_for(&project.path);
         assert!(ids.contains(&"xcode-build:iosApp".to_string()));
+        let validation_ids = validation_ids_for(&project.path);
+        assert!(validation_ids.contains(&"xcode-test:iosApp".to_string()));
+        assert!(validation_ids.contains(&"xcode-build-check:iosApp".to_string()));
+        assert!(validation_ids.contains(&"xcode-analyze:iosApp".to_string()));
     }
 }

@@ -8,7 +8,7 @@ use std::{
 
 use crate::editor::resolve_in_project;
 use crate::env::resolve_executable;
-use crate::runner::ProjectFacts;
+use crate::runner::{self, ProjectFacts};
 
 /// Files above this size are never scanned for preview annotations.
 const MAX_SCAN_BYTES: u64 = 2 * 1024 * 1024;
@@ -28,6 +28,7 @@ const ANNOTATION_WINDOW: usize = 10;
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 pub struct ComposeState {
     pub module_rel: String,
+    pub target: String,
     pub screenshot_setup: Option<String>,
     pub setup_url: Option<String>,
     pub package: Option<String>,
@@ -41,6 +42,7 @@ pub struct PreviewInfo {
     pub images: Vec<PreviewImage>,
     pub live: Option<LivePreviewSpec>,
     pub record: Option<RecordAction>,
+    pub verify: Option<RecordAction>,
     pub compose: Option<ComposeState>,
 }
 
@@ -68,7 +70,7 @@ pub struct LivePreviewSpec {
     pub command: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct RecordAction {
     pub id: String,
     pub label: String,
@@ -83,6 +85,7 @@ impl PreviewInfo {
             images: Vec::new(),
             live: None,
             record: None,
+            verify: None,
             compose: None,
         }
     }
@@ -120,7 +123,7 @@ pub fn detect_preview(project_path: &str, rel_path: &str) -> Result<PreviewInfo,
         _ => PreviewInfo::none(),
     };
 
-    if info.is_empty() && info.record.is_none() {
+    if info.is_empty() && info.record.is_none() && info.verify.is_none() {
         return Ok(detect_generic(&root, &stem));
     }
     Ok(info)
@@ -172,6 +175,11 @@ pub fn resolve_preview_command(
             return Ok((record.label, record.command));
         }
     }
+    if let Some(verify) = info.verify {
+        if verify.id == preview_id {
+            return Ok((verify.label, verify.command));
+        }
+    }
     Err(format!("No preview action matches id: {preview_id}"))
 }
 
@@ -205,6 +213,10 @@ fn detect_compose(
     };
     let gradle_text = android_gradle_text(root, facts, module_dir.as_deref());
     let setup = detect_android_screenshot_setup(&gradle_text);
+    let target = compose_target_kind(&gradle_text, setup.as_deref());
+    let actions = setup
+        .as_deref()
+        .and_then(|setup| compose_screenshot_actions(facts, &module_rel, setup));
     let dirs = android_screenshot_dirs(root, setup.as_deref());
     let package = parse_kotlin_package(source);
     let class_names = scan_kotlin_type_names(source);
@@ -223,7 +235,8 @@ fn detect_compose(
 
     let compose_state = Some(ComposeState {
         module_rel,
-        setup_url: if setup.is_none() {
+        target,
+        setup_url: if setup.is_none() && compose_target_kind(&gradle_text, None) == "android" {
             Some(PAPARAZZI_SETUP_URL.into())
         } else {
             None
@@ -237,7 +250,8 @@ fn detect_compose(
         targets,
         images,
         live: None,
-        record: None,
+        record: actions.clone().map(|actions| actions.0),
+        verify: actions.map(|actions| actions.1),
         compose: compose_state,
     }
 }
@@ -274,6 +288,7 @@ fn detect_swift(root: &Path, facts: &ProjectFacts, source: &str, stem: &str) -> 
         images,
         live: None,
         record,
+        verify: None,
         compose: None,
     }
 }
@@ -302,6 +317,7 @@ fn detect_flutter(root: &Path, source: &str, stem: &str) -> PreviewInfo {
         images,
         live,
         record,
+        verify: None,
         compose: None,
     }
 }
@@ -324,25 +340,20 @@ fn detect_js(root: &Path, facts: &ProjectFacts, stem: &str) -> PreviewInfo {
             images,
             live,
             record: None,
+            verify: None,
             compose: None,
         };
     }
 
-    let live = if facts.preferred_pkg_script().is_some() {
-        Some(LivePreviewSpec {
-            id: "dev-server".into(),
-            label: "Dev server".into(),
-            command: None,
-        })
-    } else {
-        storybook
-    };
+    let live = web_live_spec(facts, storybook);
     let dirs = find_dirs(root, |path| {
         dir_name_ends_with(path, "-snapshots")
             || dir_name_is(path, "__image_snapshots__")
             || ends_with_components(path, &["cypress", "screenshots"])
+            || ends_with_components(path, &["test-results"])
     });
     let images = rank_images(root, &dirs, &[], stem, &[]);
+    let record = web_snapshot_record_action(facts);
     if live.is_none() && images.is_empty() {
         return PreviewInfo::none();
     }
@@ -351,7 +362,8 @@ fn detect_js(root: &Path, facts: &ProjectFacts, stem: &str) -> PreviewInfo {
         targets: Vec::new(),
         images,
         live,
-        record: None,
+        record,
+        verify: None,
         compose: None,
     }
 }
@@ -362,6 +374,52 @@ fn storybook_spec(facts: &ProjectFacts) -> Option<LivePreviewSpec> {
             id: "storybook".into(),
             label: "Storybook".into(),
             command: Some(format!("{} storybook", facts.js_package_manager().pm_run)),
+        })
+    } else {
+        None
+    }
+}
+
+fn web_live_spec(
+    facts: &ProjectFacts,
+    storybook: Option<LivePreviewSpec>,
+) -> Option<LivePreviewSpec> {
+    if facts.preferred_pkg_script().is_some() {
+        Some(LivePreviewSpec {
+            id: "dev-server".into(),
+            label: "Dev server".into(),
+            command: None,
+        })
+    } else if let Some((label, command)) = runner::web_framework_dev_command(facts) {
+        Some(LivePreviewSpec {
+            id: "framework-dev-server".into(),
+            label,
+            command: Some(command),
+        })
+    } else {
+        storybook
+    }
+}
+
+fn web_snapshot_record_action(facts: &ProjectFacts) -> Option<RecordAction> {
+    let js = facts.js_package_manager();
+    if facts.has_pkg_dep("@playwright/test") {
+        Some(RecordAction {
+            id: "web-playwright-update-snapshots".into(),
+            label: "Update Playwright snapshots".into(),
+            command: format!("{} playwright test --update-snapshots", js.pm_exec),
+        })
+    } else if facts.has_pkg_dep("vitest") {
+        Some(RecordAction {
+            id: "web-vitest-update-snapshots".into(),
+            label: "Update Vitest snapshots".into(),
+            command: format!("{} vitest -u", js.pm_exec),
+        })
+    } else if facts.has_pkg_dep("jest") {
+        Some(RecordAction {
+            id: "web-jest-update-snapshots".into(),
+            label: "Update Jest snapshots".into(),
+            command: format!("{} jest -u", js.pm_exec),
         })
     } else {
         None
@@ -383,6 +441,7 @@ fn detect_generic(root: &Path, stem: &str) -> PreviewInfo {
         images,
         live: None,
         record: None,
+        verify: None,
         compose: None,
     }
 }
@@ -611,14 +670,21 @@ fn collect_images(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 }
 
 fn android_gradle_text(root: &Path, facts: &ProjectFacts, module_dir: Option<&Path>) -> String {
-    let mut text = facts.gradle_text();
+    let mut text = ["build.gradle", "build.gradle.kts"]
+        .iter()
+        .filter_map(|path| fs::read_to_string(root.join(path)).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
     if let Some(dir) = module_dir {
         text.push('\n');
         text.push_str(&facts.module_gradle_text(dir));
-    }
-    for dir in facts.root_dirs() {
+    } else {
         text.push('\n');
-        text.push_str(&facts.module_gradle_text(&dir));
+        text.push_str(&facts.gradle_text());
+        for dir in facts.root_dirs() {
+            text.push('\n');
+            text.push_str(&facts.module_gradle_text(&dir));
+        }
     }
     for extra in [
         "gradle/libs.versions.toml",
@@ -651,6 +717,83 @@ fn detect_android_screenshot_setup(gradle_text: &str) -> Option<String> {
         Some("compose-screenshot".into())
     } else {
         None
+    }
+}
+
+fn compose_target_kind(gradle_text: &str, setup: Option<&str>) -> String {
+    let lower = gradle_text.to_ascii_lowercase();
+    if setup.is_some()
+        || lower.contains("com.android.")
+        || lower.contains("android {")
+        || lower.contains("android(")
+        || lower.contains("com.android.kotlin.multiplatform.library")
+    {
+        "android".into()
+    } else if lower.contains("compose.desktop") {
+        "desktop".into()
+    } else if lower.contains("org.jetbrains.kotlin.multiplatform")
+        || lower.contains("kotlin(\"multiplatform\")")
+        || lower.contains("kotlin('multiplatform')")
+    {
+        "multiplatform".into()
+    } else {
+        "compose".into()
+    }
+}
+
+pub(crate) fn android_screenshot_setup_from_text(gradle_text: &str) -> Option<String> {
+    detect_android_screenshot_setup(gradle_text)
+}
+
+pub(crate) fn android_screenshot_task_names(setup: &str) -> Option<(&'static str, &'static str)> {
+    match setup {
+        "paparazzi" => Some(("recordPaparazziDebug", "verifyPaparazziDebug")),
+        "roborazzi" => Some(("recordRoborazziDebug", "verifyRoborazziDebug")),
+        "compose-screenshot" => Some(("updateDebugScreenshotTest", "validateDebugScreenshotTest")),
+        _ => None,
+    }
+}
+
+fn compose_screenshot_actions(
+    facts: &ProjectFacts,
+    module_rel: &str,
+    setup: &str,
+) -> Option<(RecordAction, RecordAction)> {
+    let gradle = facts.gradle_command().unwrap_or("./gradlew");
+    let (record_task, verify_task) = android_screenshot_task_names(setup)?;
+    let record_label = match setup {
+        "paparazzi" => "Record Paparazzi screenshots",
+        "roborazzi" => "Record Roborazzi screenshots",
+        "compose-screenshot" => "Update Compose screenshots",
+        _ => "Record Android screenshots",
+    };
+    let verify_label = match setup {
+        "paparazzi" => "Verify Paparazzi screenshots",
+        "roborazzi" => "Verify Roborazzi screenshots",
+        "compose-screenshot" => "Validate Compose screenshots",
+        _ => "Verify Android screenshots",
+    };
+
+    Some((
+        RecordAction {
+            id: "compose-screenshot-record".into(),
+            label: record_label.into(),
+            command: format!("{gradle} {}", android_gradle_task(module_rel, record_task)),
+        },
+        RecordAction {
+            id: "compose-screenshot-verify".into(),
+            label: verify_label.into(),
+            command: format!("{gradle} {}", android_gradle_task(module_rel, verify_task)),
+        },
+    ))
+}
+
+pub(crate) fn android_gradle_task(module_rel: &str, task: &str) -> String {
+    let module_path = module_rel.trim_matches('/');
+    if module_path.is_empty() {
+        task.to_string()
+    } else {
+        format!(":{}:{task}", module_path.replace('/', ":"))
     }
 }
 
@@ -1164,8 +1307,16 @@ mod tests {
             Some("LoginScreenPreview")
         );
         assert!(info.images[0].rel_path.contains("loginScreenPreview"));
-        assert!(info.record.is_none());
+        assert_eq!(
+            info.record.as_ref().map(|action| action.command.as_str()),
+            Some("./gradlew :app:recordPaparazziDebug")
+        );
+        assert_eq!(
+            info.verify.as_ref().map(|action| action.command.as_str()),
+            Some("./gradlew :app:verifyPaparazziDebug")
+        );
         let compose = info.compose.expect("compose state");
+        assert_eq!(compose.target, "android");
         assert_eq!(compose.screenshot_setup.as_deref(), Some("paparazzi"));
         assert!(compose.setup_url.is_none());
     }
@@ -1195,7 +1346,7 @@ mod tests {
         let project = TempProject::new("web");
         project.write(
             "package.json",
-            r#"{ "scripts": { "dev": "vite" }, "dependencies": { "solid-js": "^1" } }"#,
+            r#"{ "scripts": { "dev": "vite" }, "dependencies": { "solid-js": "^1" }, "devDependencies": { "@playwright/test": "^1" } }"#,
         );
         project.write("e2e/home.spec.ts-snapshots/home-page.png", "png");
         project.write("src/Home.tsx", "export const Home = () => <div />;\n");
@@ -1206,6 +1357,27 @@ mod tests {
         assert_eq!(live.id, "dev-server");
         assert!(live.command.is_none());
         assert_eq!(info.images.len(), 1);
+        assert_eq!(
+            info.record.as_ref().map(|action| action.command.as_str()),
+            Some("npx playwright test --update-snapshots")
+        );
+    }
+
+    #[test]
+    fn web_framework_preview_without_dev_script() {
+        let project = TempProject::new("next_preview");
+        project.write(
+            "package.json",
+            r#"{ "dependencies": { "next": "^15", "react": "^19", "react-dom": "^19" } }"#,
+        );
+        project.write("src/Home.tsx", "export const Home = () => <div />;\n");
+
+        let info = detect_preview(project.root(), "src/Home.tsx").unwrap();
+        assert_eq!(info.kind, "web");
+        let live = info.live.expect("framework dev server");
+        assert_eq!(live.id, "framework-dev-server");
+        assert_eq!(live.label, "Next.js dev");
+        assert_eq!(live.command.as_deref(), Some("npx next dev"));
     }
 
     #[test]
@@ -1282,6 +1454,7 @@ mod tests {
         assert_eq!(info.kind, "compose");
         let compose = info.compose.expect("compose state");
         assert_eq!(compose.module_rel, "app");
+        assert_eq!(compose.target, "android");
         assert_eq!(
             compose.screenshot_setup.as_deref(),
             Some("compose-screenshot")
@@ -1290,6 +1463,52 @@ mod tests {
         assert_eq!(compose.package.as_deref(), Some("com.example"));
         assert_eq!(info.images.len(), 1);
         assert!(info.images[0].rel_path.contains("screenshotTest/reference"));
+        assert_eq!(
+            info.record.as_ref().map(|action| action.command.as_str()),
+            Some("./gradlew :app:updateDebugScreenshotTest")
+        );
+        assert_eq!(
+            info.verify.as_ref().map(|action| action.command.as_str()),
+            Some("./gradlew :app:validateDebugScreenshotTest")
+        );
+    }
+
+    #[test]
+    fn compose_roborazzi_record_and_verify_actions() {
+        let project = TempProject::new("compose_roborazzi");
+        project.write("gradlew", "#!/bin/sh\n");
+        project.write(
+            "androidApp/build.gradle.kts",
+            "plugins { id(\"io.github.takahirom.roborazzi\") }\n",
+        );
+        project.write(
+            "androidApp/src/main/kotlin/com/example/Ui.kt",
+            "package com.example\n@Preview\n@Composable\nfun UiPreview() {}\n",
+        );
+
+        let info = detect_preview(
+            project.root(),
+            "androidApp/src/main/kotlin/com/example/Ui.kt",
+        )
+        .unwrap();
+        assert_eq!(
+            info.record.as_ref().map(|action| action.command.as_str()),
+            Some("./gradlew :androidApp:recordRoborazziDebug")
+        );
+        assert_eq!(
+            info.verify.as_ref().map(|action| action.command.as_str()),
+            Some("./gradlew :androidApp:verifyRoborazziDebug")
+        );
+        assert_eq!(
+            resolve_preview_command(
+                project.root(),
+                "androidApp/src/main/kotlin/com/example/Ui.kt",
+                "compose-screenshot-verify",
+            )
+            .unwrap()
+            .1,
+            "./gradlew :androidApp:verifyRoborazziDebug"
+        );
     }
 
     #[test]
@@ -1345,8 +1564,35 @@ mod tests {
         assert_eq!(info.kind, "compose");
         assert!(info.images.is_empty());
         assert!(info.record.is_none());
+        assert!(info.verify.is_none());
         let compose = info.compose.expect("compose state");
+        assert_eq!(compose.target, "android");
         assert!(compose.screenshot_setup.is_none());
         assert_eq!(compose.setup_url.as_deref(), Some(PAPARAZZI_SETUP_URL));
+    }
+
+    #[test]
+    fn compose_desktop_preview_uses_multiplatform_state() {
+        let project = TempProject::new("compose_desktop");
+        project.write("gradlew", "#!/bin/sh\n");
+        project.write(
+            "composeApp/build.gradle.kts",
+            "plugins { id(\"org.jetbrains.kotlin.multiplatform\"); id(\"org.jetbrains.compose\") }\nkotlin { jvm() }\ncompose.desktop { application { mainClass = \"MainKt\" } }\n",
+        );
+        project.write(
+            "composeApp/src/commonMain/kotlin/App.kt",
+            "package com.example\n@Preview\n@Composable\nfun AppPreview() {}\n",
+        );
+
+        let info = detect_preview(
+            project.root(),
+            "composeApp/src/commonMain/kotlin/App.kt",
+        )
+        .unwrap();
+        let compose = info.compose.expect("compose state");
+        assert_eq!(compose.module_rel, "composeApp");
+        assert_eq!(compose.target, "desktop");
+        assert!(compose.screenshot_setup.is_none());
+        assert!(compose.setup_url.is_none());
     }
 }

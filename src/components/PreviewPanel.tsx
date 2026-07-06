@@ -11,6 +11,7 @@ import {
   startPreviewSession,
   type PreviewInfo,
   type PreviewImage,
+  type RecordAction,
 } from "../lib/ipc";
 import { addTerminal, removeTerminal, setRunSessionId, store } from "../lib/store";
 import { Button, Spinner, toast } from "./ui";
@@ -227,18 +228,20 @@ const PreviewPanel: Component<{
     if (owned) { removeTerminal(owned); setOwnedSessionId(null); }
   }
 
-  async function runRecord() {
+  async function runPreviewAction(action: RecordAction | null) {
     const path = projectPath();
-    const record = props.info.record;
-    if (!path || !record) return;
+    if (!path || !action) return;
     try {
-      const sessionId = await startPreviewSession(path, props.relPath, record.id);
-      addTerminal({ sessionId, label: `Preview · ${record.label}`, kind: "run" });
+      const sessionId = await startPreviewSession(path, props.relPath, action.id);
+      addTerminal({ sessionId, label: `Preview · ${action.label}`, kind: "run" });
       await subscribeExit(sessionId, { refreshOnExit: true });
     } catch (e) {
       toast(`Failed to start: ${String(e)}`, "error");
     }
   }
+
+  const runRecord = () => runPreviewAction(props.info.record);
+  const runVerify = () => runPreviewAction(props.info.verify);
 
   const badge = () => KIND_BADGE[props.info.kind] ?? props.info.kind;
   const hasLive = () => props.info.live !== null;
@@ -250,11 +253,19 @@ const PreviewPanel: Component<{
     if (setup === "compose-screenshot") return "Compose Screenshot";
     return null;
   };
+  const composeTargetLabel = () => {
+    const target = props.info.compose?.target;
+    if (target === "android") return "Android screenshots";
+    if (target === "desktop") return "Compose Desktop";
+    if (target === "multiplatform") return "Compose Multiplatform";
+    return "Compose previews";
+  };
   const nothingToShow = () =>
     props.info.targets.length === 0 &&
     props.info.images.length === 0 &&
     !hasLive() &&
-    !props.info.record;
+    !props.info.record &&
+    !props.info.verify;
 
   return (
     <div style={{ height: "100%", display: "flex", "flex-direction": "column", background: "var(--surface-2)", "min-height": 0 }}>
@@ -317,9 +328,13 @@ const PreviewPanel: Component<{
                   <div style={{ "font-size": "12.5px", color: "var(--fg-default)", "font-weight": "500", display: "flex", "align-items": "center", gap: "6px" }}>
                     <span style={{
                       width: "8px", height: "8px", "border-radius": "50%",
-                      background: compose.screenshot_setup ? "var(--status-add)" : "var(--status-del)"
+                      background: compose.screenshot_setup
+                        ? "var(--status-add)"
+                        : compose.target === "android"
+                          ? "var(--status-del)"
+                          : "var(--accent)"
                     }} />
-                    Android screenshots
+                    {composeTargetLabel()}
                   </div>
 
                   <Show
@@ -327,20 +342,38 @@ const PreviewPanel: Component<{
                     fallback={
                       <>
                         <div style={{ "font-size": "11px", color: "var(--fg-subtle)", "line-height": "1.4" }}>
-                          No Android screenshot setup was detected for this project. FlipFlopper uses existing screenshots for Android previews and prefers Paparazzi.
+                          {compose.target === "android"
+                            ? "No Android screenshot setup was detected for this project. FlipFlopper uses existing screenshots for Android previews and prefers Paparazzi."
+                            : "Compose preview annotations were detected. Use the Run menu for Compose Desktop, Hot Reload, and packaging targets."}
                         </div>
-                        <Button
-                          onClick={() => compose.setup_url && openUrl(compose.setup_url)}
-                          disabled={!compose.setup_url}
-                        >
-                          Add Paparazzi screenshots
-                        </Button>
+                        <Show when={compose.target === "android"}>
+                          <Button
+                            onClick={() => compose.setup_url && openUrl(compose.setup_url)}
+                            disabled={!compose.setup_url}
+                          >
+                            Add Paparazzi screenshots
+                          </Button>
+                        </Show>
                       </>
                     }
                   >
-                    <div style={{ "font-size": "11px", color: "var(--fg-subtle)", "line-height": "1.4" }}>
-                      Showing the closest existing {composeSetupLabel()} screenshot for this file.
-                    </div>
+                    <>
+                      <div style={{ "font-size": "11px", color: "var(--fg-subtle)", "line-height": "1.4" }}>
+                        Showing the closest existing {composeSetupLabel()} screenshot for this file.
+                      </div>
+                      <div style={{ display: "flex", "align-items": "center", gap: "8px", "flex-wrap": "wrap" }}>
+                        <Show when={props.info.record}>
+                          <Button onClick={runRecord} disabled={!projectPath()}>
+                            {props.info.record!.label}
+                          </Button>
+                        </Show>
+                        <Show when={props.info.verify}>
+                          <Button onClick={runVerify} disabled={!projectPath()}>
+                            {props.info.verify!.label}
+                          </Button>
+                        </Show>
+                      </div>
+                    </>
                   </Show>
                 </div>
               );
@@ -399,6 +432,26 @@ const PreviewPanel: Component<{
             </For>
           </Show>
 
+          <Show when={props.info.kind === "web" && props.info.images.length > 0 && props.info.record}>
+            <div style={{
+              border: "1px solid var(--border-muted)", "border-radius": "var(--radius-lg)",
+              padding: "12px", "margin-bottom": "14px", background: "var(--surface-1)",
+              display: "flex", "align-items": "center", "justify-content": "space-between", gap: "10px",
+            }}>
+              <div style={{ "min-width": 0 }}>
+                <div style={{ "font-size": "12px", color: "var(--fg-default)", "font-weight": "500" }}>
+                  Web snapshots
+                </div>
+                <div style={{ "font-size": "11px", color: "var(--fg-subtle)", "margin-top": "2px" }}>
+                  Refresh expected images from the project test runner.
+                </div>
+              </div>
+              <Button onClick={runRecord} disabled={!projectPath()}>
+                {props.info.record!.label}
+              </Button>
+            </div>
+          </Show>
+
           <Show when={props.info.kind === "compose" && props.info.compose?.screenshot_setup && props.info.images.length === 0}>
             <div style={{
               border: "1px dashed var(--border-default)", "border-radius": "var(--radius-lg)",
@@ -410,6 +463,18 @@ const PreviewPanel: Component<{
               </div>
               <div style={{ "font-size": "11px", "line-height": "1.4" }}>
                 Record screenshots in {composeSetupLabel()} and refresh the preview.
+              </div>
+              <div style={{ display: "flex", "align-items": "center", gap: "8px", "flex-wrap": "wrap", "justify-content": "center" }}>
+                <Show when={props.info.record}>
+                  <Button onClick={runRecord} disabled={!projectPath()}>
+                    {props.info.record!.label}
+                  </Button>
+                </Show>
+                <Show when={props.info.verify}>
+                  <Button onClick={runVerify} disabled={!projectPath()}>
+                    {props.info.verify!.label}
+                  </Button>
+                </Show>
               </div>
             </div>
           </Show>

@@ -56,6 +56,22 @@ pub(crate) fn git_ignore_exit(project_path: &str, args: &[&str]) -> Result<Strin
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// True if `path` is inside a git working tree (its own repo, or a subfolder
+/// of a parent repo). False for a plain, ungitted folder or if git itself is
+/// unavailable.
+pub fn is_inside_work_tree(path: &str) -> bool {
+    git(path, &["rev-parse", "--is-inside-work-tree"])
+        .map(|out| out == "true")
+        .unwrap_or(false)
+}
+
+/// Best-effort `git init`. Callers should not fail project open if this
+/// errors (e.g. git missing from PATH) — mirror the scaffold's other
+/// best-effort steps.
+pub fn init_repo(path: &str) -> Result<(), String> {
+    git(path, &["init"]).map(|_| ())
+}
+
 /// Return `git status --short` entries.
 pub fn get_status(project_path: &str) -> Result<Vec<FileStatus>, String> {
     let output = git(project_path, &["status", "--short"])?;

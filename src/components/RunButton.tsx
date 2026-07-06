@@ -1,9 +1,15 @@
 import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import {
+  detectAndroidEnvironment,
+  detectIosEnvironment,
   detectRunTargets,
   onPtyExit,
+  openIosSimulator,
   ptyKill,
   runProject,
+  startAndroidScrcpy,
+  type AndroidEnvironment,
+  type IosEnvironment,
   type RunTarget,
   triggerHaptic,
 } from "../lib/ipc";
@@ -52,14 +58,27 @@ const emulatorHint = (target: RunTarget) => {
   return "";
 };
 
+const isAndroidTarget = (target: RunTarget) =>
+  target.needs_emulator === "android" || target.kind === "android";
+const isIosTarget = (target: RunTarget) =>
+  target.needs_emulator === "ios" || target.kind === "ios";
+
 const RunButton: Component = () => {
   const [targets, setTargets] = createSignal<RunTarget[]>([]);
+  const [androidEnv, setAndroidEnv] = createSignal<AndroidEnvironment | null>(null);
+  const [androidEnvLoading, setAndroidEnvLoading] = createSignal(false);
+  const [startingScrcpy, setStartingScrcpy] = createSignal(false);
+  const [iosEnv, setIosEnv] = createSignal<IosEnvironment | null>(null);
+  const [iosEnvLoading, setIosEnvLoading] = createSignal(false);
+  const [openingSimulator, setOpeningSimulator] = createSignal(false);
   const [menuOpen, setMenuOpen] = createSignal(false);
   const [detecting, setDetecting] = createSignal(false);
   const [starting, setStarting] = createSignal(false);
   let toggleRef: HTMLDivElement | undefined;
   let runExitUnlisten: (() => void) | null = null;
   let loadSeq = 0;
+  let androidEnvSeq = 0;
+  let iosEnvSeq = 0;
 
   const projectPath = () => store.currentProject?.path ?? "";
   const running = () => store.runSessionId !== null;
@@ -89,6 +108,32 @@ const RunButton: Component = () => {
     }
   }
 
+  async function loadAndroidEnvironment(path: string) {
+    const seq = ++androidEnvSeq;
+    setAndroidEnvLoading(true);
+    try {
+      const env = await detectAndroidEnvironment(path);
+      if (seq === androidEnvSeq) setAndroidEnv(env);
+    } catch {
+      if (seq === androidEnvSeq) setAndroidEnv(null);
+    } finally {
+      if (seq === androidEnvSeq) setAndroidEnvLoading(false);
+    }
+  }
+
+  async function loadIosEnvironment(path: string) {
+    const seq = ++iosEnvSeq;
+    setIosEnvLoading(true);
+    try {
+      const env = await detectIosEnvironment(path);
+      if (seq === iosEnvSeq) setIosEnv(env);
+    } catch {
+      if (seq === iosEnvSeq) setIosEnv(null);
+    } finally {
+      if (seq === iosEnvSeq) setIosEnvLoading(false);
+    }
+  }
+
   createEffect(() => {
     const path = projectPath();
     runExitUnlisten?.();
@@ -96,12 +141,34 @@ const RunButton: Component = () => {
     setRunSessionId(null);
     setMenuOpen(false);
     setTargets([]);
+    setAndroidEnv(null);
+    setIosEnv(null);
     if (path) void loadTargets(path);
   });
 
   createEffect(() => {
     const path = projectPath();
     if (path && menuOpen()) void loadTargets(path);
+  });
+
+  createEffect(() => {
+    const path = projectPath();
+    const hasIosTargets = targets().some(isIosTarget);
+    if (path && menuOpen() && hasIosTargets) {
+      void loadIosEnvironment(path);
+    } else if (!path || !hasIosTargets) {
+      setIosEnv(null);
+    }
+  });
+
+  createEffect(() => {
+    const path = projectPath();
+    const hasAndroidTargets = targets().some(isAndroidTarget);
+    if (path && menuOpen() && hasAndroidTargets) {
+      void loadAndroidEnvironment(path);
+    } else if (!path || !hasAndroidTargets) {
+      setAndroidEnv(null);
+    }
   });
 
   onCleanup(() => {
@@ -154,6 +221,44 @@ const RunButton: Component = () => {
     }
   }
 
+  async function startScrcpy() {
+    const path = projectPath();
+    const env = androidEnv();
+    if (!path || !env?.selected_device || startingScrcpy()) return;
+    setStartingScrcpy(true);
+    try {
+      const sessionId = await startAndroidScrcpy(path, env.selected_device);
+      addTerminal({
+        sessionId,
+        label: `Android · scrcpy`,
+        kind: "run",
+      });
+    } catch (e) {
+      toast(`scrcpy failed: ${String(e)}`, "error");
+    } finally {
+      setStartingScrcpy(false);
+    }
+  }
+
+  async function openSimulator() {
+    const path = projectPath();
+    const env = iosEnv();
+    if (!path || !env?.selected_simulator || openingSimulator()) return;
+    setOpeningSimulator(true);
+    try {
+      const sessionId = await openIosSimulator(path, env.selected_simulator);
+      addTerminal({
+        sessionId,
+        label: "iOS · Simulator",
+        kind: "run",
+      });
+    } catch (e) {
+      toast(`Simulator failed: ${String(e)}`, "error");
+    } finally {
+      setOpeningSimulator(false);
+    }
+  }
+
   async function handleMainClick() {
     if (running()) {
       await stopRun();
@@ -172,6 +277,47 @@ const RunButton: Component = () => {
     }
     if (detecting()) return "Detecting runnable targets";
     return preferredTarget()?.label ?? "No runnable target detected";
+  };
+
+  const androidStatus = () => {
+    if (androidEnvLoading()) {
+      return { tone: "muted", title: "Checking Android devices", detail: "" };
+    }
+    const env = androidEnv();
+    if (!env) return null;
+    if (env.selected_device) {
+      const device = env.devices.find((d) => d.serial === env.selected_device);
+      const label = device?.kind === "physical" ? "Physical device" : "Emulator";
+      return { tone: "ready", title: `${label} ready`, detail: env.selected_device };
+    }
+    if (env.issues.length > 0) {
+      return { tone: "error", title: "Android not ready", detail: env.issues[0] };
+    }
+    if (env.selected_avd) {
+      return { tone: "ready", title: "Will boot emulator", detail: env.selected_avd };
+    }
+    return { tone: "muted", title: "No Android device found", detail: "Connect a device or create an emulator." };
+  };
+
+  const iosStatus = () => {
+    if (iosEnvLoading()) {
+      return { tone: "muted", title: "Checking iOS devices", detail: "" };
+    }
+    const env = iosEnv();
+    if (!env) return null;
+    if (env.selected_device) {
+      const device = env.physical_devices.find((d) => d.udid === env.selected_device);
+      return { tone: "ready", title: "Physical device ready", detail: device?.name ?? env.selected_device };
+    }
+    if (env.selected_simulator) {
+      const simulator = env.simulators.find((d) => d.udid === env.selected_simulator);
+      const state = simulator?.state === "Booted" ? "ready" : "will boot";
+      return { tone: "ready", title: `Simulator ${state}`, detail: simulator?.name ?? env.selected_simulator };
+    }
+    if (env.issues.length > 0) {
+      return { tone: "error", title: "iOS not ready", detail: env.issues[0] };
+    }
+    return { tone: "muted", title: "No iOS simulator found", detail: "Install a simulator in Xcode." };
   };
 
   return (
@@ -244,6 +390,132 @@ const RunButton: Component = () => {
 
       <Menu open={menuOpen()} onClose={() => setMenuOpen(false)} anchorRef={toggleRef} align="right" width={360}>
         <MenuLabel>Run project</MenuLabel>
+        <Show when={targets().some(isAndroidTarget) && androidStatus()}>
+          {(status) => (
+            <div style={{
+              display: "flex",
+              "align-items": "flex-start",
+              gap: "8px",
+              padding: "8px 10px",
+              "border-bottom": "1px solid var(--border-muted)",
+            }}>
+              <span style={{
+                width: "7px",
+                height: "7px",
+                "border-radius": "50%",
+                "margin-top": "5px",
+                background: status().tone === "ready"
+                  ? "var(--status-add)"
+                  : status().tone === "error"
+                    ? "var(--status-del)"
+                    : "var(--fg-faint)",
+                flex: "0 0 auto",
+              }} />
+              <div style={{ "min-width": 0, flex: "1" }}>
+                <div style={{ "font-size": "11.5px", color: "var(--fg-default)", "font-weight": "500" }}>
+                  {status().title}
+                </div>
+                <Show when={status().detail}>
+                  <div style={{
+                    "font-size": "10.5px",
+                    color: "var(--fg-subtle)",
+                    "margin-top": "2px",
+                    "line-height": "1.35",
+                  }}>
+                    {status().detail}
+                  </div>
+                </Show>
+              </div>
+              <button
+                class="hover-tint press"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  void startScrcpy();
+                }}
+                disabled={!androidEnv()?.selected_device || !androidEnv()?.scrcpy_path || startingScrcpy()}
+                title={
+                  !androidEnv()?.scrcpy_path
+                    ? "scrcpy is not installed"
+                    : androidEnv()?.selected_device
+                      ? "Mirror Android device with scrcpy"
+                      : "No online Android device"
+                }
+                style={{
+                  padding: "3px 8px",
+                  "border-radius": "6px",
+                  border: "1px solid var(--border-muted)",
+                  color: androidEnv()?.selected_device && androidEnv()?.scrcpy_path ? "var(--fg-muted)" : "var(--fg-faint)",
+                  background: "transparent",
+                  "font-size": "10.5px",
+                  cursor: androidEnv()?.selected_device && androidEnv()?.scrcpy_path && !startingScrcpy() ? "pointer" : "default",
+                  "flex-shrink": 0,
+                }}
+              >
+                {startingScrcpy() ? "Opening…" : "Mirror"}
+              </button>
+            </div>
+          )}
+        </Show>
+        <Show when={targets().some(isIosTarget) && iosStatus()}>
+          {(status) => (
+            <div style={{
+              display: "flex",
+              "align-items": "flex-start",
+              gap: "8px",
+              padding: "8px 10px",
+              "border-bottom": "1px solid var(--border-muted)",
+            }}>
+              <span style={{
+                width: "7px",
+                height: "7px",
+                "border-radius": "50%",
+                "margin-top": "5px",
+                background: status().tone === "ready"
+                  ? "var(--status-add)"
+                  : status().tone === "error"
+                    ? "var(--status-del)"
+                    : "var(--fg-faint)",
+                flex: "0 0 auto",
+              }} />
+              <div style={{ "min-width": 0, flex: "1" }}>
+                <div style={{ "font-size": "11.5px", color: "var(--fg-default)", "font-weight": "500" }}>
+                  {status().title}
+                </div>
+                <Show when={status().detail}>
+                  <div style={{
+                    "font-size": "10.5px",
+                    color: "var(--fg-subtle)",
+                    "margin-top": "2px",
+                    "line-height": "1.35",
+                  }}>
+                    {status().detail}
+                  </div>
+                </Show>
+              </div>
+              <button
+                class="hover-tint press"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  void openSimulator();
+                }}
+                disabled={!iosEnv()?.selected_simulator || openingSimulator()}
+                title={iosEnv()?.selected_simulator ? "Open iOS Simulator" : "No available iOS simulator"}
+                style={{
+                  padding: "3px 8px",
+                  "border-radius": "6px",
+                  border: "1px solid var(--border-muted)",
+                  color: iosEnv()?.selected_simulator ? "var(--fg-muted)" : "var(--fg-faint)",
+                  background: "transparent",
+                  "font-size": "10.5px",
+                  cursor: iosEnv()?.selected_simulator && !openingSimulator() ? "pointer" : "default",
+                  "flex-shrink": 0,
+                }}
+              >
+                {openingSimulator() ? "Opening…" : "Open"}
+              </button>
+            </div>
+          )}
+        </Show>
         <For each={targets()}>
           {(target) => {
             const selected = () => preferredTarget()?.id === target.id;

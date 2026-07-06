@@ -27,7 +27,7 @@ use lsp::{
 use project::{FileEntry, ProjectInfo, SkillEntry, TextMatch};
 use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
-use runner::{RunTarget, ValidationTarget};
+use runner::{AndroidEnvironment, IosEnvironment, RunTarget, ValidationTarget};
 use tools::ToolInfo;
 
 const MENU_OPEN_PROJECT: &str = "menu-open-project";
@@ -1184,6 +1184,16 @@ fn detect_run_targets(project_path: String) -> Result<Vec<RunTarget>, String> {
 }
 
 #[tauri::command]
+fn detect_android_environment(project_path: String) -> Result<AndroidEnvironment, String> {
+    runner::detect_android_environment(&project_path)
+}
+
+#[tauri::command]
+fn detect_ios_environment(project_path: String) -> Result<IosEnvironment, String> {
+    runner::detect_ios_environment(&project_path)
+}
+
+#[tauri::command]
 fn run_project(
     app: tauri::AppHandle,
     state: State<'_, PtyManager>,
@@ -1219,6 +1229,34 @@ fn validate_project(
     let label = format!("validate:{}", target.kind);
     let (session_id, rx) =
         pty::spawn_shell_command(&state, &label, &target.command, &project_path)?;
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn start_android_scrcpy(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    serial: Option<String>,
+) -> Result<String, String> {
+    let command = runner::resolve_android_scrcpy_command(&project_path, serial.as_deref())?;
+    let (session_id, rx) =
+        pty::spawn_shell_command(&state, "android:scrcpy", &command, &project_path)?;
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn open_ios_simulator(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    udid: Option<String>,
+) -> Result<String, String> {
+    let command = runner::resolve_ios_simulator_command(&project_path, udid.as_deref())?;
+    let (session_id, rx) =
+        pty::spawn_shell_command(&state, "ios:simulator", &command, &project_path)?;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
@@ -1746,9 +1784,13 @@ pub fn run() {
             install_tool,
             // Runner
             detect_run_targets,
+            detect_android_environment,
+            detect_ios_environment,
             run_project,
             detect_validation_targets,
             validate_project,
+            start_android_scrcpy,
+            open_ios_simulator,
             // Preview
             detect_preview,
             read_preview_image,

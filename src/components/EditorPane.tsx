@@ -1,4 +1,5 @@
-import { Component, createEffect, createResource, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
+import { Component, createEffect, createResource, createSignal, For, onCleanup, onMount, Show, Switch, Match, untrack } from "solid-js";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   EditorView,
   keymap,
@@ -234,6 +235,25 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
   const [saveError, setSaveError] = createSignal<string | null>(null);
   const [conflict, setConflict] = createSignal(false);
   const [contextMenu, setContextMenu] = createSignal<EditorContextMenuState | null>(null);
+
+  const isImage = () => {
+    const ext = props.file.path.split('.').pop()?.toLowerCase();
+    return ext && ["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "tiff"].includes(ext);
+  };
+
+  const isVideo = () => {
+    const ext = props.file.path.split('.').pop()?.toLowerCase();
+    return ext && ["mp4", "webm", "ogv", "mov", "m4v"].includes(ext);
+  };
+
+  const mediaUrl = () => {
+    if (!store.currentProject) return "";
+    let fullPath = `${store.currentProject.path}/${props.file.path}`;
+    if (store.currentProject.path.includes("\\")) {
+      fullPath = fullPath.replace(/\//g, "\\");
+    }
+    return convertFileSrc(fullPath);
+  };
 
 
 
@@ -1037,13 +1057,43 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       <Show
         when={!props.file.binary}
         fallback={
-          <div style={{
-            flex: "1", display: "flex", "align-items": "center", "justify-content": "center",
-            color: "var(--fg-faint)", "font-size": "13px",
-            "font-family": "'JetBrains Mono', monospace",
-          }}>
-            Binary or oversized file — not editable
-          </div>
+          <Switch>
+            <Match when={isImage()}>
+              <div style={{
+                flex: "1", display: "flex", "flex-direction": "column", "align-items": "center",
+                "justify-content": "center", padding: "20px", background: "var(--surface-1)",
+                overflow: "auto"
+              }}>
+                <img
+                  src={mediaUrl()}
+                  style={{ "max-width": "100%", "max-height": "100%", "object-fit": "contain" }}
+                />
+              </div>
+            </Match>
+            <Match when={isVideo()}>
+              <div style={{
+                flex: "1", display: "flex", "flex-direction": "column", "align-items": "center",
+                "justify-content": "center", padding: "20px", background: "var(--surface-1)",
+                overflow: "auto"
+              }}>
+                <video
+                  controls
+                  autoplay
+                  src={mediaUrl()}
+                  style={{ "max-width": "100%", "max-height": "100%", "object-fit": "contain" }}
+                />
+              </div>
+            </Match>
+            <Match when={true}>
+              <div style={{
+                flex: "1", display: "flex", "align-items": "center", "justify-content": "center",
+                color: "var(--fg-faint)", "font-size": "13px",
+                "font-family": "'JetBrains Mono', monospace",
+              }}>
+                Binary or oversized file — not editable
+              </div>
+            </Match>
+          </Switch>
         }
       >
         <div ref={host} style={{ flex: "1", "min-height": 0, overflow: "hidden" }} />

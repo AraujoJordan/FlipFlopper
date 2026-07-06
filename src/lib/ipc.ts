@@ -106,6 +106,39 @@ export interface RunTarget {
   needs_emulator: string | null;
 }
 
+export interface AndroidDevice {
+  serial: string;
+  status: string;
+  kind: string;
+}
+
+export interface AndroidEnvironment {
+  adb_path: string | null;
+  emulator_path: string | null;
+  scrcpy_path: string | null;
+  devices: AndroidDevice[];
+  avds: string[];
+  selected_device: string | null;
+  selected_avd: string | null;
+  issues: string[];
+}
+
+export interface IosDevice {
+  name: string;
+  udid: string;
+  state: string;
+  kind: string;
+}
+
+export interface IosEnvironment {
+  xcrun_path: string | null;
+  physical_devices: IosDevice[];
+  simulators: IosDevice[];
+  selected_device: string | null;
+  selected_simulator: string | null;
+  issues: string[];
+}
+
 export interface ValidationTarget {
   id: string;
   label: string;
@@ -506,8 +539,20 @@ export const installTool = (toolId: string, projectPath: string): Promise<string
 export const detectRunTargets = (projectPath: string): Promise<RunTarget[]> =>
   invoke("detect_run_targets", { projectPath });
 
+export const detectAndroidEnvironment = (projectPath: string): Promise<AndroidEnvironment> =>
+  invoke("detect_android_environment", { projectPath });
+
+export const detectIosEnvironment = (projectPath: string): Promise<IosEnvironment> =>
+  invoke("detect_ios_environment", { projectPath });
+
 export const runProject = (projectPath: string, targetId?: string): Promise<string> =>
   invoke("run_project", { projectPath, targetId: targetId ?? null });
+
+export const startAndroidScrcpy = (projectPath: string, serial?: string): Promise<string> =>
+  invoke("start_android_scrcpy", { projectPath, serial: serial ?? null });
+
+export const openIosSimulator = (projectPath: string, udid?: string): Promise<string> =>
+  invoke("open_ios_simulator", { projectPath, udid: udid ?? null });
 
 export const detectValidationTargets = (projectPath: string): Promise<ValidationTarget[]> =>
   invoke("detect_validation_targets", { projectPath });
@@ -546,6 +591,7 @@ export interface RecordAction {
 
 export interface ComposeState {
   module_rel: string;
+  target: "android" | "desktop" | "multiplatform" | "compose";
   screenshot_setup: "paparazzi" | "roborazzi" | "compose-screenshot" | null;
   setup_url: string | null;
   package: string | null;
@@ -558,6 +604,7 @@ export interface PreviewInfo {
   images: PreviewImage[];
   live: LivePreviewSpec | null;
   record: RecordAction | null;
+  verify: RecordAction | null;
   compose: ComposeState | null;
 }
 

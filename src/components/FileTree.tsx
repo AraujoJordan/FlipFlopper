@@ -110,7 +110,9 @@ const FileTree: Component = () => {
     (key) => (key ? getGitStatus(key.path) : Promise.resolve([]))
   );
 
-  const statuses = () => gitStatus() ?? [];
+  // Guard against reading an errored resource (SolidJS re-throws on access):
+  // git status is best-effort and must never blank the git-independent tree.
+  const statuses = () => (gitStatus.error ? [] : gitStatus() ?? []);
 
   createEffect(() => {
     store.fileTreeVersion;

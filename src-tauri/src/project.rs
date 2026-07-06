@@ -160,7 +160,15 @@ pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
         }
     }
 
-    let is_git = root.join(".git").exists();
+    // Auto-init git for a plain, ungitted folder so the app's git-centric
+    // features (status, timeline, review) work out of the box. Skip if the
+    // path is already inside a work tree (its own repo or a subfolder of a
+    // parent repo) so we never create a nested `.git`. Best-effort: a missing
+    // git binary must not fail project open.
+    if !crate::git::is_inside_work_tree(project_path) {
+        let _ = crate::git::init_repo(project_path);
+    }
+    let is_git = crate::git::is_inside_work_tree(project_path);
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
