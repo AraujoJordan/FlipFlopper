@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 - 2026-07-05
+
+### Fixed
+
+- Fixed OpenCode and AGY rendering as permanently blank tabs in every packaged (Homebrew/dmg) release build. The production Vite/esbuild minify pass (at the default browser target) corrupted `@xterm/xterm` 6.0.0's `InputHandler.requestMode` method: a `let r;` declaration ahead of an IIFE-initialized enum got dropped during minification, turning `r ||= {}` into an assignment to an undeclared variable. In strict mode that throws `ReferenceError: Can't find variable: r` the instant an agent sends a DECRQM query (`\x1b[?2026$p`, used by OpenCode and AGY but not Claude/Codex/Qwen), which silently killed xterm's write loop for that tab — every subsequent byte from the agent queued forever with nothing rendered. Dev builds are unminified, so this never reproduced under `npm run tauri dev`.
+- Set `build.target: "esnext"` in `vite.config.ts` so Vite/esbuild skips the syntax-lowering pass that triggers the corruption.
+
 ## 0.1.7 - 2026-07-05
 
 ### Fixed
