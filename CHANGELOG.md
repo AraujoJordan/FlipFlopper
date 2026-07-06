@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.1 - 2026-07-05
+
+### Added
+
+- Added Android and iOS device integration to the Run panel: device/AVD/simulator picker, scrcpy screen mirroring, app-scoped `adb logcat` tailing, one-shot device actions (force-stop, clear data, uninstall, restart, screenshot, screen record), a deep-link sender, and one-click iOS Simulator boot.
+- Added run-target detection for framework-native dev servers (e.g. Next.js) when a project has no `dev`/`start`/`serve` script, separate backend API/worker script tiers, Compose Desktop hot-reload and distributable targets, and a detached Docker Compose variant.
+- Added validation-target detection for ESLint, TypeScript, Prettier, and Astro check (when not wired to package scripts); Prisma, Drizzle, TypeORM, Sequelize, Knex, Alembic, Ecto, Flyway, and Liquibase migration/generate targets; Django check/migrate, Rails `db:prepare`, and Laravel migrate; Xcode test/build/analyze on macOS; per-module Android `assembleDebug` and screenshot-verify targets; Kotlin Multiplatform test/check targets; Compose Desktop packaging targets; and Docker Compose config validation plus Docker build.
+- Added a "verify" action alongside "record" for Compose/Android screenshot tooling (Paparazzi, Roborazzi, Compose Screenshot Testing), and snapshot-update actions for Playwright, Vitest, and Jest in the web preview panel. The Compose preview panel now distinguishes Android, Compose Desktop, and Compose Multiplatform targets instead of assuming Android.
+- The editor now renders image and video files inline (previously shown as "Binary or oversized file — not editable").
+
+### Fixed
+
+- Fixed the file Explorer staying permanently blank when opening a project folder that isn't a git repository. Git status errored with "not a git repository," and reading that errored resource during render crashed the whole Explorer panel (no `ErrorBoundary` was in place) before the git-independent file listing could show. Opening such a folder now auto-runs `git init` (skipped if the folder is already inside a parent repo's work tree), and the Explorer no longer crashes if a git-status lookup fails for any other reason.
+
 ## 0.2.0 - 2026-07-05
 
 ### Fixed
