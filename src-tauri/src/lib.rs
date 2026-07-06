@@ -1199,8 +1199,15 @@ fn run_project(
     state: State<'_, PtyManager>,
     project_path: String,
     target_id: Option<String>,
+    android_serial: Option<String>,
+    android_avd: Option<String>,
 ) -> Result<String, String> {
-    let target = runner::resolve_run_command(&project_path, target_id.as_deref())?;
+    let target = runner::resolve_run_command(
+        &project_path,
+        target_id.as_deref(),
+        android_serial.as_deref(),
+        android_avd.as_deref(),
+    )?;
     let url_action = if runner::should_auto_open_browser(&target) {
         UrlAction::CaptureAndOpen
     } else {
@@ -1243,6 +1250,72 @@ fn start_android_scrcpy(
     let command = runner::resolve_android_scrcpy_command(&project_path, serial.as_deref())?;
     let (session_id, rx) =
         pty::spawn_shell_command(&state, "android:scrcpy", &command, &project_path)?;
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn start_android_logcat(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    serial: Option<String>,
+) -> Result<String, String> {
+    let command = runner::resolve_android_logcat_command(&project_path, serial.as_deref())?;
+    let (session_id, rx) =
+        pty::spawn_shell_command(&state, "android:logcat", &command, &project_path)?;
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn boot_android_emulator(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    avd: String,
+    cold: Option<bool>,
+    wipe: Option<bool>,
+) -> Result<String, String> {
+    let command = runner::resolve_android_boot_avd_command(
+        &project_path,
+        &avd,
+        cold.unwrap_or(false),
+        wipe.unwrap_or(false),
+    )?;
+    let (session_id, rx) =
+        pty::spawn_shell_command(&state, "android:emulator", &command, &project_path)?;
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn run_android_device_action(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    action: String,
+    serial: Option<String>,
+) -> Result<String, String> {
+    let command =
+        runner::resolve_android_device_action_command(&project_path, serial.as_deref(), &action)?;
+    let label = format!("android:{action}");
+    let (session_id, rx) = pty::spawn_shell_command(&state, &label, &command, &project_path)?;
+    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn send_android_deeplink(
+    app: tauri::AppHandle,
+    state: State<'_, PtyManager>,
+    project_path: String,
+    uri: String,
+    serial: Option<String>,
+) -> Result<String, String> {
+    let command = runner::resolve_android_deeplink_command(&project_path, serial.as_deref(), &uri)?;
+    let (session_id, rx) =
+        pty::spawn_shell_command(&state, "android:deeplink", &command, &project_path)?;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
@@ -1790,6 +1863,10 @@ pub fn run() {
             detect_validation_targets,
             validate_project,
             start_android_scrcpy,
+            start_android_logcat,
+            boot_android_emulator,
+            run_android_device_action,
+            send_android_deeplink,
             open_ios_simulator,
             // Preview
             detect_preview,

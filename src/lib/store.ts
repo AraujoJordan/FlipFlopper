@@ -239,6 +239,7 @@ const CONTINUE_USAGE_KEY = "flipflopper:continue-agent-usage";
 const LAST_AGENT_KEY = "flipflopper:last-agent-targets";
 const RUN_TARGET_KEY = "flipflopper:run-targets";
 const VALIDATION_TARGET_KEY = "flipflopper:validation-targets";
+const ANDROID_DEVICE_KEY = "flipflopper:android-devices";
 
 export function readContinueTargets(): Record<string, string> {
   try {
@@ -284,6 +285,21 @@ export function writeValidationTarget(projectPath: string, targetId: string) {
     const targets = readValidationTargets();
     targets[projectPath] = targetId;
     localStorage.setItem(VALIDATION_TARGET_KEY, JSON.stringify(targets));
+  } catch { /* ignore */ }
+}
+
+export function readAndroidDevices(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(ANDROID_DEVICE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+export function writeAndroidDevice(projectPath: string, serial: string) {
+  try {
+    const devices = readAndroidDevices();
+    devices[projectPath] = serial;
+    localStorage.setItem(ANDROID_DEVICE_KEY, JSON.stringify(devices));
   } catch { /* ignore */ }
 }
 

@@ -1,13 +1,18 @@
 import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import {
+  bootAndroidEmulator,
   detectAndroidEnvironment,
   detectIosEnvironment,
   detectRunTargets,
   onPtyExit,
   openIosSimulator,
   ptyKill,
+  runAndroidDeviceAction,
   runProject,
+  sendAndroidDeeplink,
+  startAndroidLogcat,
   startAndroidScrcpy,
+  type AndroidDeviceAction,
   type AndroidEnvironment,
   type IosEnvironment,
   type RunTarget,
@@ -15,9 +20,11 @@ import {
 } from "../lib/ipc";
 import {
   addTerminal,
+  readAndroidDevices,
   readRunTargets,
   setRunSessionId,
   store,
+  writeAndroidDevice,
   writeRunTarget,
 } from "../lib/store";
 import { Menu, MenuItem, MenuLabel, Spinner, toast } from "./ui";
@@ -58,6 +65,17 @@ const emulatorHint = (target: RunTarget) => {
   return "";
 };
 
+const actionChipStyle = (enabled: boolean) => ({
+  padding: "3px 8px",
+  "border-radius": "6px",
+  border: "1px solid var(--border-muted)",
+  color: enabled ? "var(--fg-muted)" : "var(--fg-faint)",
+  background: "transparent",
+  "font-size": "10.5px",
+  cursor: enabled ? "pointer" : "default",
+  "flex-shrink": 0,
+} as const);
+
 const isAndroidTarget = (target: RunTarget) =>
   target.needs_emulator === "android" || target.kind === "android";
 const isIosTarget = (target: RunTarget) =>
@@ -68,6 +86,12 @@ const RunButton: Component = () => {
   const [androidEnv, setAndroidEnv] = createSignal<AndroidEnvironment | null>(null);
   const [androidEnvLoading, setAndroidEnvLoading] = createSignal(false);
   const [startingScrcpy, setStartingScrcpy] = createSignal(false);
+  const [selectedSerial, setSelectedSerial] = createSignal<string | null>(null);
+  const [bootingAvd, setBootingAvd] = createSignal(false);
+  const [startingLogcat, setStartingLogcat] = createSignal(false);
+  const [deviceActionBusy, setDeviceActionBusy] = createSignal<AndroidDeviceAction | null>(null);
+  const [deeplinkUri, setDeeplinkUri] = createSignal("");
+  const [sendingDeeplink, setSendingDeeplink] = createSignal(false);
   const [iosEnv, setIosEnv] = createSignal<IosEnvironment | null>(null);
   const [iosEnvLoading, setIosEnvLoading] = createSignal(false);
   const [openingSimulator, setOpeningSimulator] = createSignal(false);
@@ -171,6 +195,21 @@ const RunButton: Component = () => {
     }
   });
 
+  // Keep the picked device in sync with the loaded environment: prefer the
+  // project's persisted choice if it's still online, else the auto-selected
+  // device.
+  createEffect(() => {
+    const env = androidEnv();
+    const path = projectPath();
+    if (!env || !path) {
+      setSelectedSerial(null);
+      return;
+    }
+    const saved = readAndroidDevices()[path];
+    const savedIsOnline = env.devices.some((d) => d.serial === saved && d.status === "device");
+    setSelectedSerial(savedIsOnline ? saved : env.selected_device);
+  });
+
   onCleanup(() => {
     runExitUnlisten?.();
     runExitUnlisten = null;
@@ -183,7 +222,7 @@ const RunButton: Component = () => {
     setStarting(true);
     void triggerHaptic("generic");
     try {
-      const sessionId = await runProject(path, target.id);
+      const sessionId = await runProject(path, target.id, selectedSerial() ?? undefined);
       writeRunTarget(path, target.id);
       addTerminal({
         sessionId,
@@ -223,11 +262,11 @@ const RunButton: Component = () => {
 
   async function startScrcpy() {
     const path = projectPath();
-    const env = androidEnv();
-    if (!path || !env?.selected_device || startingScrcpy()) return;
+    const serial = selectedSerial();
+    if (!path || !serial || startingScrcpy()) return;
     setStartingScrcpy(true);
     try {
-      const sessionId = await startAndroidScrcpy(path, env.selected_device);
+      const sessionId = await startAndroidScrcpy(path, serial);
       addTerminal({
         sessionId,
         label: `Android · scrcpy`,
@@ -237,6 +276,88 @@ const RunButton: Component = () => {
       toast(`scrcpy failed: ${String(e)}`, "error");
     } finally {
       setStartingScrcpy(false);
+    }
+  }
+
+  async function selectDeviceOrAvd(value: string) {
+    const path = projectPath();
+    if (!path || !value) return;
+    if (value.startsWith("device:")) {
+      const serial = value.slice("device:".length);
+      setSelectedSerial(serial);
+      writeAndroidDevice(path, serial);
+      return;
+    }
+    if (value.startsWith("avd:")) {
+      const avd = value.slice("avd:".length);
+      if (bootingAvd()) return;
+      setBootingAvd(true);
+      try {
+        const sessionId = await bootAndroidEmulator(path, avd);
+        addTerminal({ sessionId, label: `Android · Boot ${avd}`, kind: "run" });
+      } catch (e) {
+        toast(`Boot emulator failed: ${String(e)}`, "error");
+      } finally {
+        setBootingAvd(false);
+      }
+    }
+  }
+
+  async function startLogcat() {
+    const path = projectPath();
+    const serial = selectedSerial();
+    if (!path || !serial || startingLogcat()) return;
+    setStartingLogcat(true);
+    try {
+      const sessionId = await startAndroidLogcat(path, serial);
+      addTerminal({ sessionId, label: "Android · Logcat", kind: "run" });
+    } catch (e) {
+      toast(`Logcat failed: ${String(e)}`, "error");
+    } finally {
+      setStartingLogcat(false);
+    }
+  }
+
+  const deviceActionLabel = (action: AndroidDeviceAction) => {
+    switch (action) {
+      case "force-stop": return "Force-stop";
+      case "clear-data": return "Clear data";
+      case "uninstall": return "Uninstall";
+      case "restart": return "Restart";
+      case "screenshot": return "Screenshot";
+      case "screenrecord": return "Screen record";
+    }
+  };
+
+  async function runDeviceAction(action: AndroidDeviceAction) {
+    const path = projectPath();
+    const serial = selectedSerial();
+    if (!path || !serial || deviceActionBusy() !== null) return;
+    setDeviceActionBusy(action);
+    try {
+      const sessionId = await runAndroidDeviceAction(path, action, serial);
+      addTerminal({ sessionId, label: `Android · ${deviceActionLabel(action)}`, kind: "run" });
+    } catch (e) {
+      toast(`${deviceActionLabel(action)} failed: ${String(e)}`, "error");
+    } finally {
+      setDeviceActionBusy(null);
+    }
+  }
+
+  async function openDeeplink() {
+    const path = projectPath();
+    const serial = selectedSerial();
+    const uri = deeplinkUri().trim();
+    if (!path || !serial || !uri || sendingDeeplink()) return;
+    setSendingDeeplink(true);
+    try {
+      const sessionId = await sendAndroidDeeplink(path, uri, serial);
+      addTerminal({ sessionId, label: "Android · Deep link", kind: "run" });
+      setDeeplinkUri("");
+    } catch (e) {
+      toast(`Deep link failed: ${String(e)}`, "error");
+    } finally {
+      setSendingDeeplink(false);
     }
   }
 
@@ -392,68 +513,160 @@ const RunButton: Component = () => {
         <MenuLabel>Run project</MenuLabel>
         <Show when={targets().some(isAndroidTarget) && androidStatus()}>
           {(status) => (
-            <div style={{
-              display: "flex",
-              "align-items": "flex-start",
-              gap: "8px",
-              padding: "8px 10px",
-              "border-bottom": "1px solid var(--border-muted)",
-            }}>
-              <span style={{
-                width: "7px",
-                height: "7px",
-                "border-radius": "50%",
-                "margin-top": "5px",
-                background: status().tone === "ready"
-                  ? "var(--status-add)"
-                  : status().tone === "error"
-                    ? "var(--status-del)"
-                    : "var(--fg-faint)",
-                flex: "0 0 auto",
-              }} />
-              <div style={{ "min-width": 0, flex: "1" }}>
-                <div style={{ "font-size": "11.5px", color: "var(--fg-default)", "font-weight": "500" }}>
-                  {status().title}
-                </div>
-                <Show when={status().detail}>
-                  <div style={{
-                    "font-size": "10.5px",
-                    color: "var(--fg-subtle)",
-                    "margin-top": "2px",
-                    "line-height": "1.35",
-                  }}>
-                    {status().detail}
+            <>
+              <div style={{
+                display: "flex",
+                "align-items": "flex-start",
+                gap: "8px",
+                padding: "8px 10px",
+                "border-bottom": (androidEnv()?.devices.length ?? 0) > 0 || (androidEnv()?.avds.length ?? 0) > 0
+                  ? "none"
+                  : "1px solid var(--border-muted)",
+              }}>
+                <span style={{
+                  width: "7px",
+                  height: "7px",
+                  "border-radius": "50%",
+                  "margin-top": "5px",
+                  background: status().tone === "ready"
+                    ? "var(--status-add)"
+                    : status().tone === "error"
+                      ? "var(--status-del)"
+                      : "var(--fg-faint)",
+                  flex: "0 0 auto",
+                }} />
+                <div style={{ "min-width": 0, flex: "1" }}>
+                  <div style={{ "font-size": "11.5px", color: "var(--fg-default)", "font-weight": "500" }}>
+                    {status().title}
                   </div>
-                </Show>
+                  <Show when={status().detail}>
+                    <div style={{
+                      "font-size": "10.5px",
+                      color: "var(--fg-subtle)",
+                      "margin-top": "2px",
+                      "line-height": "1.35",
+                    }}>
+                      {status().detail}
+                    </div>
+                  </Show>
+                </div>
+                <button
+                  class="hover-tint press"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    void startScrcpy();
+                  }}
+                  disabled={!selectedSerial() || !androidEnv()?.scrcpy_path || startingScrcpy()}
+                  title={
+                    !androidEnv()?.scrcpy_path
+                      ? "scrcpy is not installed"
+                      : selectedSerial()
+                        ? "Mirror Android device with scrcpy"
+                        : "No online Android device"
+                  }
+                  style={actionChipStyle(!!selectedSerial() && !!androidEnv()?.scrcpy_path && !startingScrcpy())}
+                >
+                  {startingScrcpy() ? "Opening…" : "Mirror"}
+                </button>
               </div>
-              <button
-                class="hover-tint press"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  void startScrcpy();
-                }}
-                disabled={!androidEnv()?.selected_device || !androidEnv()?.scrcpy_path || startingScrcpy()}
-                title={
-                  !androidEnv()?.scrcpy_path
-                    ? "scrcpy is not installed"
-                    : androidEnv()?.selected_device
-                      ? "Mirror Android device with scrcpy"
-                      : "No online Android device"
-                }
-                style={{
-                  padding: "3px 8px",
-                  "border-radius": "6px",
-                  border: "1px solid var(--border-muted)",
-                  color: androidEnv()?.selected_device && androidEnv()?.scrcpy_path ? "var(--fg-muted)" : "var(--fg-faint)",
-                  background: "transparent",
-                  "font-size": "10.5px",
-                  cursor: androidEnv()?.selected_device && androidEnv()?.scrcpy_path && !startingScrcpy() ? "pointer" : "default",
-                  "flex-shrink": 0,
-                }}
-              >
-                {startingScrcpy() ? "Opening…" : "Mirror"}
-              </button>
-            </div>
+
+              <Show when={(androidEnv()?.devices.length ?? 0) > 0 || (androidEnv()?.avds.length ?? 0) > 0}>
+                <div style={{
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "8px",
+                  padding: "8px 10px",
+                  "border-bottom": "1px solid var(--border-muted)",
+                }}>
+                  <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
+                    <span style={{ "font-size": "10.5px", color: "var(--fg-subtle)", "flex-shrink": 0 }}>
+                      Device
+                    </span>
+                    <select
+                      value={selectedSerial() ? `device:${selectedSerial()}` : ""}
+                      onclick={(e) => e.stopPropagation()}
+                      onchange={(e) => {
+                        e.stopPropagation();
+                        void selectDeviceOrAvd(e.currentTarget.value);
+                      }}
+                      disabled={bootingAvd()}
+                      style={{
+                        flex: "1", "min-width": 0, "font-size": "10.5px", padding: "3px 6px",
+                        "border-radius": "6px", border: "1px solid var(--border-muted)",
+                        background: "var(--surface-2)", color: "var(--fg-default)",
+                      }}
+                    >
+                      <For each={androidEnv()?.devices ?? []}>
+                        {(device) => (
+                          <option value={`device:${device.serial}`} disabled={device.status !== "device"}>
+                            {device.model ?? device.serial} · {device.kind}
+                            {device.status !== "device" ? ` (${device.status})` : ""}
+                          </option>
+                        )}
+                      </For>
+                      <For each={androidEnv()?.avds ?? []}>
+                        {(avd) => <option value={`avd:${avd}`}>Boot {avd}</option>}
+                      </For>
+                    </select>
+                  </div>
+
+                  <div style={{ display: "flex", "flex-wrap": "wrap", gap: "6px" }}>
+                    <button
+                      class="hover-tint press"
+                      onclick={(e) => { e.stopPropagation(); void startLogcat(); }}
+                      disabled={!selectedSerial() || startingLogcat()}
+                      title={selectedSerial() ? "Tail adb logcat" : "No online Android device"}
+                      style={actionChipStyle(!!selectedSerial() && !startingLogcat())}
+                    >
+                      {startingLogcat() ? "Opening…" : "Logcat"}
+                    </button>
+                    <For each={(["screenshot", "screenrecord", "clear-data", "force-stop", "restart", "uninstall"] as AndroidDeviceAction[])}>
+                      {(action) => (
+                        <button
+                          class="hover-tint press"
+                          onclick={(e) => { e.stopPropagation(); void runDeviceAction(action); }}
+                          disabled={!selectedSerial() || deviceActionBusy() !== null}
+                          title={selectedSerial() ? deviceActionLabel(action) : "No online Android device"}
+                          style={actionChipStyle(!!selectedSerial() && deviceActionBusy() === null)}
+                        >
+                          {deviceActionBusy() === action ? "Working…" : deviceActionLabel(action)}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+
+                  <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
+                    <input
+                      type="text"
+                      placeholder="Deep link URI (e.g. myapp://…)"
+                      value={deeplinkUri()}
+                      onclick={(e) => e.stopPropagation()}
+                      oninput={(e) => setDeeplinkUri(e.currentTarget.value)}
+                      onkeydown={(e) => {
+                        if (e.key === "Enter") {
+                          e.stopPropagation();
+                          void openDeeplink();
+                        }
+                      }}
+                      style={{
+                        flex: "1", "min-width": 0, "font-size": "10.5px", padding: "3px 6px",
+                        "border-radius": "6px", border: "1px solid var(--border-muted)",
+                        background: "var(--surface-2)", color: "var(--fg-default)",
+                      }}
+                    />
+                    <button
+                      class="hover-tint press"
+                      onclick={(e) => { e.stopPropagation(); void openDeeplink(); }}
+                      disabled={!selectedSerial() || !deeplinkUri().trim() || sendingDeeplink()}
+                      title="Send a VIEW intent to the selected device"
+                      style={actionChipStyle(!!selectedSerial() && !!deeplinkUri().trim() && !sendingDeeplink())}
+                    >
+                      {sendingDeeplink() ? "Opening…" : "Open"}
+                    </button>
+                  </div>
+                </div>
+              </Show>
+            </>
           )}
         </Show>
         <Show when={targets().some(isIosTarget) && iosStatus()}>

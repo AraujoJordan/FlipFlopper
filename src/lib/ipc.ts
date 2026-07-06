@@ -110,6 +110,7 @@ export interface AndroidDevice {
   serial: string;
   status: string;
   kind: string;
+  model: string | null;
 }
 
 export interface AndroidEnvironment {
@@ -545,11 +546,58 @@ export const detectAndroidEnvironment = (projectPath: string): Promise<AndroidEn
 export const detectIosEnvironment = (projectPath: string): Promise<IosEnvironment> =>
   invoke("detect_ios_environment", { projectPath });
 
-export const runProject = (projectPath: string, targetId?: string): Promise<string> =>
-  invoke("run_project", { projectPath, targetId: targetId ?? null });
+export const runProject = (
+  projectPath: string,
+  targetId?: string,
+  androidSerial?: string,
+  androidAvd?: string,
+): Promise<string> =>
+  invoke("run_project", {
+    projectPath,
+    targetId: targetId ?? null,
+    androidSerial: androidSerial ?? null,
+    androidAvd: androidAvd ?? null,
+  });
 
 export const startAndroidScrcpy = (projectPath: string, serial?: string): Promise<string> =>
   invoke("start_android_scrcpy", { projectPath, serial: serial ?? null });
+
+export const startAndroidLogcat = (projectPath: string, serial?: string): Promise<string> =>
+  invoke("start_android_logcat", { projectPath, serial: serial ?? null });
+
+export const bootAndroidEmulator = (
+  projectPath: string,
+  avd: string,
+  opts?: { cold?: boolean; wipe?: boolean },
+): Promise<string> =>
+  invoke("boot_android_emulator", {
+    projectPath,
+    avd,
+    cold: opts?.cold ?? null,
+    wipe: opts?.wipe ?? null,
+  });
+
+export type AndroidDeviceAction =
+  | "force-stop"
+  | "clear-data"
+  | "uninstall"
+  | "restart"
+  | "screenshot"
+  | "screenrecord";
+
+export const runAndroidDeviceAction = (
+  projectPath: string,
+  action: AndroidDeviceAction,
+  serial?: string,
+): Promise<string> =>
+  invoke("run_android_device_action", { projectPath, action, serial: serial ?? null });
+
+export const sendAndroidDeeplink = (
+  projectPath: string,
+  uri: string,
+  serial?: string,
+): Promise<string> =>
+  invoke("send_android_deeplink", { projectPath, uri, serial: serial ?? null });
 
 export const openIosSimulator = (projectPath: string, udid?: string): Promise<string> =>
   invoke("open_ios_simulator", { projectPath, udid: udid ?? null });

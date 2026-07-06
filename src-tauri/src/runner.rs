@@ -5,6 +5,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::env::resolve_executable;
@@ -41,6 +42,7 @@ pub struct AndroidDevice {
     pub serial: String,
     pub status: String,
     pub kind: String,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1072,6 +1074,8 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
 pub fn resolve_run_command(
     project_path: &str,
     target_id: Option<&str>,
+    android_serial: Option<&str>,
+    android_avd: Option<&str>,
 ) -> Result<RunTarget, String> {
     let targets = detect_run_targets(project_path)?;
     if targets.is_empty() {
@@ -1097,6 +1101,13 @@ pub fn resolve_run_command(
     };
 
     if let Some(platform) = target.needs_emulator.as_deref() {
+        if platform == "android" {
+            let prelude = android_run_prelude(android_serial, android_avd)?;
+            if !prelude.is_empty() {
+                target.command = format!("{prelude}{}", target.command);
+            }
+            return Ok(target);
+        }
         if platform == "ios" {
             if let Some(udid) = ios_physical_device_udid() {
                 retarget_ios_device_command(&mut target, &udid);
@@ -1185,6 +1196,188 @@ pub fn resolve_android_scrcpy_command(
         shell_quote(scrcpy),
         shell_quote(&selected)
     ))
+}
+
+/// Tail `adb logcat` on the selected device, scoped to the project's primary
+/// Android application id when one can be resolved (falls back to unscoped
+/// `adb logcat` so it still works before the app has launched).
+pub fn resolve_android_logcat_command(
+    project_path: &str,
+    serial: Option<&str>,
+) -> Result<String, String> {
+    let env = detect_android_environment(project_path)?;
+    let adb = env.adb_path.ok_or_else(|| {
+        "Android Debug Bridge (adb) was not found. Install Android platform-tools or set ANDROID_HOME.".to_string()
+    })?;
+    let selected = serial
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or(env.selected_device)
+        .ok_or_else(|| "No online Android device/emulator found for logcat.".to_string())?;
+
+    let facts = ProjectFacts::new(PathBuf::from(project_path));
+    let app_id = android_primary_application_id(&facts);
+    Ok(build_logcat_command(&adb, &selected, app_id.as_deref()))
+}
+
+fn build_logcat_command(adb: &str, serial: &str, app_id: Option<&str>) -> String {
+    let adb_q = shell_quote(adb);
+    let serial_q = shell_quote(serial);
+    match app_id {
+        Some(app_id) => {
+            let app_id_q = shell_quote(app_id);
+            format!(
+                "{adb_q} -s {serial_q} logcat --pid=$({adb_q} -s {serial_q} shell pidof -s {app_id_q})"
+            )
+        }
+        None => format!("{adb_q} -s {serial_q} logcat"),
+    }
+}
+
+/// Boot a specific AVD (as chosen from the device picker), optionally cold /
+/// wiping data. Runs as a streaming PTY session the caller stops like any run.
+pub fn resolve_android_boot_avd_command(
+    project_path: &str,
+    avd: &str,
+    cold: bool,
+    wipe: bool,
+) -> Result<String, String> {
+    let env = detect_android_environment(project_path)?;
+    let emulator = env.emulator_path.ok_or_else(|| {
+        "Android emulator binary was not found. Install Android Studio emulator tools or set ANDROID_HOME.".to_string()
+    })?;
+    let avd = avd.trim();
+    if avd.is_empty() {
+        return Err("No AVD selected.".to_string());
+    }
+    Ok(build_boot_avd_command(&emulator, avd, cold, wipe))
+}
+
+fn build_boot_avd_command(emulator: &str, avd: &str, cold: bool, wipe: bool) -> String {
+    let mut command = format!("{} -avd {}", shell_quote(emulator), shell_quote(avd));
+    if wipe {
+        command.push_str(" -wipe-data");
+    }
+    if cold {
+        command.push_str(" -no-snapshot-load");
+    }
+    command
+}
+
+/// One-shot adb device actions (force-stop / clear-data / uninstall / restart /
+/// screenshot / screenrecord), scoped to the selected device and the
+/// project's primary Android application id.
+pub fn resolve_android_device_action_command(
+    project_path: &str,
+    serial: Option<&str>,
+    action: &str,
+) -> Result<String, String> {
+    let env = detect_android_environment(project_path)?;
+    let adb = env.adb_path.ok_or_else(|| {
+        "Android Debug Bridge (adb) was not found. Install Android platform-tools or set ANDROID_HOME.".to_string()
+    })?;
+    let selected = serial
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or(env.selected_device)
+        .ok_or_else(|| "No online Android device/emulator found.".to_string())?;
+
+    let facts = ProjectFacts::new(PathBuf::from(project_path));
+    let app_id = android_primary_application_id(&facts);
+    build_device_action_command(&adb, &selected, action, app_id.as_deref())
+}
+
+fn build_device_action_command(
+    adb: &str,
+    serial: &str,
+    action: &str,
+    app_id: Option<&str>,
+) -> Result<String, String> {
+    let adb_q = shell_quote(adb);
+    let serial_q = shell_quote(serial);
+    let require_app_id = || {
+        app_id
+            .map(shell_quote)
+            .ok_or_else(|| "No Android application id was detected for this project.".to_string())
+    };
+
+    match action {
+        "force-stop" => {
+            let app_id_q = require_app_id()?;
+            Ok(format!("{adb_q} -s {serial_q} shell am force-stop {app_id_q}"))
+        }
+        "clear-data" => {
+            let app_id_q = require_app_id()?;
+            Ok(format!("{adb_q} -s {serial_q} shell pm clear {app_id_q}"))
+        }
+        "uninstall" => {
+            let app_id_q = require_app_id()?;
+            Ok(format!("{adb_q} -s {serial_q} uninstall {app_id_q}"))
+        }
+        "restart" => {
+            let app_id_q = require_app_id()?;
+            Ok(format!(
+                "{adb_q} -s {serial_q} shell am force-stop {app_id_q} && {adb_q} -s {serial_q} shell monkey -p {app_id_q} 1"
+            ))
+        }
+        "screenshot" => {
+            let dest = temp_capture_path("screenshot", "png");
+            let dest_q = shell_quote_path(&dest);
+            Ok(format!(
+                "{adb_q} -s {serial_q} exec-out screencap -p > {dest_q} && {}",
+                open_file_command(&dest)
+            ))
+        }
+        "screenrecord" => {
+            let remote = "/sdcard/flipflopper-screenrecord.mp4";
+            let dest = temp_capture_path("screenrecord", "mp4");
+            let dest_q = shell_quote_path(&dest);
+            Ok(format!(
+                "echo 'Recording... press Ctrl+C to stop, the clip will be pulled and opened.'; {adb_q} -s {serial_q} shell screenrecord {remote}; {adb_q} -s {serial_q} pull {remote} {dest_q} && {}",
+                open_file_command(&dest)
+            ))
+        }
+        other => Err(format!("Unknown Android device action: {other}")),
+    }
+}
+
+/// Fire an implicit `VIEW` intent at the selected device to exercise a deep link.
+pub fn resolve_android_deeplink_command(
+    project_path: &str,
+    serial: Option<&str>,
+    uri: &str,
+) -> Result<String, String> {
+    let uri = uri.trim();
+    if uri.is_empty() {
+        return Err("Enter a URI to open.".to_string());
+    }
+    let env = detect_android_environment(project_path)?;
+    let adb = env.adb_path.ok_or_else(|| {
+        "Android Debug Bridge (adb) was not found. Install Android platform-tools or set ANDROID_HOME.".to_string()
+    })?;
+    let selected = serial
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or(env.selected_device)
+        .ok_or_else(|| "No online Android device/emulator found.".to_string())?;
+
+    let facts = ProjectFacts::new(PathBuf::from(project_path));
+    let app_id = android_primary_application_id(&facts);
+    Ok(build_deeplink_command(&adb, &selected, uri, app_id.as_deref()))
+}
+
+fn build_deeplink_command(adb: &str, serial: &str, uri: &str, app_id: Option<&str>) -> String {
+    let mut command = format!(
+        "{} -s {} shell am start -a android.intent.action.VIEW -d {}",
+        shell_quote(adb),
+        shell_quote(serial),
+        shell_quote(uri)
+    );
+    if let Some(app_id) = app_id {
+        command.push(' ');
+        command.push_str(&shell_quote(app_id));
+    }
+    command
 }
 
 pub fn detect_ios_environment(project_path: &str) -> Result<IosEnvironment, String> {
@@ -3073,6 +3266,14 @@ fn module_name(dir: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The applicationId of the project's first Android app module, used to scope
+/// logcat, deep links, and device actions to the right package.
+fn android_primary_application_id(facts: &ProjectFacts) -> Option<String> {
+    android_app_modules(facts)
+        .into_iter()
+        .find_map(|(_, dir)| android_application_id(&dir))
+}
+
 fn android_application_id(module_dir: &Path) -> Option<String> {
     for rel in ["build.gradle", "build.gradle.kts"] {
         let Some(content) = read_small_string(&module_dir.join(rel)) else {
@@ -3197,11 +3398,20 @@ fn emulator_prelude(platform: &str) -> Result<String, String> {
 }
 
 fn android_emulator_prelude() -> Result<String, String> {
+    android_emulator_prelude_with_avd(None)
+}
+
+/// Auto-detect prelude, unless `avd_override` names a specific AVD to boot
+/// (from the device picker) — in which case the online-device short-circuit
+/// is skipped and that AVD is booted regardless of what else is listed.
+fn android_emulator_prelude_with_avd(avd_override: Option<&str>) -> Result<String, String> {
     let adb = find_android_tool("adb", "platform-tools/adb")
         .ok_or_else(|| "Android Debug Bridge (adb) was not found. Install Android platform-tools or set ANDROID_HOME.".to_string())?;
 
-    if let Some(serial) = android_online_device_serial(&adb) {
-        return Ok(device_env_prelude("ANDROID_SERIAL", &serial));
+    if avd_override.is_none() {
+        if let Some(serial) = android_online_device_serial(&adb) {
+            return Ok(device_env_prelude("ANDROID_SERIAL", &serial));
+        }
     }
 
     if tools::current_os() == "windows" {
@@ -3210,16 +3420,20 @@ fn android_emulator_prelude() -> Result<String, String> {
 
     let emulator = find_android_tool("emulator", "emulator/emulator")
         .ok_or_else(|| "Android emulator binary was not found. Install Android Studio emulator tools or set ANDROID_HOME.".to_string())?;
-    let avds = Command::new(&emulator)
-        .arg("-list-avds")
-        .output()
-        .map_err(|e| format!("Failed to list Android virtual devices: {e}"))?;
-    let avd = String::from_utf8_lossy(&avds.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "No Android virtual devices found. Create an AVD in Android Studio, then press Run again.".to_string())?;
+    let avd = if let Some(avd) = avd_override {
+        avd.to_string()
+    } else {
+        let avds = Command::new(&emulator)
+            .arg("-list-avds")
+            .output()
+            .map_err(|e| format!("Failed to list Android virtual devices: {e}"))?;
+        String::from_utf8_lossy(&avds.stdout)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "No Android virtual devices found. Create an AVD in Android Studio, then press Run again.".to_string())?
+    };
 
     Ok(format!(
         "echo \"Booting Android emulator...\"; ({} -avd {} >/dev/null 2>&1 &); {} wait-for-device shell 'while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done'; ",
@@ -3227,6 +3441,17 @@ fn android_emulator_prelude() -> Result<String, String> {
         shell_quote(&avd),
         shell_quote_path(&adb),
     ))
+}
+
+/// Build the run-time prelude for an android target, honoring an explicit
+/// device/AVD chosen from the picker; falls back to the existing auto-detect
+/// behavior when neither is given.
+fn android_run_prelude(serial: Option<&str>, avd: Option<&str>) -> Result<String, String> {
+    if let Some(serial) = serial.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(device_env_prelude("ANDROID_SERIAL", serial));
+    }
+    let avd = avd.map(str::trim).filter(|s| !s.is_empty());
+    android_emulator_prelude_with_avd(avd)
 }
 
 fn ios_emulator_prelude() -> Result<String, String> {
@@ -3265,7 +3490,28 @@ fn list_android_devices(adb: &Path) -> Vec<AndroidDevice> {
     let Ok(output) = Command::new(adb).arg("devices").output() else {
         return Vec::new();
     };
-    parse_android_devices(&String::from_utf8_lossy(&output.stdout))
+    let mut devices = parse_android_devices(&String::from_utf8_lossy(&output.stdout));
+    // Best-effort model lookup for online devices only, so the picker can show
+    // "Pixel 7 (emulator-5554)" instead of a bare serial.
+    for device in &mut devices {
+        if device.status == "device" {
+            device.model = android_device_model(adb, &device.serial);
+        }
+    }
+    devices
+}
+
+fn android_device_model(adb: &Path, serial: &str) -> Option<String> {
+    let output = Command::new(adb)
+        .args(["-s", serial, "shell", "getprop", "ro.product.model"])
+        .output()
+        .ok()?;
+    let model = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if model.is_empty() {
+        None
+    } else {
+        Some(model)
+    }
 }
 
 fn parse_android_devices(output: &str) -> Vec<AndroidDevice> {
@@ -3285,6 +3531,7 @@ fn parse_android_devices(output: &str) -> Vec<AndroidDevice> {
                 serial: serial.to_string(),
                 status: status.to_string(),
                 kind: kind.to_string(),
+                model: None,
             })
         })
         .collect()
@@ -3499,12 +3746,33 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// A fresh temp-file path for a device screenshot/screenrecord capture.
+fn temp_capture_path(prefix: &str, ext: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    env::temp_dir().join(format!("flipflopper-{prefix}-{stamp}.{ext}"))
+}
+
+/// Platform-appropriate shell command to open a captured file in its default viewer.
+fn open_file_command(path: &Path) -> String {
+    let path_q = shell_quote_path(path);
+    match tools::current_os() {
+        "macos" => format!("open {path_q}"),
+        "windows" => format!("cmd /c start \"\" {path_q}"),
+        _ => format!("xdg-open {path_q}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
+        android_primary_application_id, android_run_prelude, build_boot_avd_command,
+        build_deeplink_command, build_device_action_command, build_logcat_command,
         detect_run_targets, detect_validation_targets, parse_android_devices,
         parse_ios_physical_devices, parse_ios_simulators, preferred_android_device,
-        preferred_ios_simulator,
+        preferred_ios_simulator, ProjectFacts,
     };
     use std::{
         fs,
@@ -3675,6 +3943,133 @@ compose.desktop { application { mainClass = "com.example.MainKt" } }
         let selected = preferred_android_device(&devices).unwrap();
         assert_eq!(selected.serial, "ABC123");
         assert_eq!(selected.kind, "physical");
+    }
+
+    #[test]
+    fn android_primary_application_id_reads_first_app_module() {
+        let project = TempProject::new("app_id");
+        project.write("gradlew", "#!/bin/sh\n");
+        project.write("app/src/main/AndroidManifest.xml", "<manifest />\n");
+        project.write(
+            "app/build.gradle.kts",
+            "android { defaultConfig { applicationId = \"com.example.flip\" } }\n",
+        );
+
+        let facts = ProjectFacts::new(project.path.clone());
+        assert_eq!(
+            android_primary_application_id(&facts).as_deref(),
+            Some("com.example.flip")
+        );
+    }
+
+    #[test]
+    fn android_primary_application_id_none_without_app_module() {
+        let project = TempProject::new("app_id_missing");
+        project.write("gradlew", "#!/bin/sh\n");
+
+        let facts = ProjectFacts::new(project.path.clone());
+        assert_eq!(android_primary_application_id(&facts), None);
+    }
+
+    #[test]
+    fn logcat_command_scopes_to_app_id_when_known() {
+        let command = build_logcat_command("/usr/bin/adb", "emulator-5554", Some("com.example.flip"));
+        assert_eq!(
+            command,
+            "'/usr/bin/adb' -s 'emulator-5554' logcat --pid=$('/usr/bin/adb' -s 'emulator-5554' shell pidof -s 'com.example.flip')"
+        );
+    }
+
+    #[test]
+    fn logcat_command_falls_back_without_app_id() {
+        let command = build_logcat_command("/usr/bin/adb", "emulator-5554", None);
+        assert_eq!(command, "'/usr/bin/adb' -s 'emulator-5554' logcat");
+    }
+
+    #[test]
+    fn boot_avd_command_applies_cold_and_wipe_flags() {
+        assert_eq!(
+            build_boot_avd_command("/opt/emulator", "Pixel_7", false, false),
+            "'/opt/emulator' -avd 'Pixel_7'"
+        );
+        assert_eq!(
+            build_boot_avd_command("/opt/emulator", "Pixel_7", true, true),
+            "'/opt/emulator' -avd 'Pixel_7' -wipe-data -no-snapshot-load"
+        );
+    }
+
+    #[test]
+    fn device_action_command_builds_expected_adb_invocations() {
+        let adb = "/usr/bin/adb";
+        let serial = "emulator-5554";
+        let app_id = Some("com.example.flip");
+
+        assert_eq!(
+            build_device_action_command(adb, serial, "force-stop", app_id).unwrap(),
+            "'/usr/bin/adb' -s 'emulator-5554' shell am force-stop 'com.example.flip'"
+        );
+        assert_eq!(
+            build_device_action_command(adb, serial, "clear-data", app_id).unwrap(),
+            "'/usr/bin/adb' -s 'emulator-5554' shell pm clear 'com.example.flip'"
+        );
+        assert_eq!(
+            build_device_action_command(adb, serial, "uninstall", app_id).unwrap(),
+            "'/usr/bin/adb' -s 'emulator-5554' uninstall 'com.example.flip'"
+        );
+        assert_eq!(
+            build_device_action_command(adb, serial, "restart", app_id).unwrap(),
+            "'/usr/bin/adb' -s 'emulator-5554' shell am force-stop 'com.example.flip' && '/usr/bin/adb' -s 'emulator-5554' shell monkey -p 'com.example.flip' 1"
+        );
+        assert!(build_device_action_command(adb, serial, "unknown-action", app_id).is_err());
+    }
+
+    #[test]
+    fn device_action_command_requires_app_id_for_package_scoped_actions() {
+        let err = build_device_action_command("/usr/bin/adb", "emulator-5554", "force-stop", None)
+            .unwrap_err();
+        assert!(err.contains("application id"));
+    }
+
+    #[test]
+    fn device_action_command_screenshot_and_screenrecord_dont_need_app_id() {
+        let screenshot =
+            build_device_action_command("/usr/bin/adb", "emulator-5554", "screenshot", None)
+                .unwrap();
+        assert!(screenshot.contains("exec-out screencap -p"));
+        let screenrecord =
+            build_device_action_command("/usr/bin/adb", "emulator-5554", "screenrecord", None)
+                .unwrap();
+        assert!(screenrecord.contains("shell screenrecord /sdcard/flipflopper-screenrecord.mp4"));
+    }
+
+    #[test]
+    fn deeplink_command_appends_app_id_when_known() {
+        let command = build_deeplink_command(
+            "/usr/bin/adb",
+            "emulator-5554",
+            "myapp://profile/42",
+            Some("com.example.flip"),
+        );
+        assert_eq!(
+            command,
+            "'/usr/bin/adb' -s 'emulator-5554' shell am start -a android.intent.action.VIEW -d 'myapp://profile/42' 'com.example.flip'"
+        );
+    }
+
+    #[test]
+    fn deeplink_command_omits_app_id_when_unknown() {
+        let command =
+            build_deeplink_command("/usr/bin/adb", "emulator-5554", "myapp://profile/42", None);
+        assert_eq!(
+            command,
+            "'/usr/bin/adb' -s 'emulator-5554' shell am start -a android.intent.action.VIEW -d 'myapp://profile/42'"
+        );
+    }
+
+    #[test]
+    fn android_run_prelude_prefers_explicit_serial_over_avd() {
+        let prelude = android_run_prelude(Some("emulator-5554"), Some("Pixel_7")).unwrap();
+        assert_eq!(prelude, "export ANDROID_SERIAL='emulator-5554'; ");
     }
 
     #[test]
