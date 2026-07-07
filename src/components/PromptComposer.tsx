@@ -35,6 +35,50 @@ interface CompletionItem {
   isDir?: boolean;
 }
 
+// Per-project prompt persistence: the in-progress draft + stash survive app
+// restarts and project switches; sent prompts feed an Alt+Up/Down history.
+const PROMPT_HISTORY_LIMIT = 50;
+
+interface PromptState {
+  draft: string;
+  stash: string | null;
+}
+
+function readPromptState(projectPath: string): PromptState {
+  try {
+    const raw = localStorage.getItem(`flipflopper:prompt-state:${projectPath}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        draft: typeof parsed.draft === "string" ? parsed.draft : "",
+        stash: typeof parsed.stash === "string" ? parsed.stash : null,
+      };
+    }
+  } catch { /* ignore */ }
+  return { draft: "", stash: null };
+}
+
+function writePromptState(projectPath: string, state: PromptState) {
+  try {
+    localStorage.setItem(`flipflopper:prompt-state:${projectPath}`, JSON.stringify(state));
+  } catch { /* ignore */ }
+}
+
+function readPromptHistory(projectPath: string): string[] {
+  try {
+    const raw = localStorage.getItem(`flipflopper:prompt-history:${projectPath}`);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) return parsed.filter((entry) => typeof entry === "string");
+  } catch { /* ignore */ }
+  return [];
+}
+
+function writePromptHistory(projectPath: string, history: string[]) {
+  try {
+    localStorage.setItem(`flipflopper:prompt-history:${projectPath}`, JSON.stringify(history));
+  } catch { /* ignore */ }
+}
+
 const NAV_SEQ: Record<string, string> = {
   ArrowUp: "\x1b[A",
   ArrowDown: "\x1b[B",
@@ -124,6 +168,11 @@ const FileSuggestionIcon: Component<{ item: CompletionItem }> = (props) => {
 
 const PromptComposer: Component = () => {
   const [value, setValue] = createSignal("");
+  const [stashedPrompt, setStashedPrompt] = createSignal<string | null>(null);
+  const [history, setHistory] = createSignal<string[]>([]);
+  const [historyIndex, setHistoryIndex] = createSignal<number | null>(null);
+  let historyDraft = "";
+  let loadedProjectPath: string | null = null;
   const [sending, setSending] = createSignal(false);
   const [focused, setFocused] = createSignal(false);
   const [caretPosition, setCaretPosition] = createSignal(0);
@@ -194,6 +243,35 @@ const PromptComposer: Component = () => {
     setDismissedTokenKey(null);
     const caret = next.length;
     focusAt(caret);
+  });
+
+  // Restore the per-project draft/stash/history when the project changes
+  // (declared before the persist effect so it runs first on a switch).
+  createEffect(() => {
+    const path = store.currentProject?.path ?? null;
+    if (path === loadedProjectPath) return;
+    loadedProjectPath = path;
+    setHistoryIndex(null);
+    historyDraft = "";
+    if (!path) {
+      setHistory([]);
+      return;
+    }
+    const saved = readPromptState(path);
+    setHistory(readPromptHistory(path));
+    setValue(saved.draft);
+    setStashedPrompt(saved.stash);
+    setDismissedTokenKey(null);
+    setCaretPosition(saved.draft.length);
+  });
+
+  // Persist the draft and stash as they change so nothing is lost on restart.
+  createEffect(() => {
+    const draft = value();
+    const stash = stashedPrompt();
+    const path = store.currentProject?.path ?? null;
+    if (!path || path !== loadedProjectPath) return;
+    writePromptState(path, { draft, stash });
   });
 
   const completionToken = createMemo(() => activeCompletionToken(value(), caretPosition()));
@@ -296,6 +374,96 @@ const PromptComposer: Component = () => {
     setCaretPosition(textareaRef?.selectionStart ?? value().length);
   }
 
+  // Grow the textarea with its content up to MAX_PROMPT_HEIGHT, then scroll.
+  const MAX_PROMPT_HEIGHT = 160;
+  function autoResize() {
+    if (!textareaRef) return;
+    textareaRef.style.height = "0";
+    textareaRef.style.height = `${Math.min(textareaRef.scrollHeight, MAX_PROMPT_HEIGHT)}px`;
+  }
+  createEffect(() => {
+    value();
+    autoResize();
+  });
+
+  /** Index of the moving end of the selection (the caret the user is steering). */
+  function caretFocusIndex(): number {
+    return textareaRef.selectionDirection === "backward"
+      ? textareaRef.selectionStart ?? 0
+      : textareaRef.selectionEnd ?? 0;
+  }
+
+  function lineStart(text: string, index: number): number {
+    return text.lastIndexOf("\n", index - 1) + 1;
+  }
+
+  function lineEnd(text: string, index: number): number {
+    const nl = text.indexOf("\n", index);
+    return nl === -1 ? text.length : nl;
+  }
+
+  function isWordChar(ch: string): boolean {
+    return /[\p{L}\p{N}_]/u.test(ch);
+  }
+
+  function prevWordStart(text: string, index: number): number {
+    let i = index;
+    while (i > 0 && !isWordChar(text[i - 1])) i--;
+    while (i > 0 && isWordChar(text[i - 1])) i--;
+    return i;
+  }
+
+  function nextWordEnd(text: string, index: number): number {
+    let i = index;
+    while (i < text.length && !isWordChar(text[i])) i++;
+    while (i < text.length && isWordChar(text[i])) i++;
+    return i;
+  }
+
+  function moveCaretTo(target: number, extend: boolean) {
+    if (extend) {
+      const anchor = textareaRef.selectionDirection === "backward"
+        ? textareaRef.selectionEnd ?? target
+        : textareaRef.selectionStart ?? target;
+      if (target < anchor) textareaRef.setSelectionRange(target, anchor, "backward");
+      else textareaRef.setSelectionRange(anchor, target, "forward");
+    } else {
+      textareaRef.setSelectionRange(target, target);
+    }
+    setCaretPosition(target);
+  }
+
+  /** Home/End, macOS Cmd+Arrow, and Option+Arrow caret movement. The webview
+   *  doesn't give textareas these bindings (Home/End scroll the page,
+   *  Cmd+Left/Right can trigger history navigation), so handle them here.
+   *  Shift extends the selection. Returns true when the key was handled. */
+  function handleCaretNavigation(e: KeyboardEvent): boolean {
+    if (e.ctrlKey) return false;
+    const meta = e.metaKey;
+    const text = value();
+    const from = caretFocusIndex();
+
+    let target: number;
+    if (e.altKey) {
+      if (meta) return false;
+      if (e.key === "ArrowLeft") target = prevWordStart(text, from);
+      else if (e.key === "ArrowRight") target = nextWordEnd(text, from);
+      else return false;
+    }
+    else if (e.key === "Home") target = meta ? 0 : lineStart(text, from);
+    else if (e.key === "End") target = meta ? text.length : lineEnd(text, from);
+    else if (meta && e.key === "ArrowLeft") target = lineStart(text, from);
+    else if (meta && e.key === "ArrowRight") target = lineEnd(text, from);
+    else if (meta && e.key === "ArrowUp") target = 0;
+    else if (meta && e.key === "ArrowDown") target = text.length;
+    else return false;
+
+    e.preventDefault();
+    e.stopPropagation();
+    moveCaretTo(target, e.shiftKey);
+    return true;
+  }
+
   function focusAt(caret: number) {
     queueMicrotask(() => {
       textareaRef.focus();
@@ -310,8 +478,32 @@ const PromptComposer: Component = () => {
     const next = `${value().slice(0, start)}${text}${value().slice(end)}`;
     const caret = start + text.length;
     setValue(next);
+    setHistoryIndex(null);
     setDismissedTokenKey(null);
     focusAt(caret);
+  }
+
+  /** Pasting absolute path(s) that live inside the project becomes `@relative`
+   *  tokens — copy a path from Finder/terminal output and it lands ready to
+   *  reference. Anything else pastes normally. */
+  function handlePaste(e: ClipboardEvent) {
+    const project = store.currentProject?.path;
+    if (!project) return;
+
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length === 0) return;
+
+    const refs: string[] = [];
+    for (const line of lines) {
+      const normalized = line.replace(/\\/g, "/");
+      const rel = toPromptPath(line, project);
+      if (rel === normalized || rel.length === 0) return;
+      refs.push(rel);
+    }
+
+    e.preventDefault();
+    insertAtCaret(`${refs.map((ref) => `@${ref}`).join(" ")} `);
   }
 
   /** Insert text at the textarea cursor without focusing the textarea — used
@@ -322,6 +514,7 @@ const PromptComposer: Component = () => {
     const next = `${value().slice(0, start)}${text}${value().slice(end)}`;
     setValue(next);
     setCaretPosition(start + text.length);
+    setHistoryIndex(null);
     setDismissedTokenKey(null);
   }
 
@@ -337,6 +530,67 @@ const PromptComposer: Component = () => {
     setValue(next);
     setDismissedTokenKey(null);
     focusAt(caret);
+  }
+
+  function pushHistory(text: string) {
+    setHistoryIndex(null);
+    historyDraft = "";
+    const prev = history();
+    if (prev[prev.length - 1] === text) return;
+    const next = [...prev, text].slice(-PROMPT_HISTORY_LIMIT);
+    setHistory(next);
+    const path = store.currentProject?.path;
+    if (path) writePromptHistory(path, next);
+  }
+
+  /** Alt+Up/Down shell-style recall of previously sent prompts. Entering
+   *  history parks the live draft; stepping past the newest entry brings the
+   *  draft back. Typing forks the recalled text (index resets on input). */
+  function navigateHistory(dir: -1 | 1) {
+    const entries = history();
+    if (entries.length === 0) return;
+    const index = historyIndex();
+
+    let next: number | null;
+    if (index === null) {
+      if (dir === 1) return;
+      historyDraft = value();
+      next = entries.length - 1;
+    } else if (dir === -1) {
+      next = Math.max(0, index - 1);
+    } else {
+      next = index < entries.length - 1 ? index + 1 : null;
+    }
+
+    setHistoryIndex(next);
+    const text = next === null ? historyDraft : entries[next];
+    setValue(text);
+    setDismissedTokenKey(null);
+    focusAt(text.length);
+  }
+
+  /** Cmd+S prompt stash: park the current draft so a quick command can be
+   *  typed and sent; the draft comes back automatically after the send (or
+   *  via Cmd+S again on an empty field). With both a draft and a stash,
+   *  Cmd+S swaps them. Agent-agnostic — it only touches the composer. */
+  function toggleStash() {
+    const draft = value();
+    const stashed = stashedPrompt();
+    if (draft.trim().length > 0) {
+      void triggerHaptic("alignment");
+      setStashedPrompt(draft);
+      setValue(stashed ?? "");
+      setHistoryIndex(null);
+      setDismissedTokenKey(null);
+      focusAt(stashed?.length ?? 0);
+    } else if (stashed !== null) {
+      void triggerHaptic("alignment");
+      setStashedPrompt(null);
+      setValue(stashed);
+      setHistoryIndex(null);
+      setDismissedTokenKey(null);
+      focusAt(stashed.length);
+    }
   }
 
   function cycleActiveAgentMode() {
@@ -384,9 +638,13 @@ const PromptComposer: Component = () => {
       }
 
       await ptyInput(sessionId, `${text}\r`);
-      setValue("");
-      setCaretPosition(0);
+      pushHistory(text);
+      const restored = stashedPrompt();
+      setStashedPrompt(null);
+      setValue(restored ?? "");
       setDismissedTokenKey(null);
+      if (restored) focusAt(restored.length);
+      else setCaretPosition(0);
     } catch (e) {
       console.error(e);
       toast(String(e), "error");
@@ -396,6 +654,13 @@ const PromptComposer: Component = () => {
   }
 
   function handleKeyDown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleStash();
+      return;
+    }
+
     if (e.key === "Tab" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       e.stopPropagation();
@@ -404,6 +669,17 @@ const PromptComposer: Component = () => {
         ptyInput(tab.sessionId, "\x1b[Z").catch(console.error);
         cycleAgentModeOptimistic(tab.sessionId);
       }
+      return;
+    }
+
+    if (handleCaretNavigation(e)) return;
+
+    if (
+      e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey &&
+      (e.key === "ArrowUp" || e.key === "ArrowDown")
+    ) {
+      e.preventDefault();
+      navigateHistory(e.key === "ArrowUp" ? -1 : 1);
       return;
     }
 
@@ -430,6 +706,18 @@ const PromptComposer: Component = () => {
       }
     }
 
+    // Escape while browsing history steps back out to the live draft.
+    if (e.key === "Escape" && historyIndex() !== null) {
+      e.preventDefault();
+      setHistoryIndex(null);
+      const draft = historyDraft;
+      setValue(draft);
+      focusAt(draft.length);
+      return;
+    }
+
+    // Forward navigation keys to the PTY only while the composer is empty;
+    // once the user is typing, Option+Arrow stays native word movement.
     const tab = activeTab();
     const seq = NAV_SEQ[e.key];
     if (
@@ -438,7 +726,8 @@ const PromptComposer: Component = () => {
       !e.ctrlKey &&
       !e.metaKey &&
       !e.shiftKey &&
-      (value().length === 0 || e.altKey)
+      !e.altKey &&
+      value().length === 0
     ) {
       e.preventDefault();
       ptyInput(tab.sessionId, seq).catch(console.error);
@@ -460,7 +749,7 @@ const PromptComposer: Component = () => {
     }}>
       <div style={{
         position: "relative",
-        display: "flex", "align-items": "center", gap: "10px",
+        display: "flex", "align-items": "flex-end", gap: "10px",
         background: "var(--surface-3)",
         border: `1px solid ${activeColor()}55`,
         "border-radius": "11px",
@@ -545,7 +834,7 @@ const PromptComposer: Component = () => {
         </Show>
 
         <Show when={activeTab()} fallback={
-          <div style={{ position: "relative", flex: "0 0 auto" }}>
+          <div style={{ position: "relative", flex: "0 0 auto", "margin-bottom": "7px" }}>
             <button
               ref={(el) => (newAgentToggleRef = el)}
               type="button"
@@ -573,13 +862,15 @@ const PromptComposer: Component = () => {
           </div>
         }>
           {(tab) => (
-            <AgentLogo
-              agentId={tab().agentId}
-              icon={tab().agentIcon}
-              name={tab().label}
-              size={20}
-              radius={6}
-            />
+            <div style={{ flex: "0 0 auto", display: "flex", "margin-bottom": "7px" }}>
+              <AgentLogo
+                agentId={tab().agentId}
+                icon={tab().agentIcon}
+                name={tab().label}
+                size={20}
+                radius={6}
+              />
+            </div>
           )}
         </Show>
 
@@ -596,6 +887,7 @@ const PromptComposer: Component = () => {
             color: store.currentProject ? "var(--fg-subtle)" : "var(--border-strong)",
             background: "var(--surface-4)",
             flex: "0 0 auto",
+            "margin-bottom": "2px",
             cursor: store.currentProject ? "pointer" : "default",
           }}
         >
@@ -609,11 +901,16 @@ const PromptComposer: Component = () => {
           rows={1}
           placeholder={placeholder()}
           value={value()}
+          spellcheck={false}
+          autocapitalize="off"
+          autocomplete="off"
           onInput={(e) => {
             setValue(e.currentTarget.value);
             setCaretPosition(e.currentTarget.selectionStart ?? e.currentTarget.value.length);
+            setHistoryIndex(null);
             setDismissedTokenKey(null);
           }}
+          onPaste={handlePaste}
           onKeyDown={handleKeyDown}
           onKeyUp={syncCaret}
           onClick={syncCaret}
@@ -633,11 +930,51 @@ const PromptComposer: Component = () => {
             border: "none",
             outline: "none",
             resize: "none",
-            "line-height": "1.5",
-            "max-height": "120px",
-            overflow: "auto",
+            // 20px line + 7px vertical padding = 34px single-line box,
+            // matching the send button; autoResize() grows it from there.
+            "line-height": "20px",
+            padding: "7px 0",
+            "max-height": `${MAX_PROMPT_HEIGHT}px`,
+            "overflow-y": "auto",
           }}
         />
+
+        <Show when={stashedPrompt() !== null}>
+          <button
+            type="button"
+            class="press"
+            onMouseDown={(e) => e.preventDefault()}
+            onclick={toggleStash}
+            title={`Stashed draft — ⌘S or click to bring it back:\n${stashedPrompt()}`}
+            style={{
+              display: "flex", "align-items": "center", gap: "5px",
+              "font-family": "var(--font-mono)",
+              "font-size": "10.5px",
+              color: "var(--fg-subtle)",
+              border: "1px dashed var(--border-strong)",
+              background: "var(--surface-4)",
+              "border-radius": "6px",
+              padding: "3px 8px",
+              flex: "0 0 auto",
+              "margin-bottom": "6px",
+              "max-width": "140px",
+              cursor: "pointer",
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style={{ flex: "0 0 auto" }}>
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+              <path d="M17 21v-8H7v8" />
+              <path d="M7 3v5h8" />
+            </svg>
+            <span style={{
+              overflow: "hidden",
+              "text-overflow": "ellipsis",
+              "white-space": "nowrap",
+            }}>
+              {stashedPrompt()}
+            </span>
+          </button>
+        </Show>
 
         <Show when={modeLabel()}>
           {(label) => (
@@ -655,6 +992,7 @@ const PromptComposer: Component = () => {
                 "border-radius": "6px",
                 padding: "3px 8px",
                 flex: "0 0 auto",
+                "margin-bottom": "6px",
                 cursor: "pointer",
               }}
             >
@@ -668,7 +1006,7 @@ const PromptComposer: Component = () => {
             "font-family": "var(--font-mono)",
             "font-size": "10.5px", color: "var(--fg-subtle)",
             border: "1px solid var(--border-default)", "border-radius": "6px",
-            padding: "3px 8px", flex: "0 0 auto",
+            padding: "3px 8px", flex: "0 0 auto", "margin-bottom": "6px",
           }}>
             Agent
           </span>
