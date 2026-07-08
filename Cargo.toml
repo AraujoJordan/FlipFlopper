@@ -1,3 +1,9 @@
 [workspace]
 members = ["src-tauri"]
 resolver = "2"
+
+# Smaller, faster-loading release binary; costs extra release build time.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

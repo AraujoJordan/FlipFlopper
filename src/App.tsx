@@ -1,4 +1,4 @@
-import { Component, createEffect, For, onMount, Show, onCleanup } from "solid-js";
+import { Component, createEffect, createSignal, For, lazy, onMount, Show, onCleanup } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -23,7 +23,6 @@ import {
 import {
   getAgents,
   getRecentProjects,
-  getToolCatalog,
   lspShutdownProject,
   openProject,
   pickProjectFolder,
@@ -49,8 +48,6 @@ import GitPanel from "./components/git/GitPanel";
 import { ConflictFixDialogHost } from "./components/git/ConflictFixDialog";
 import { SquashPushDialogHost } from "./components/git/SquashPushDialog";
 import AgentTaskDialogHost from "./components/AgentTaskDialog";
-import DiffPane from "./components/DiffPane";
-import EditorPane from "./components/EditorPane";
 import OmniSearch from "./components/OmniSearch";
 import PromptComposer from "./components/PromptComposer";
 import RunButton from "./components/RunButton";
@@ -58,6 +55,12 @@ import ValidationButton from "./components/ValidationButton";
 import { ToastHost, ConfirmHost, toast } from "./components/ui";
 import { installGlobalShortcuts, runAction } from "./lib/shortcuts";
 import "./App.css";
+
+// Lazy: keeps CodeMirror and highlight.js out of the startup bundle. The
+// panes only mount once their workspace mode is first visited (see
+// visitedModes below).
+const EditorPane = lazy(() => import("./components/EditorPane"));
+const DiffPane = lazy(() => import("./components/DiffPane"));
 
 type OS = "macos" | "windows" | "linux";
 
@@ -227,6 +230,19 @@ const WorkspaceModeSwitch: Component = () => {
 const App: Component = () => {
   const win = getCurrentWindow();
 
+  // Modes the user has visited this session. The editor/review panes (and
+  // their lazy chunks) only mount on first visit; after that they stay
+  // mounted and mode switches are pure CSS visibility as before.
+  const [visitedModes, setVisitedModes] = createSignal(
+    new Set<WorkspaceMode>([store.workspaceMode])
+  );
+  createEffect(() => {
+    const mode = store.workspaceMode;
+    if (!visitedModes().has(mode)) {
+      setVisitedModes((prev) => new Set(prev).add(mode));
+    }
+  });
+
   function setActiveProject(project: ProjectInfo) {
     const previousPath = store.currentProject?.path;
     if (previousPath && previousPath !== project.path) {
@@ -331,14 +347,14 @@ const App: Component = () => {
       void win.show().then(() => win.setFocus());
     });
 
-    const [agents, recents, tools] = await Promise.all([
-      getAgents(),
+    // Fast agent detection (no per-agent `--version` subprocess); versions
+    // are backfilled after the workspace is restored.
+    const [agents, recents] = await Promise.all([
+      getAgents(false),
       getRecentProjects(),
-      getToolCatalog(),
     ]);
     setStore("agents", agents);
     setStore("recentProjects", recents);
-    setStore("tools", tools);
 
     const persisted = readWorkspace();
     const lastPath = persisted?.projectPath ?? recents[0]?.path;
@@ -360,33 +376,46 @@ const App: Component = () => {
 
         let gatedCount = 0;
 
-        for (const saved of tabsToRestore) {
-          const agent = agents.find((a) => a.id === saved.agentId);
-          if (!agent?.installed) continue;
-          try {
-            const sessionId = await spawnAgent(agent.id, project.path, store.yoloMode);
-            const tab: Tab = {
-              sessionId,
-              label: agent.name,
-              agentId: agent.id,
-              agentIcon: agent.icon,
-            };
-            restoredTabs.push(tab);
-            // Rebind BEFORE addTab so the tab-sync effect sees the already-
-            // bound node instead of creating a duplicate live node.
-            if (saved.flowNodeId) {
-              gatedCount += rebindNode(saved.flowNodeId, sessionId);
-            }
-            addTab(tab);
-          } catch { /* skip failed restore */ }
-        }
+        updateCurrentBranch();
+
+        // Spawn all restored agents in parallel, then register tabs in the
+        // original persisted order.
+        const spawnable = tabsToRestore
+          .map((saved) => ({ saved, agent: agents.find((a) => a.id === saved.agentId) }))
+          .filter((entry) => entry.agent?.installed);
+        const spawned = await Promise.allSettled(
+          spawnable.map(({ agent }) =>
+            spawnAgent(agent!.id, project.path, store.yoloMode)
+          )
+        );
+        spawnable.forEach(({ saved, agent }, i) => {
+          const result = spawned[i];
+          if (result.status !== "fulfilled") return; // skip failed restore
+          const sessionId = result.value;
+          const tab: Tab = {
+            sessionId,
+            label: agent!.name,
+            agentId: agent!.id,
+            agentIcon: agent!.icon,
+          };
+          restoredTabs.push(tab);
+          // Rebind BEFORE addTab so the tab-sync effect sees the already-
+          // bound node instead of creating a duplicate live node.
+          if (saved.flowNodeId) {
+            gatedCount += rebindNode(saved.flowNodeId, sessionId);
+          }
+          addTab(tab);
+        });
         clearPendingRebinds();
         if (gatedCount > 0) {
           toast("Workflow restored — chains paused for review");
         }
-        updateCurrentBranch();
       } catch { /* first run or path gone */ }
     }
+
+    // Backfill agent versions (spawns `--version` per installed agent) once
+    // the workspace is up.
+    void getAgents(true).then((full) => setStore("agents", full));
 
     const unlistenMenu = await onNativeMenuCommand((id) => {
       void handleNativeMenuCommand(id);
@@ -716,7 +745,9 @@ const App: Component = () => {
               aria-hidden={store.workspaceMode !== "code"}
             >
               {/* code editor */}
-              <EditorPane />
+              <Show when={visitedModes().has("code")}>
+                <EditorPane />
+              </Show>
             </div>
             <div
               class="workspace-pane"
@@ -724,7 +755,9 @@ const App: Component = () => {
               aria-hidden={store.workspaceMode !== "review"}
             >
               {/* native diff review */}
-              <DiffPane />
+              <Show when={visitedModes().has("review")}>
+                <DiffPane />
+              </Show>
             </div>
             <div
               class="workspace-pane"

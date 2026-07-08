@@ -8,14 +8,33 @@ use std::{
 };
 
 static AUGMENTED_PATH: OnceLock<OsString> = OnceLock::new();
+static ORIGINAL_PATH: OnceLock<Option<OsString>> = OnceLock::new();
+
+/// The process PATH as it was before `install_augmented_path` overwrote it.
+/// Both the base and full augmented paths must build from this snapshot so
+/// entry ordering (and therefore binary resolution precedence) stays stable.
+fn original_path() -> Option<OsString> {
+    ORIGINAL_PATH.get_or_init(|| env::var_os("PATH")).clone()
+}
 
 /// Install a terminal-like PATH into the app process.
 ///
 /// macOS GUI apps launched from Finder/Homebrew do not inherit the user's
 /// interactive shell environment, so binaries installed by Homebrew, npm, nvm,
 /// Volta, Cargo, etc. are otherwise invisible to backend detection.
+///
+/// The login-shell PATH probe can take seconds (it sources the user's rc
+/// files), so only the filesystem-derived base path is installed here; the
+/// full path is warmed on a background thread and callers of
+/// `augmented_path()` block until it is ready. Must be called before the
+/// Tauri builder spawns threads: `set_var` is only safe while the process is
+/// single-threaded.
 pub fn install_augmented_path() {
-    env::set_var("PATH", augmented_path());
+    let _ = original_path();
+    env::set_var("PATH", base_augmented_path());
+    std::thread::spawn(|| {
+        let _ = augmented_path();
+    });
 }
 
 pub fn augmented_path() -> &'static OsString {
@@ -37,11 +56,26 @@ pub fn resolve_executable(binary: &str) -> Option<PathBuf> {
         .or_else(|| which::which_in(binary, Some(augmented_path()), env::current_dir().ok()?).ok())
 }
 
+/// Original PATH plus common tool directories. No subprocesses — cheap
+/// enough to run synchronously at startup.
+fn base_augmented_path() -> OsString {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(current) = original_path() {
+        add_split_paths(&mut paths, &mut seen, current);
+    }
+
+    add_common_tool_paths(&mut paths, &mut seen);
+
+    env::join_paths(paths).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
+}
+
 fn build_augmented_path() -> OsString {
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
 
-    if let Some(current) = env::var_os("PATH") {
+    if let Some(current) = original_path() {
         add_split_paths(&mut paths, &mut seen, current);
     }
     if let Some(shell_path) = login_shell_path() {
@@ -155,14 +189,36 @@ fn login_shell_path() -> Option<OsString> {
     }
     #[cfg(unix)]
     {
+        use std::time::{Duration, Instant};
+
         let shell = env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/zsh"));
-        let output = std::process::Command::new(shell)
+        let mut child = std::process::Command::new(shell)
             .arg("-lc")
             .arg("printf %s \"$PATH\"")
             .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .output()
+            .spawn()
             .ok()?;
+
+        // A misbehaving rc file (interactive prompt, network call) must not
+        // hang PATH resolution forever; the base path already covers common
+        // install locations.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(_) => return None,
+            }
+        }
+
+        let output = child.wait_with_output().ok()?;
         if !output.status.success() || output.stdout.is_empty() {
             return None;
         }

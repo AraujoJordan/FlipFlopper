@@ -1,9 +1,12 @@
-import { Component, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { Component, createSignal, For, lazy, onCleanup, onMount, Show } from "solid-js";
 import { store, addTab, rankContinueCandidates, recordContinueAgentUse } from "../lib/store";
 import { continueAgent, spawnAgent, type AgentInfo } from "../lib/ipc";
 import { agentColor, AgentLogo } from "../lib/agentMeta";
 import AgentBar from "./AgentBar";
-import TerminalPane from "./TerminalPane";
+
+// Lazy: keeps xterm out of the startup bundle; panes only mount once a tab
+// exists, and PTY output is parked backend-side until the pane attaches.
+const TerminalPane = lazy(() => import("./TerminalPane"));
 import YoloButton from "./YoloButton";
 import OrchestratorPanel from "./flow/OrchestratorPanel";
 import { Menu, MenuLabel, MenuItem, Spinner, toast } from "./ui";

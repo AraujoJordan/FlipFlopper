@@ -185,8 +185,8 @@ export const onPtyExit = (sessionId: string, cb: () => void): Promise<UnlistenFn
 
 // ── Agents ───────────────────────────────────────────────────────────────────
 
-export const getAgents = (): Promise<AgentInfo[]> =>
-  invoke("get_agents");
+export const getAgents = (includeVersions = true): Promise<AgentInfo[]> =>
+  invoke("get_agents", { includeVersions });
 
 // ── Project ──────────────────────────────────────────────────────────────────
 

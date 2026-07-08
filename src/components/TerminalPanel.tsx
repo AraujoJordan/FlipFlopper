@@ -1,4 +1,4 @@
-import { Component, For, Show, createSignal } from "solid-js";
+import { Component, For, Show, createSignal, lazy } from "solid-js";
 import { openTerminal } from "../lib/ipc";
 import {
   addTerminal,
@@ -12,7 +12,10 @@ import {
   type TerminalKind,
 } from "../lib/store";
 import { agentColor } from "../lib/agentMeta";
-import TerminalPane from "./TerminalPane";
+
+// Lazy: keeps xterm out of the startup bundle (same chunk as AgentWorkspace's
+// TerminalPane); PTY output is parked backend-side until the pane attaches.
+const TerminalPane = lazy(() => import("./TerminalPane"));
 import { toast, Spinner, confirmDialog } from "./ui";
 
 function kindColor(kind: TerminalKind): string {

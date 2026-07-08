@@ -770,8 +770,8 @@ fn open_terminal(
 // ════════════════════════════════════════════════
 
 #[tauri::command]
-fn get_agents() -> Vec<AgentInfo> {
-    agents::list_agents()
+fn get_agents(include_versions: Option<bool>) -> Vec<AgentInfo> {
+    agents::list_agents(include_versions.unwrap_or(true))
 }
 
 // ════════════════════════════════════════════════
@@ -1776,7 +1776,7 @@ pub fn run() {
 
             if let Some(win) = app.get_webview_window("main") {
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    std::thread::sleep(std::time::Duration::from_secs(3));
                     let _ = win.show();
                 });
             }
