@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0 - 2026-07-08
+
+### Added
+
+- Added Grok (xAI's Grok Build) as a fully supported CLI agent: install detection and one-line curl/PowerShell installer, YOLO auto-approve mode (`--always-approve`), headless one-shot prompts, model tuning (Build 0.1 / Grok 4.3 / Grok 4) and slash-command autocomplete in the composer, a best-effort session-handoff reader, and "Continue on..." handoff support in both directions.
+
+### Changed
+
+- Startup no longer blocks on a `--version` subprocess per installed agent CLI; the agent list renders immediately and versions backfill in the background. The login-shell PATH probe (used so GUI-launched builds see Homebrew/npm/Cargo-installed binaries) now warms on a background thread with an 8s timeout instead of blocking app launch, and the window-show delay dropped from 10s to 3s.
+- The CodeMirror editor and diff review panes now lazy-load their JS chunks on first visit instead of shipping in the startup bundle, and restoring agent tabs on launch now spawns them in parallel instead of one at a time.
+- Release binaries are now built with thin LTO, single codegen unit, and stripped symbols for a smaller, faster-loading binary.
+
+## 0.3.0 - 2026-07-07
+
+### Added
+
+- Added a multi-agent orchestrator: a visual flow canvas to chain agent steps, queue prompts per node, gate handoffs for manual review, and auto-fire the next step on completion sniffing (bell/idle/exit). Includes per-agent model/effort tuning in the prompt composer and spawn-time flags for queued steps.
+
 ## 0.2.1 - 2026-07-05
 
 ### Added
