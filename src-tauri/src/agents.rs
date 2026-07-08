@@ -163,6 +163,17 @@ pub static AGENTS: &[AgentDef] = &[
         icon: "/agents/droid.png",
         headless_args: None,
     },
+    AgentDef {
+        id: "grok",
+        name: "Grok",
+        binary: "grok",
+        aliases: &[],
+        description: "xAI's Grok Build coding agent CLI",
+        launch_args: &[],
+        yolo_launch_args: &["--always-approve"],
+        icon: "/agents/grok.png",
+        headless_args: Some(&["-p"]),
+    },
 ];
 
 /// Resolve the actual binary path for an agent, trying primary + aliases.
@@ -219,7 +230,11 @@ fn get_version(def: &AgentDef, binary: &str) -> Option<String> {
 }
 
 /// Build the full AgentInfo list (detect installed status).
-pub fn list_agents() -> Vec<AgentInfo> {
+///
+/// `include_versions: false` skips the `--version` subprocess per installed
+/// agent (slow for Node-based CLIs) so startup can render the agent list
+/// immediately and backfill versions later.
+pub fn list_agents(include_versions: bool) -> Vec<AgentInfo> {
     std::thread::scope(|s| {
         let handles: Vec<_> = AGENTS
             .iter()
@@ -227,7 +242,7 @@ pub fn list_agents() -> Vec<AgentInfo> {
                 s.spawn(move || {
                     let binary_path = resolve_binary(def);
                     let installed = binary_path.is_some();
-                    let version = if installed {
+                    let version = if installed && include_versions {
                         let bin = launch_binary(def).unwrap_or_default();
                         get_version(def, &bin)
                     } else {

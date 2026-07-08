@@ -268,6 +268,19 @@ pub static CATALOG: &[ToolEntry] = &[
         ],
     },
     ToolEntry {
+        id: "grok",
+        name: "Grok",
+        description: "xAI's Grok Build coding agent CLI",
+        binary: "grok",
+        icon: "/agents/grok.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl -fsSL https://x.ai/cli/install.sh | bash" },
+            InstallSpec::Shell { os: "linux", command: "curl -fsSL https://x.ai/cli/install.sh | bash" },
+            InstallSpec::Shell { os: "windows", command: "powershell -Command \"irm https://x.ai/cli/install.ps1 | iex\"" },
+        ],
+    },
+    ToolEntry {
         id: "typescript-language-server",
         name: "TypeScript Language Server",
         description: "IntelliSense (completions, hover, diagnostics) for TS/JS files",

@@ -237,7 +237,7 @@ export function selectWorkspaceMode(mode: WorkspaceMode) {
 // ── Agent helpers ─────────────────────────────────────────────────────────────
 
 export const CONTINUE_AGENT_IDS = new Set([
-  "claude", "codex", "cursor", "opencode", "agy", "cline", "qwen", "droid", "aider", "goose", "plandex",
+  "claude", "codex", "cursor", "opencode", "agy", "cline", "qwen", "droid", "grok", "aider", "goose", "plandex",
 ]);
 
 const CONTINUE_TARGET_KEY = "flipflopper:continue-targets";

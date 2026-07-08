@@ -849,6 +849,29 @@ fn droid_latest(project_path: &str) -> Option<HandoffContext> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Grok Build (xAI) — undocumented JSONL shape; best-effort Claude-style parse
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn grok_latest(project_path: &str) -> Option<HandoffContext> {
+    let home = home()?;
+    let dir = home.join(".grok").join("sessions");
+    if !dir.is_dir() {
+        return None;
+    }
+
+    let files = find_files_recursive(&dir, 3, "jsonl");
+    let matching = files.into_iter().filter(|p| {
+        first_json_line(p)
+            .and_then(|v| v.get("cwd").and_then(Value::as_str).map(str::to_string))
+            .as_deref()
+            == Some(project_path)
+    });
+    let mut ctx = claude_parse_jsonl(&newest_file(matching)?)?;
+    ctx.source_name = "Grok".into();
+    Some(ctx)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Cline  (VS Code globalStorage JSON)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -945,6 +968,7 @@ fn find_latest_session(agent_id: &str, project_path: &str) -> Option<HandoffCont
         "qwen" => qwen_latest(project_path),
         "opencode" => opencode_latest(project_path),
         "droid" => droid_latest(project_path),
+        "grok" => grok_latest(project_path),
         "cline" => cline_latest(project_path),
         // aider / goose / plandex have no structured on-disk session files → git-only
         _ => None,
@@ -1179,7 +1203,8 @@ fn launch_command(to_id: &str, from_name: &str, yolo: bool) -> Result<String, St
         "claude" | "codex" | "gemini" | "droid" => format!("{bin_q}{yolo_prefix} {prompt_q}"),
         // -i flag needed; positional alone is one-shot for these agents
         "qwen" | "agy" => format!("{bin_q}{yolo_prefix} -i {prompt_q}"),
-        // No reliable interactive-seed flag; handoff.md is still written
+        // No reliable interactive-seed flag; handoff.md is still written.
+        // Grok intentionally lands here until its TUI seed behavior is documented.
         _ => format!("{bin_q}{yolo_prefix}"),
     })
 }

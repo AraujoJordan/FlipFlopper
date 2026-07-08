@@ -19,7 +19,7 @@ Currently implemented:
 
 - Embedded PTY-backed terminal tabs for installed CLI agents.
 - Agent registry and install detection for Claude Code, Codex, Cursor CLI,
-  OpenCode, Aider, Goose, agy, Cline, Qwen Code, Plandex, and Droid.
+  OpenCode, Aider, Goose, agy, Cline, Qwen Code, Plandex, Droid, and Grok.
 - Project picker, recent project persistence, and per-project `.agents/`
   scaffolding.
 - Lazy, `.gitignore`-aware file explorer that highlights git status and opens
@@ -181,8 +181,8 @@ requires generated output.
 - `handoff.rs` is best-effort. Missing session stores should fall back to git
   context, not fail the handoff.
 - Handoff has structured readers for Claude Code, Codex, agy/Gemini, Qwen,
-  OpenCode, Droid, and Cline. Aider, Cursor CLI, Goose, and Plandex currently
-  fall back to git-only context.
+  OpenCode, Droid, Grok, and Cline. Aider, Cursor CLI, Goose, and Plandex
+  currently fall back to git-only context.
 
 ## Frontend Contracts
 

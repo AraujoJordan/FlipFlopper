@@ -158,6 +158,16 @@ export const AGENT_TUNING: Record<string, AgentTuning> = {
     efforts: [],
     spawnArgs: (model) => (model ? ["--model", model] : []),
   },
+  grok: {
+    models: [
+      { id: "grok-build-0.1", label: "Build 0.1" },
+      { id: "grok-4.3", label: "Grok 4.3" },
+      { id: "grok-4", label: "Grok 4" },
+    ],
+    efforts: [],
+    modelCommand: (id) => `/model ${id}`,
+    spawnArgs: (model) => (model ? ["-m", model] : []),
+  },
 };
 
 export function agentTuning(agentId: string): AgentTuning | null {
@@ -516,6 +526,10 @@ export const AGENT_SLASH_COMMANDS: Record<string, AgentCommand[]> = {
     { name: "terminal-setup", description: "Configure terminal keybindings" },
     { name: "themes", description: "Choose a color theme" },
   ],
+  grok: [
+    { name: "model", description: "Switch model" },
+    { name: "feedback", description: "Send feedback" },
+  ],
 };
 
 export function stripAnsi(value: string) {
@@ -581,6 +595,7 @@ const AGENT_COLORS: Record<string, string> = {
   goose: "#56d364",
   plandex: "#a5d6ff",
   droid: "#f778ba",
+  grok: "#ffffff",
   run: "#3fb950",
   validate: "#58a6ff",
 };
@@ -592,7 +607,7 @@ export function agentColor(agentId: string): string {
 export function agentLetter(agentId: string): string {
   const map: Record<string, string> = {
     claude: "C", qwen: "Q", gemini: "G", codex: "X", cursor: "C",
-    agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R",
+    agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R", grok: "G",
     run: "▶",
     validate: "✓",
   };
