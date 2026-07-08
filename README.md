@@ -6,8 +6,9 @@
 
 **One AI IDE. Every CLI coding agent. Zero terminal-tab chaos.**
 
-Because juggling Claude Code, Codex, agy, and Aider in seven different
-terminal windows was making you flip out (and then flop back).
+FlipFlopper is a cross-platform desktop IDE cockpit for easy switch AI CLI coding agents. It keeps
+real terminals, local files, git history, and agent handoffs in one place so you can switch tools
+without losing context.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Built with Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB.svg?logo=tauri)](https://tauri.app)
@@ -25,30 +26,16 @@ terminal windows was making you flip out (and then flop back).
 
 ---
 
-## What is this?
-
-FlipFlopper is a cross-platform desktop IDE cockpit for CLI coding agents. It keeps
-real terminals, local files, git history, and agent handoffs in one place so you
-can switch tools without losing context.
-
-## Why not just pick one agent and live in its IDE?
+## But why??
 
 Because the whole agentic-coding industry is running on VC cash and government
-subsidy money right now, well below what the underlying tokens actually cost.
-That's not a pricing model, that's a runway. Runways end. When they do, the
-squeeze shows up as lower usage caps, "unlimited" plans that quietly grow an
-asterisk, and rate limits tuned to nudge you onto a pricier tier or buying
-tokens a la carte.
+subsidy money right now, well below what the underlying tokens actually cost,
+specially on subscription models. They're all hoping to lock you in on their cli to increase costs later.
 
-Betting your whole workflow on one vendor's terminal means eating that squeeze
-whenever it lands on you specifically. It's also how lock-in happens quietly:
-a cheap plan feels like a deal right up until your habits, your prompts, and
-your muscle memory are all built around one vendor's CLI, and switching costs
-more than the subscription ever saved you. FlipFlopper treats CLI agents as
-swappable engines instead of a home you move into: same terminals, same git
-history, same project context, whichever agent is behind the wheel. When one
-vendor tightens the screws, you flip to another instead of flopping around
-rewriting your whole setup.
+FlipFlopper treats CLI agents as swappable engines instead of a home you move into:
+same terminals, same git history, same project context, whichever agent is behind 
+the wheel. When one vendor tightens the screws, you flip to another instead of 
+flopping around rewriting your whole setup.
 
 ## Features
 
