@@ -2,6 +2,7 @@ import { Component, For, Show, createMemo, createSignal, onCleanup, onMount } fr
 import { Portal } from "solid-js/web";
 import { store, addTab, lastUsableAgent } from "../lib/store";
 import { spawnAgent, ptyInput, type AgentInfo } from "../lib/ipc";
+import { markSessionTaskStarted } from "../lib/orchestrator";
 import { agentColor, AgentLogo } from "../lib/agentMeta";
 import { Button, toast } from "./ui";
 
@@ -108,6 +109,7 @@ const AgentTaskDialogHost: Component = () => {
     try {
       const active = activeTab();
       if (active) {
+        markSessionTaskStarted(active.sessionId);
         await ptyInput(active.sessionId, `${prompt}\r`);
         closeDialog();
         return;
@@ -123,6 +125,7 @@ const AgentTaskDialogHost: Component = () => {
       // Give the freshly-spawned agent a moment to print its banner before we
       // send, so the seed doesn't get eaten by the CLI's startup sequence.
       setTimeout(() => {
+        markSessionTaskStarted(sessionId);
         ptyInput(sessionId, `${prompt}\r`).catch((e) =>
           toast(`Failed to seed prompt: ${String(e)}`, "error"),
         );

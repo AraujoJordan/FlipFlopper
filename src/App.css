@@ -978,3 +978,36 @@ input, textarea {
   color: inherit;
   resize: none;
 }
+
+/* ── Flow orchestrator canvas ─────────────────────────────────────────────── */
+
+.flow-port {
+  opacity: 0;
+  transition: opacity 140ms ease, transform 140ms ease;
+  transform: translateY(-50%) scale(0.8);
+}
+
+.flow-port:hover {
+  opacity: 1 !important;
+  transform: translateY(-50%) scale(1.1);
+}
+
+/* Reveal the port when its card is hovered. */
+.flow-card:hover > .flow-port {
+  opacity: 0.85;
+}
+
+@keyframes flow-gate-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0px rgba(192, 132, 252, .5);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(192, 132, 252, 0);
+    transform: scale(1.08);
+  }
+}
+
+.flow-gate-pulse {
+  animation: flow-gate-pulse 1.4s ease-in-out infinite;
+}

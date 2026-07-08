@@ -14,7 +14,23 @@ import { getFileIcon } from "../lib/fileIcons";
 import { NewAgentMenu } from "./AgentBar";
 import { toast, Spinner } from "./ui";
 import { registerShortcutHandler } from "../lib/shortcuts";
-import { agentColor, AgentLogo, AGENT_SLASH_COMMANDS, agentModeLabel } from "../lib/agentMeta";
+import { agentColor, AgentLogo, AGENT_SLASH_COMMANDS, agentModeLabel, agentTuning } from "../lib/agentMeta";
+import { markSessionTaskStarted } from "../lib/orchestrator";
+
+const composerTuningSelectStyle = {
+  "font-family": "var(--font-mono)",
+  "font-size": "10.5px",
+  color: "var(--fg-subtle)",
+  background: "var(--surface-4)",
+  border: "1px solid var(--border-default)",
+  "border-radius": "6px",
+  height: "24px",
+  padding: "0 4px",
+  flex: "0 0 auto",
+  "margin-bottom": "5px",
+  outline: "none",
+  cursor: "pointer",
+} as const;
 
 type CompletionKind = "file" | "skill" | "command";
 
@@ -637,6 +653,7 @@ const PromptComposer: Component = () => {
         addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
       }
 
+      markSessionTaskStarted(sessionId);
       await ptyInput(sessionId, `${text}\r`);
       pushHistory(text);
       const restored = stashedPrompt();
@@ -738,6 +755,40 @@ const PromptComposer: Component = () => {
       e.preventDefault();
       send();
     }
+  }
+
+  // ── Model / effort choosers ────────────────────────────────────────────────
+  // Selecting a value types the agent's own slash command into the active
+  // session right away; the choice is remembered per session so switching
+  // tabs shows what was last applied here.
+  const [sessionTuning, setSessionTuning] = createSignal<
+    Record<string, { model?: string; effort?: string }>
+  >({});
+  const composerTuning = () => {
+    const tab = activeTab();
+    const t = tab ? agentTuning(tab.agentId) : null;
+    // Live switching needs an in-session command; spawn-flag-only agents
+    // (codex, opencode) can only be tuned on queued steps.
+    return t?.modelCommand ? t : null;
+  };
+  const tuningValue = (kind: "model" | "effort") => {
+    const tab = activeTab();
+    return (tab && sessionTuning()[tab.sessionId]?.[kind]) ?? "";
+  };
+
+  function applySessionTuning(kind: "model" | "effort", value: string) {
+    const tab = activeTab();
+    const t = composerTuning();
+    if (!tab || !t) return;
+    setSessionTuning((prev) => ({
+      ...prev,
+      [tab.sessionId]: { ...prev[tab.sessionId], [kind]: value || undefined },
+    }));
+    if (!value) return; // "default": nothing to send, agent keeps its setting
+    const command = kind === "model" ? t.modelCommand?.(value) : t.effortCommand?.(value);
+    if (!command) return;
+    void triggerHaptic("generic");
+    ptyInput(tab.sessionId, command + "\r").catch((e) => toast(String(e), "error"));
   }
 
   return (
@@ -974,6 +1025,37 @@ const PromptComposer: Component = () => {
               {stashedPrompt()}
             </span>
           </button>
+        </Show>
+
+        <Show when={composerTuning()}>
+          {(t) => (
+            <>
+              <select
+                value={tuningValue("model")}
+                onchange={(e) => applySessionTuning("model", e.currentTarget.value)}
+                title="Switch the agent's model"
+                style={composerTuningSelectStyle}
+              >
+                <option value="">Model</option>
+                <For each={t().models}>
+                  {(option) => <option value={option.id}>{option.label}</option>}
+                </For>
+              </select>
+              <Show when={t().efforts.length > 0}>
+                <select
+                  value={tuningValue("effort")}
+                  onchange={(e) => applySessionTuning("effort", e.currentTarget.value)}
+                  title="Switch the agent's reasoning effort"
+                  style={composerTuningSelectStyle}
+                >
+                  <option value="">Effort</option>
+                  <For each={t().efforts}>
+                    {(option) => <option value={option.id}>{option.label}</option>}
+                  </For>
+                </select>
+              </Show>
+            </>
+          )}
         </Show>
 
         <Show when={modeLabel()}>

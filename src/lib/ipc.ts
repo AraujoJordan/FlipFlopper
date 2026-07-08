@@ -150,8 +150,13 @@ export interface ValidationTarget {
 
 // ── PTY ──────────────────────────────────────────────────────────────────────
 
-export const spawnAgent = (agentId: string, projectPath: string, yolo = false): Promise<string> =>
-  invoke("spawn_agent", { agentId, projectPath, yolo });
+export const spawnAgent = (
+  agentId: string,
+  projectPath: string,
+  yolo = false,
+  extraArgs?: string[],
+): Promise<string> =>
+  invoke("spawn_agent", { agentId, projectPath, yolo, extraArgs: extraArgs ?? null });
 
 export const ptyInput = (sessionId: string, data: string): Promise<void> =>
   invoke("pty_input", { sessionId, data });

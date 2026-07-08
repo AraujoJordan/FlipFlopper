@@ -36,6 +36,134 @@ export const AGENT_MODE_SUPPORT: Record<string, AgentModeSupport> = {
   },
 };
 
+// ── Queued-step tuning (model / effort) ──────────────────────────────────────
+// Two mechanisms, per agent capability:
+//  - `modelCommand`/`effortCommand`: slash commands typed into a running TUI.
+//    Only for agents whose commands accept inline arguments — picker-only UIs
+//    (codex, droid) can't be driven this way, and opencode forwards unmatched
+//    slash text to the model as a prompt.
+//  - `spawnArgs`: CLI flags appended when the orchestrator spawns a fresh
+//    session for a queued step (codex `-m`/`-c`, cursor/opencode `--model`).
+
+export interface AgentTuningOption {
+  id: string;
+  label: string;
+}
+
+export interface AgentTuning {
+  models: AgentTuningOption[];
+  /** empty when the agent has no effort-style setting */
+  efforts: AgentTuningOption[];
+  /** live, in-session switching (also used for queued steps if no spawnArgs) */
+  modelCommand?: (id: string) => string;
+  effortCommand?: (id: string) => string;
+  /** launch-time flags for freshly spawned step sessions */
+  spawnArgs?: (model: string | null, effort: string | null) => string[];
+}
+
+const GEMINI_FAMILY_MODELS: AgentTuningOption[] = [
+  { id: "gemini-3-pro-preview", label: "3 Pro" },
+  { id: "gemini-3-flash-preview", label: "3 Flash" },
+  { id: "gemini-2.5-pro", label: "2.5 Pro" },
+  { id: "gemini-2.5-flash", label: "2.5 Flash" },
+];
+
+export const AGENT_TUNING: Record<string, AgentTuning> = {
+  claude: {
+    models: [
+      { id: "fable", label: "Fable" },
+      { id: "opus", label: "Opus" },
+      { id: "sonnet", label: "Sonnet" },
+      { id: "haiku", label: "Haiku" },
+    ],
+    efforts: [
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium" },
+      { id: "high", label: "High" },
+    ],
+    modelCommand: (id) => `/model ${id}`,
+    effortCommand: (id) => `/effort ${id}`,
+  },
+  agy: {
+    models: GEMINI_FAMILY_MODELS,
+    efforts: [],
+    modelCommand: (id) => `/model ${id}`,
+  },
+  qwen: {
+    models: [
+      { id: "qwen3-coder-plus", label: "Coder Plus" },
+      { id: "qwen3-coder-flash", label: "Coder Flash" },
+      ...GEMINI_FAMILY_MODELS,
+    ],
+    efforts: [],
+    modelCommand: (id) => `/model ${id}`,
+  },
+  aider: {
+    models: [
+      { id: "sonnet", label: "Sonnet" },
+      { id: "opus", label: "Opus" },
+      { id: "haiku", label: "Haiku" },
+      { id: "flash", label: "Gemini Flash" },
+      { id: "deepseek", label: "DeepSeek" },
+    ],
+    efforts: [
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium" },
+      { id: "high", label: "High" },
+    ],
+    modelCommand: (id) => `/model ${id}`,
+    effortCommand: (id) => `/reasoning-effort ${id}`,
+  },
+  codex: {
+    models: [
+      { id: "gpt-5.3-codex", label: "Codex 5.3" },
+      { id: "gpt-5.2-codex", label: "Codex 5.2" },
+      { id: "gpt-5.2", label: "GPT-5.2" },
+      { id: "gpt-5.1-codex-mini", label: "Codex Mini" },
+    ],
+    efforts: [
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium" },
+      { id: "high", label: "High" },
+      { id: "xhigh", label: "Extra High" },
+    ],
+    spawnArgs: (model, effort) => [
+      ...(model ? ["-m", model] : []),
+      ...(effort ? ["-c", `model_reasoning_effort=${effort}`] : []),
+    ],
+  },
+  cursor: {
+    // Cursor bakes effort into the model id (…-low/-high/-xhigh).
+    models: [
+      { id: "auto", label: "Auto" },
+      { id: "gpt-5.3-codex", label: "Codex 5.3" },
+      { id: "gpt-5.3-codex-high", label: "Codex 5.3 High" },
+      { id: "gpt-5.3-codex-xhigh", label: "Codex 5.3 XHigh" },
+      { id: "claude-4.5-sonnet", label: "Sonnet 4.5" },
+      { id: "claude-4.5-sonnet-thinking", label: "Sonnet 4.5 Thinking" },
+      { id: "gemini-3-flash", label: "Gemini 3 Flash" },
+    ],
+    efforts: [],
+    modelCommand: (id) => `/model ${id}`,
+    spawnArgs: (model) => (model ? ["--model", model] : []),
+  },
+  opencode: {
+    models: [
+      { id: "opencode/claude-sonnet-5", label: "Sonnet 5" },
+      { id: "opencode/claude-opus-4-8", label: "Opus 4.8" },
+      { id: "opencode/gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+      { id: "opencode/glm-5.1", label: "GLM 5.1" },
+      { id: "opencode/deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+    ],
+    efforts: [],
+    spawnArgs: (model) => (model ? ["--model", model] : []),
+  },
+};
+
+export function agentTuning(agentId: string): AgentTuning | null {
+  return AGENT_TUNING[agentId] ?? null;
+}
+
 export const AGENT_SLASH_COMMANDS: Record<string, AgentCommand[]> = {
   claude: [
     { name: "clear", description: "Clear conversation history" },

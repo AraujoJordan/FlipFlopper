@@ -70,6 +70,7 @@ pub fn spawn_session(
     agent_id: &str,
     project_path: &str,
     yolo: bool,
+    extra_args: &[String],
 ) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
     let def = find_agent(agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
     if yolo && def.yolo_launch_args.is_empty() {
@@ -103,6 +104,10 @@ pub fn spawn_session(
         for arg in def.yolo_launch_args {
             cmd.arg(arg);
         }
+    }
+    // Per-launch tuning (e.g. `-m <model>`) appended by the orchestrator.
+    for arg in extra_args {
+        cmd.arg(arg);
     }
     cmd.cwd(project_path);
     cmd.env("PATH", augmented_path_string());

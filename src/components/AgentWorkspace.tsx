@@ -5,6 +5,7 @@ import { agentColor, AgentLogo } from "../lib/agentMeta";
 import AgentBar from "./AgentBar";
 import TerminalPane from "./TerminalPane";
 import YoloButton from "./YoloButton";
+import OrchestratorPanel from "./flow/OrchestratorPanel";
 import { Menu, MenuLabel, MenuItem, Spinner, toast } from "./ui";
 
 const LIQUID_DOT_COUNT = 6200;
@@ -476,7 +477,10 @@ const AgentWorkspace: Component = () => {
         </div>
       </div>
 
-      <div style={{ flex: "1", position: "relative", overflow: "hidden", "min-height": 0 }}>
+      <div style={{
+        flex: store.tabs.length > 0 && store.orchestratorMaximized ? "0 0 0px" : "1",
+        position: "relative", overflow: "hidden", "min-height": 0,
+      }}>
         <Show when={store.tabs.length === 0}>
           <div class="empty-agent-workspace">
             <EmptyAgentLiquidDotsBackground targetColor={() => hoveredAgentColor() ?? DEFAULT_LIQUID_COLOR} />
@@ -552,6 +556,11 @@ const AgentWorkspace: Component = () => {
           )}
         </For>
       </div>
+
+      {/* Orchestration panel: visible whenever at least one agent is open. */}
+      <Show when={store.tabs.length > 0}>
+        <OrchestratorPanel />
+      </Show>
     </div>
   );
 };

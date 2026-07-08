@@ -704,8 +704,10 @@ fn spawn_agent(
     agent_id: String,
     project_path: String,
     yolo: bool,
+    extra_args: Option<Vec<String>>,
 ) -> Result<String, String> {
-    let (session_id, rx) = pty::spawn_session(&state, &agent_id, &project_path, yolo)?;
+    let extra_args = extra_args.unwrap_or_default();
+    let (session_id, rx) = pty::spawn_session(&state, &agent_id, &project_path, yolo, &extra_args)?;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }

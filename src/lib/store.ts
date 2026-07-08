@@ -109,11 +109,15 @@ export interface AppStore {
   activeTerminalId: string | null;
   terminalPanelOpen: boolean;
   terminalPanelHeight: number;
+  orchestratorHeight: number;
+  orchestratorMaximized: boolean;
 }
 
 const YOLO_MODE_KEY = "flipflopper:yolo-mode";
 const TERMINAL_PANEL_HEIGHT_KEY = "flipflopper:terminal-panel-height";
 const DEFAULT_TERMINAL_PANEL_HEIGHT = 240;
+const ORCHESTRATOR_HEIGHT_KEY = "flipflopper:orchestrator-height";
+const DEFAULT_ORCHESTRATOR_HEIGHT = 260;
 
 function readNumber(key: string, fallback: number): number {
   try {
@@ -190,6 +194,8 @@ const initial: AppStore = {
   activeTerminalId: null,
   terminalPanelOpen: false,
   terminalPanelHeight: readNumber(TERMINAL_PANEL_HEIGHT_KEY, DEFAULT_TERMINAL_PANEL_HEIGHT),
+  orchestratorHeight: readNumber(ORCHESTRATOR_HEIGHT_KEY, DEFAULT_ORCHESTRATOR_HEIGHT),
+  orchestratorMaximized: false,
 };
 
 export const [store, setStore] = createStore<AppStore>(initial);
@@ -575,6 +581,20 @@ export function setTerminalPanelHeight(px: number) {
   const clamped = Math.min(Math.max(px, 80), window.innerHeight * 0.7);
   setStore("terminalPanelHeight", clamped);
   try { localStorage.setItem(TERMINAL_PANEL_HEIGHT_KEY, String(clamped)); } catch { /* ignore */ }
+}
+
+// ── Orchestrator panel helpers ────────────────────────────────────────────────
+
+export function setOrchestratorHeight(px: number) {
+  const clamped = Math.min(Math.max(px, 120), window.innerHeight * 0.7);
+  setStore("orchestratorHeight", clamped);
+  try {
+    localStorage.setItem(ORCHESTRATOR_HEIGHT_KEY, String(clamped));
+  } catch { /* ignore */ }
+}
+
+export function toggleOrchestratorMaximized() {
+  setStore("orchestratorMaximized", (v) => !v);
 }
 
 export async function killAndClearAllTerminals() {

@@ -5,6 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import { onPtyOutput, onPtyExit, ptyInput, ptyResize, ptyAttach, triggerHaptic } from "../lib/ipc";
 import { runAction } from "../lib/shortcuts";
 import { clearAgentMode, cycleAgentModeOptimistic, sniffAgentMode, setTabNeedsAttention, store } from "../lib/store";
+import { cleanTerminalText, isMeaningfulOutput } from "../lib/orchestrator";
 
 interface Props {
   sessionId: string;
@@ -117,7 +118,10 @@ const TerminalPane: Component<Props> = (props) => {
       terminal.write(data);
       sniffAgentMode(props.sessionId, data);
 
-      resetIdleTimer();
+      // Query-poll noise (cursor-position replies etc.) is not agent activity;
+      // letting it reset the timer means the idle alert never fires for TUIs
+      // that poll the terminal continuously.
+      if (isMeaningfulOutput(cleanTerminalText(data))) resetIdleTimer();
 
       if (/(?:\? \(y\/n\)|\? \[y\/N\]|Password:)\s*$/i.test(data)) {
         setTabNeedsAttention(props.sessionId, true);

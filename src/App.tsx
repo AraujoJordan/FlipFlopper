@@ -33,6 +33,14 @@ import {
   type ProjectInfo,
 } from "./lib/ipc";
 import type { Tab, WorkspaceMode } from "./lib/store";
+import {
+  initOrchestrator,
+  loadFlowsForProject,
+  rebindNode,
+  flowNodeIdForSession,
+  markPendingRebinds,
+  clearPendingRebinds,
+} from "./lib/orchestrator";
 import AgentWorkspace from "./components/AgentWorkspace";
 import BranchIndicator from "./components/BranchIndicator";
 import TerminalPanel from "./components/TerminalPanel";
@@ -68,7 +76,7 @@ const WORKSPACE_KEY = "flipflopper:last-workspace";
 
 interface PersistedWorkspace {
   projectPath: string | null;
-  tabs: { agentId: string }[];
+  tabs: { agentId: string; flowNodeId?: string }[];
   activeIndex: number;
 }
 
@@ -232,6 +240,7 @@ const App: Component = () => {
     }
     setStore("currentProject", project);
     setStore("fileTreePath", project.path);
+    loadFlowsForProject(project.path);
   }
 
   function closeProject() {
@@ -249,6 +258,7 @@ const App: Component = () => {
     setStore("currentBranch", "");
     setStore("historyFilterPath", null);
     setStore("workspaceMode", "agent");
+    loadFlowsForProject(null);
   }
 
   async function handleNativeMenuCommand(id: string) {
@@ -316,6 +326,7 @@ const App: Component = () => {
   }
 
   onMount(async () => {
+    initOrchestrator();
     requestAnimationFrame(() => {
       void win.show().then(() => win.setFocus());
     });
@@ -340,6 +351,15 @@ const App: Component = () => {
         const tabsToRestore = persisted?.tabs ?? [];
         const restoredTabs: Tab[] = [];
 
+        // Mark persisted live nodes as pending-rebind so the tab-sync effect
+        // doesn't prune them as edge-less detached nodes before rebind runs.
+        const pendingIds = tabsToRestore
+          .map((t) => t.flowNodeId)
+          .filter((id): id is string => !!id);
+        if (pendingIds.length > 0) markPendingRebinds(pendingIds);
+
+        let gatedCount = 0;
+
         for (const saved of tabsToRestore) {
           const agent = agents.find((a) => a.id === saved.agentId);
           if (!agent?.installed) continue;
@@ -352,8 +372,17 @@ const App: Component = () => {
               agentIcon: agent.icon,
             };
             restoredTabs.push(tab);
+            // Rebind BEFORE addTab so the tab-sync effect sees the already-
+            // bound node instead of creating a duplicate live node.
+            if (saved.flowNodeId) {
+              gatedCount += rebindNode(saved.flowNodeId, sessionId);
+            }
             addTab(tab);
           } catch { /* skip failed restore */ }
+        }
+        clearPendingRebinds();
+        if (gatedCount > 0) {
+          toast("Workflow restored — chains paused for review");
         }
         updateCurrentBranch();
       } catch { /* first run or path gone */ }
@@ -379,7 +408,10 @@ const App: Component = () => {
     const activeIndex = tabs.findIndex((t) => t.sessionId === store.activeTabId);
     writeWorkspace({
       projectPath: project?.path ?? null,
-      tabs: tabs.map((t) => ({ agentId: t.agentId })),
+      tabs: tabs.map((t) => ({
+        agentId: t.agentId,
+        flowNodeId: flowNodeIdForSession(t.sessionId) ?? undefined,
+      })),
       activeIndex: Math.max(0, activeIndex),
     });
   });
