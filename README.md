@@ -28,7 +28,7 @@ without losing context.
 
 ---
 
-## But why??
+## 🤔 But why??
 
 Because the whole agentic-coding industry is running on VC cash and government
 subsidy money right now, well below what the underlying tokens actually cost,
@@ -37,9 +37,10 @@ specially on subscription models. They're all hoping to lock you in on their cli
 FlipFlopper treats CLI agents as swappable engines instead of a home you move into:
 same terminals, same git history, same project context, whichever agent is behind 
 the wheel. When one vendor tightens the screws, you flip to another instead of 
-flopping around rewriting your whole setup.
+flopping around rewriting your whole setup. No agent loyalty here, we're
+serial monogamists at best.
 
-## Features
+## ✨ Features
 
 - **Embedded PTY terminals** - each agent gets a real terminal tab backed by `portable-pty`.
 - **Agent registry** - detects installed CLI agents, their PATH, and version info.
@@ -51,12 +52,13 @@ flopping around rewriting your whole setup.
 - **Agent handoff** - reads available session state, writes `.agents/handoff.md`, appends `.agents/context.md`, and launches the target agent with seeded context when supported.
 - **Tool catalog** - discovers installable tools and generates install commands from the backend.
 
-## Supported agents
+## 🕹️ Supported agents
 
 Claude Code, Codex, Cursor CLI, OpenCode, Aider, Goose, agy, Cline, Qwen Code,
-Plandex, Droid, and Grok.
+Plandex, Droid, and Grok. Yes, all of them. Yes, in one app. No, you don't
+need eleven terminal emulators pinned to your taskbar anymore.
 
-## Stack
+## 🧱 Stack
 
 - **Backend:** Rust + Tauri 2 (`src-tauri/`)
 - **Frontend:** SolidJS + Vite + TypeScript (`src/`)
@@ -67,7 +69,7 @@ For the full file-by-file source map, see the "Source Map" section in
 [AGENTS.md](AGENTS.md), the canonical, agent-facing architecture doc that
 this README stays in sync with.
 
-## Download
+## 📦 Download
 
 **macOS via Homebrew:**
 
@@ -91,7 +93,7 @@ brew install --cask flipflopper
 
 ---
 
-## Getting started
+## 🚀 Getting started
 
 You'll need [Node.js](https://nodejs.org), [Rust](https://rustup.rs), and the
 [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your OS.
@@ -109,15 +111,15 @@ cd src-tauri && cargo check    # Rust must be happy
 npx tsc --noEmit               # TypeScript must also be happy
 ```
 
-## Contributing
+## 🤝 Contributing
 
 PRs and issues welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup,
 sanity checks, and commit conventions, and the
 [Contributor Covenant](CODE_OF_CONDUCT.md) for community expectations. Found
 a security issue? See [SECURITY.md](SECURITY.md) instead of filing a public
-issue.
+issue (we promise not to make you fill out a CVE form in crayon).
 
-## Trademarks and notices
+## ™️ Trademarks and notices
 
 FlipFlopper itself is MIT licensed (see below). The agent logos bundled in
 [`public/agents/`](public/agents/) are trademarks of their respective owners
@@ -125,7 +127,7 @@ FlipFlopper itself is MIT licensed (see below). The agent logos bundled in
 tool so you know which button does what. FlipFlopper is an independent project
 and is not affiliated with, sponsored by, or endorsed by any of them.
 
-## License
+## 📜 License
 
 [MIT](LICENSE) (c) 2026 Jordan L. Araujo Jr. Go build something. Flip
 responsibly.
