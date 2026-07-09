@@ -10,6 +10,8 @@ FlipFlopper is a cross-platform desktop IDE cockpit for easy switch AI CLI codin
 real terminals, local files, git history, and agent handoffs in one place so you can switch tools
 without losing context.
 
+[![Build](https://github.com/AraujoJordan/FlipFlopper/actions/workflows/build.yml/badge.svg)](https://github.com/AraujoJordan/FlipFlopper/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/AraujoJordan/FlipFlopper)](https://github.com/AraujoJordan/FlipFlopper/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Built with Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB.svg?logo=tauri)](https://tauri.app)
 [![SolidJS](https://img.shields.io/badge/SolidJS-2C4F7C.svg?logo=solid)](https://solidjs.com)
@@ -52,7 +54,7 @@ flopping around rewriting your whole setup.
 ## Supported agents
 
 Claude Code, Codex, Cursor CLI, OpenCode, Aider, Goose, agy, Cline, Qwen Code,
-Plandex, and Droid.
+Plandex, Droid, and Grok.
 
 ## Stack
 
@@ -61,66 +63,31 @@ Plandex, and Droid.
 - **Key crates:** `portable-pty`, `which`, `ignore`, `dirs`, `rusqlite`
 - **Key npm bits:** `@xterm/xterm`, `@xterm/addon-fit`, `highlight.js`
 
-```
-src/
-  App.tsx                    top-level app shell, title bar, tabs, layout, menus, workspace restore
-  App.css                    global UI styles
-  index.tsx                  Solid entry point
-  lib/
-    ipc.ts                   typed Tauri invoke/listen wrappers
-    store.ts                 Solid store, tab/session helpers, review/editor state
-    cmTheme.ts               custom CodeMirror editor theme
-    shortcuts.ts             keyboard shortcut wiring
-  components/
-    AgentBar.tsx             terminal tab strip and new-tab behavior
-    AgentTaskDialog.tsx      agent task / handoff dialog
-    TerminalPane.tsx         xterm.js instance wired to PTY events
-    FileTree.tsx             lazy explorer, git status badges, review entry
-    OmniSearch.tsx           command/file search palette
-    RunButton.tsx            project run controls
-    ValidationButton.tsx     validation controls
-    PromptComposer.tsx       bottom prompt input, PTY send / auto-commit path
-    EditorPane.tsx           embedded CodeMirror file viewer/editor with conflict detection
-    PreviewPanel.tsx         UI preview split and snapshot browser
-    DiffPane.tsx             native unified/split diff overlay
-    git/
-      GitPanel.tsx           git changes/history workspace
-      SyncHeader.tsx         branch sync actions
-      ChangesTab.tsx         working tree view
-      HistoryTab.tsx         commit history view
-      ConflictFixDialog.tsx  merge conflict resolution helper
-      SquashPushDialog.tsx   squash-and-push flow
-    ui.tsx                   shared buttons, menus, dialogs, toasts
-
-src-tauri/src/
-  lib.rs                     Tauri builder, command registry, event bridge
-  main.rs                    native entry point
-  pty.rs                     portable-pty session lifecycle and shell commands
-  agents.rs                  static agent registry and PATH/version detection
-  project.rs                 AGENTS.md/.agents scaffolding, recents, file tree
-  git.rs                     shell-based status, commit, log, rename, rollback
-  review.rs                  git diff parser for native review pane
-  preview.rs                 UI preview detection, snapshot matching, image data URLs
-  editor.rs                  file read/write with in-project path safety
-  runner.rs                  run/validation target detection
-  tools.rs                   tool catalog, package manager detection, installs
-  handoff.rs                 in-house session parser and handoff launcher
-```
+For the full file-by-file source map, see the "Source Map" section in
+[AGENTS.md](AGENTS.md), the canonical, agent-facing architecture doc that
+this README stays in sync with.
 
 ## Download
 
-Pre-built binaries are attached to each
+**macOS via Homebrew:**
+
+```sh
+brew tap AraujoJordan/tap
+brew install --cask flipflopper
+```
+
+**Everyone else:** pre-built binaries are attached to each
 [GitHub Release](https://github.com/AraujoJordan/FlipFlopper/releases):
 
 | Platform | Installer |
 |---|---|
-| macOS (Apple Silicon) | `.dmg` (arm64) |
-| macOS (Intel) | `.dmg` (x64) |
+| macOS (Apple Silicon) | `.dmg` (arm64) or `brew install --cask flipflopper` |
+| macOS (Intel) | `.dmg` (x64) or `brew install --cask flipflopper` |
 | Windows | `.msi` or NSIS `.exe` |
 | Linux | `.AppImage` or `.deb` |
 
 > **Heads up:** builds are currently unsigned.
-> macOS: right-click the `.dmg` → Open. Windows: "More info" → "Run anyway".
+> macOS: right-click the `.dmg` → Open (not needed via Homebrew). Windows: "More info" → "Run anyway".
 
 ---
 
@@ -141,6 +108,15 @@ Sanity checks before you commit:
 cd src-tauri && cargo check    # Rust must be happy
 npx tsc --noEmit               # TypeScript must also be happy
 ```
+
+## Contributing
+
+PRs and issues welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup,
+sanity checks, and commit conventions, and the
+[Contributor Covenant](CODE_OF_CONDUCT.md) for community expectations. Found
+a security issue? See [SECURITY.md](SECURITY.md) instead of filing a public
+issue.
+
 ## Trademarks and notices
 
 FlipFlopper itself is MIT licensed (see below). The agent logos bundled in
@@ -153,3 +129,11 @@ and is not affiliated with, sponsored by, or endorsed by any of them.
 
 [MIT](LICENSE) (c) 2026 Jordan L. Araujo Jr. Go build something. Flip
 responsibly.
+
+---
+
+<div align="center">
+
+[![Star History Chart](https://api.star-history.com/svg?repos=AraujoJordan/FlipFlopper&type=Date)](https://star-history.com/#AraujoJordan/FlipFlopper&Date)
+
+</div>

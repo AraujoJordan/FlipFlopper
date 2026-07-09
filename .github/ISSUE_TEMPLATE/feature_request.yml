@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an idea or improvement for FlipFlopper
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, check [AGENTS.md](https://github.com/AraujoJordan/FlipFlopper/blob/main/AGENTS.md) to see if this is already covered or explicitly out of scope.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the pain point or workflow that's currently missing/awkward.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like FlipFlopper to do? Rough UI/UX ideas are welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds you're using today, or other approaches you considered.

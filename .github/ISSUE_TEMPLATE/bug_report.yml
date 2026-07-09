@@ -1,0 +1,61 @@
+name: Bug report
+description: Something in FlipFlopper isn't working right
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. The more concrete the repro, the faster it gets fixed.
+
+  - type: input
+    id: version
+    attributes:
+      label: FlipFlopper version
+      description: Help → About, or the version in the title bar / release you downloaded
+      placeholder: e.g. 0.4.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: agent
+    attributes:
+      label: CLI agent involved (if any)
+      description: Which agent tab was active, if the bug involves one (Claude Code, Codex, Cursor CLI, OpenCode, Aider, Goose, agy, Cline, Qwen Code, Plandex, Droid, Grok)
+      placeholder: e.g. Claude Code
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: What did you do, in order?
+      placeholder: |
+        1. Open project X
+        2. Start agent Y
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / screenshots
+      description: Terminal output, devtools console, or a screenshot/recording if it's a UI issue.
