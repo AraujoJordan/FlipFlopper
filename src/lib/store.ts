@@ -4,6 +4,17 @@ import { getAgents, getToolCatalog, installTool, onPtyExit, ptyKill, readFileTex
 import { confirmDialog } from "../components/ui";
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import {
+  readLegacyBool,
+  readLegacyJson,
+  readLegacyNumber,
+  readPref,
+  writePref,
+} from "./appPrefs";
+import {
+  requestNotificationPermissionIfNeeded,
+  sendNativeNotification,
+} from "./native";
+import {
   detectModeMarker,
   nextMode,
   stripAnsi,
@@ -120,43 +131,35 @@ const ORCHESTRATOR_HEIGHT_KEY = "flipflopper:orchestrator-height";
 const DEFAULT_ORCHESTRATOR_HEIGHT = 260;
 
 function readNumber(key: string, fallback: number): number {
-  try {
-    const raw = localStorage.getItem(key);
-    const n = raw ? Number(raw) : NaN;
-    return Number.isFinite(n) ? n : fallback;
-  } catch { return fallback; }
+  return readLegacyNumber(key, fallback);
 }
 
 function readYoloMode(): boolean {
-  try {
-    return localStorage.getItem(YOLO_MODE_KEY) === "true";
-  } catch { return false; }
+  return readLegacyBool(YOLO_MODE_KEY, false);
 }
 
 function readBoolFlagWithFallback(key: string, fallback: boolean): boolean {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw !== null) return raw === "true";
-  } catch {}
-  return fallback;
+  return readLegacyBool(key, fallback);
 }
 
+const explorerCollapsedByMode: Record<WorkspaceMode, boolean> = {
+  code: readLegacyBool("flipflopper:explorer-collapsed:code", false),
+  review: readLegacyBool("flipflopper:explorer-collapsed:review", true),
+  agent: readLegacyBool("flipflopper:explorer-collapsed:agent", true),
+};
+
+const gitPanelCollapsedByMode: Record<WorkspaceMode, boolean> = {
+  code: readLegacyBool("flipflopper:gitpanel-collapsed:code", false),
+  review: readLegacyBool("flipflopper:gitpanel-collapsed:review", false),
+  agent: readLegacyBool("flipflopper:gitpanel-collapsed:agent", true),
+};
+
 export function getExplorerCollapsedForMode(mode: WorkspaceMode): boolean {
-  try {
-    const key = `flipflopper:explorer-collapsed:${mode}`;
-    const raw = localStorage.getItem(key);
-    if (raw !== null) return raw === "true";
-  } catch {}
-  return mode !== "code";
+  return explorerCollapsedByMode[mode];
 }
 
 export function getGitPanelCollapsedForMode(mode: WorkspaceMode): boolean {
-  try {
-    const key = `flipflopper:gitpanel-collapsed:${mode}`;
-    const raw = localStorage.getItem(key);
-    if (raw !== null) return raw === "true";
-  } catch {}
-  return mode !== "review";
+  return gitPanelCollapsedByMode[mode];
 }
 
 const initial: AppStore = {
@@ -247,99 +250,77 @@ const RUN_TARGET_KEY = "flipflopper:run-targets";
 const VALIDATION_TARGET_KEY = "flipflopper:validation-targets";
 const ANDROID_DEVICE_KEY = "flipflopper:android-devices";
 
+const continueTargetsCache = readLegacyJson<Record<string, string>>(CONTINUE_TARGET_KEY, {});
+const continueUsageCache = readLegacyJson<Record<string, string[]>>(CONTINUE_USAGE_KEY, {});
+const lastAgentTargetsCache = readLegacyJson<Record<string, string>>(LAST_AGENT_KEY, {});
+const runTargetsCache = readLegacyJson<Record<string, string>>(RUN_TARGET_KEY, {});
+const validationTargetsCache = readLegacyJson<Record<string, string>>(VALIDATION_TARGET_KEY, {});
+const androidDevicesCache = readLegacyJson<Record<string, string>>(ANDROID_DEVICE_KEY, {});
+
 export function readContinueTargets(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(CONTINUE_TARGET_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+  return continueTargetsCache;
 }
 
 
 
 export function writeContinueTarget(projectPath: string, agentId: string) {
-  try {
-    const targets = readContinueTargets();
-    targets[projectPath] = agentId;
-    localStorage.setItem(CONTINUE_TARGET_KEY, JSON.stringify(targets));
-  } catch { /* ignore */ }
+  continueTargetsCache[projectPath] = agentId;
+  writePref(CONTINUE_TARGET_KEY, continueTargetsCache);
 }
 
 export function readRunTargets(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(RUN_TARGET_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+  return runTargetsCache;
 }
 
 export function writeRunTarget(projectPath: string, targetId: string) {
-  try {
-    const targets = readRunTargets();
-    targets[projectPath] = targetId;
-    localStorage.setItem(RUN_TARGET_KEY, JSON.stringify(targets));
-  } catch { /* ignore */ }
+  runTargetsCache[projectPath] = targetId;
+  writePref(RUN_TARGET_KEY, runTargetsCache);
 }
 
 export function readValidationTargets(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(VALIDATION_TARGET_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+  return validationTargetsCache;
 }
 
 export function writeValidationTarget(projectPath: string, targetId: string) {
-  try {
-    const targets = readValidationTargets();
-    targets[projectPath] = targetId;
-    localStorage.setItem(VALIDATION_TARGET_KEY, JSON.stringify(targets));
-  } catch { /* ignore */ }
+  validationTargetsCache[projectPath] = targetId;
+  writePref(VALIDATION_TARGET_KEY, validationTargetsCache);
 }
 
 export function readAndroidDevices(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(ANDROID_DEVICE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+  return androidDevicesCache;
 }
 
 export function writeAndroidDevice(projectPath: string, serial: string) {
-  try {
-    const devices = readAndroidDevices();
-    devices[projectPath] = serial;
-    localStorage.setItem(ANDROID_DEVICE_KEY, JSON.stringify(devices));
-  } catch { /* ignore */ }
+  androidDevicesCache[projectPath] = serial;
+  writePref(ANDROID_DEVICE_KEY, androidDevicesCache);
 }
 
 function readJsonRecord<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch { return fallback; }
+  return readLegacyJson(key, fallback);
 }
 
 function writeJsonRecord(key: string, value: unknown) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
+  writePref(key, value);
 }
 
 export function readContinueUsage(): Record<string, string[]> {
-  return readJsonRecord<Record<string, string[]>>(CONTINUE_USAGE_KEY, {});
+  return continueUsageCache;
 }
 
 export function recordContinueAgentUse(projectPath: string, agentId: string) {
   writeContinueTarget(projectPath, agentId);
-  const usage = readContinueUsage();
-  const current = usage[projectPath] ?? [];
-  usage[projectPath] = [agentId, ...current.filter((id) => id !== agentId)].slice(0, 8);
-  writeJsonRecord(CONTINUE_USAGE_KEY, usage);
+  const current = continueUsageCache[projectPath] ?? [];
+  continueUsageCache[projectPath] = [agentId, ...current.filter((id) => id !== agentId)].slice(0, 8);
+  writeJsonRecord(CONTINUE_USAGE_KEY, continueUsageCache);
 }
 
 export function readLastAgentTargets(): Record<string, string> {
-  return readJsonRecord<Record<string, string>>(LAST_AGENT_KEY, {});
+  return lastAgentTargetsCache;
 }
 
 export function writeLastAgentTarget(projectPath: string, agentId: string) {
-  const targets = readLastAgentTargets();
-  targets[projectPath] = agentId;
-  writeJsonRecord(LAST_AGENT_KEY, targets);
+  lastAgentTargetsCache[projectPath] = agentId;
+  writeJsonRecord(LAST_AGENT_KEY, lastAgentTargetsCache);
 }
 
 export function recordLastAgentUse(projectPath: string, agentId: string) {
@@ -453,22 +434,6 @@ export function removeTab(sessionId: string) {
   }
 }
 
-let notificationPermissionRequested = false;
-
-async function requestNotificationPermissionIfNeeded() {
-  if (notificationPermissionRequested) return;
-  if (typeof window !== "undefined" && "Notification" in window) {
-    if (Notification.permission === "default") {
-      notificationPermissionRequested = true;
-      try {
-        await Notification.requestPermission();
-      } catch (err) {
-        console.error("Error requesting notification permission", err);
-      }
-    }
-  }
-}
-
 export function setTabNeedsAttention(sessionId: string, needsAttention: boolean) {
   setStore("tabs", (t) => t.sessionId === sessionId, "needsAttention", needsAttention);
   
@@ -487,15 +452,7 @@ export function setTabNeedsAttention(sessionId: string, needsAttention: boolean)
         console.error("Failed to request window attention:", e);
       }
       
-      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-        try {
-          new Notification("Agent Needs Attention", {
-            body: `Agent "${label}" requires your attention.`,
-          });
-        } catch (e) {
-          console.error("Failed to send native notification:", e);
-        }
-      }
+      void sendNativeNotification("Agent Needs Attention", `Agent "${label}" requires your attention.`);
     }
   } else {
     const anyOtherNeedsAttention = store.tabs.some((t) => t.sessionId !== sessionId && t.needsAttention);
@@ -580,7 +537,7 @@ export function toggleTerminalPanel() {
 export function setTerminalPanelHeight(px: number) {
   const clamped = Math.min(Math.max(px, 80), window.innerHeight * 0.7);
   setStore("terminalPanelHeight", clamped);
-  try { localStorage.setItem(TERMINAL_PANEL_HEIGHT_KEY, String(clamped)); } catch { /* ignore */ }
+  writePref(TERMINAL_PANEL_HEIGHT_KEY, clamped);
 }
 
 // ── Orchestrator panel helpers ────────────────────────────────────────────────
@@ -588,9 +545,7 @@ export function setTerminalPanelHeight(px: number) {
 export function setOrchestratorHeight(px: number) {
   const clamped = Math.min(Math.max(px, 120), window.innerHeight * 0.7);
   setStore("orchestratorHeight", clamped);
-  try {
-    localStorage.setItem(ORCHESTRATOR_HEIGHT_KEY, String(clamped));
-  } catch { /* ignore */ }
+  writePref(ORCHESTRATOR_HEIGHT_KEY, clamped);
 }
 
 export function toggleOrchestratorMaximized() {
@@ -620,7 +575,7 @@ export function setValidationSessionId(sessionId: string | null) {
 
 export function setYoloMode(enabled: boolean) {
   setStore("yoloMode", enabled);
-  try { localStorage.setItem(YOLO_MODE_KEY, String(enabled)); } catch { /* ignore */ }
+  writePref(YOLO_MODE_KEY, enabled);
 }
 
 // ── Side panel collapse state ─────────────────────────────────────────────────
@@ -628,9 +583,8 @@ export function setYoloMode(enabled: boolean) {
 export function toggleExplorerCollapsed() {
   setStore("explorerCollapsed", (v) => {
     const next = !v;
-    try {
-      localStorage.setItem(`flipflopper:explorer-collapsed:${store.workspaceMode}`, String(next));
-    } catch { /* ignore */ }
+    explorerCollapsedByMode[store.workspaceMode] = next;
+    writePref(`flipflopper:explorer-collapsed:${store.workspaceMode}`, next);
     return next;
   });
 }
@@ -638,9 +592,8 @@ export function toggleExplorerCollapsed() {
 export function toggleGitPanelCollapsed() {
   setStore("gitPanelCollapsed", (v) => {
     const next = !v;
-    try {
-      localStorage.setItem(`flipflopper:gitpanel-collapsed:${store.workspaceMode}`, String(next));
-    } catch { /* ignore */ }
+    gitPanelCollapsedByMode[store.workspaceMode] = next;
+    writePref(`flipflopper:gitpanel-collapsed:${store.workspaceMode}`, next);
     return next;
   });
 }
@@ -648,11 +601,66 @@ export function toggleGitPanelCollapsed() {
 export function toggleAutoToggleSidebars() {
   setStore("autoToggleSidebars", (v) => {
     const next = !v;
-    try {
-      localStorage.setItem("flipflopper:auto-toggle-sidebars", String(next));
-    } catch { /* ignore */ }
+    writePref("flipflopper:auto-toggle-sidebars", next);
     return next;
   });
+}
+
+export async function hydrateStorePreferences() {
+  const [yoloMode, terminalPanelHeight, orchestratorHeight, autoToggleSidebars] = await Promise.all([
+    readPref(YOLO_MODE_KEY, store.yoloMode, () => readYoloMode()),
+    readPref(TERMINAL_PANEL_HEIGHT_KEY, store.terminalPanelHeight, () =>
+      readNumber(TERMINAL_PANEL_HEIGHT_KEY, DEFAULT_TERMINAL_PANEL_HEIGHT)),
+    readPref(ORCHESTRATOR_HEIGHT_KEY, store.orchestratorHeight, () =>
+      readNumber(ORCHESTRATOR_HEIGHT_KEY, DEFAULT_ORCHESTRATOR_HEIGHT)),
+    readPref("flipflopper:auto-toggle-sidebars", store.autoToggleSidebars, () =>
+      readBoolFlagWithFallback("flipflopper:auto-toggle-sidebars", true)),
+  ]);
+
+  setStore("yoloMode", yoloMode);
+  setStore("terminalPanelHeight", terminalPanelHeight);
+  setStore("orchestratorHeight", orchestratorHeight);
+  setStore("autoToggleSidebars", autoToggleSidebars);
+
+  const modes: WorkspaceMode[] = ["code", "review", "agent"];
+  for (const mode of modes) {
+    explorerCollapsedByMode[mode] = await readPref(
+      `flipflopper:explorer-collapsed:${mode}`,
+      explorerCollapsedByMode[mode],
+      () => explorerCollapsedByMode[mode],
+    );
+    gitPanelCollapsedByMode[mode] = await readPref(
+      `flipflopper:gitpanel-collapsed:${mode}`,
+      gitPanelCollapsedByMode[mode],
+      () => gitPanelCollapsedByMode[mode],
+    );
+  }
+
+  setStore("explorerCollapsed", explorerCollapsedByMode[store.workspaceMode]);
+  setStore("gitPanelCollapsed", gitPanelCollapsedByMode[store.workspaceMode]);
+
+  const [
+    continueTargets,
+    continueUsage,
+    lastAgentTargets,
+    runTargets,
+    validationTargets,
+    androidDevices,
+  ] = await Promise.all([
+    readPref(CONTINUE_TARGET_KEY, continueTargetsCache, () => readJsonRecord(CONTINUE_TARGET_KEY, continueTargetsCache)),
+    readPref(CONTINUE_USAGE_KEY, continueUsageCache, () => readJsonRecord(CONTINUE_USAGE_KEY, continueUsageCache)),
+    readPref(LAST_AGENT_KEY, lastAgentTargetsCache, () => readJsonRecord(LAST_AGENT_KEY, lastAgentTargetsCache)),
+    readPref(RUN_TARGET_KEY, runTargetsCache, () => readJsonRecord(RUN_TARGET_KEY, runTargetsCache)),
+    readPref(VALIDATION_TARGET_KEY, validationTargetsCache, () => readJsonRecord(VALIDATION_TARGET_KEY, validationTargetsCache)),
+    readPref(ANDROID_DEVICE_KEY, androidDevicesCache, () => readJsonRecord(ANDROID_DEVICE_KEY, androidDevicesCache)),
+  ]);
+
+  Object.assign(continueTargetsCache, continueTargets);
+  Object.assign(continueUsageCache, continueUsage);
+  Object.assign(lastAgentTargetsCache, lastAgentTargets);
+  Object.assign(runTargetsCache, runTargets);
+  Object.assign(validationTargetsCache, validationTargets);
+  Object.assign(androidDevicesCache, androidDevices);
 }
 
 // ── PTY / install helpers ─────────────────────────────────────────────────────
@@ -882,6 +890,31 @@ export async function closeEditorFile(path: string) {
     setStore("editorFiles", remaining);
     if (remaining.length === 0) setStore("editorOpen", false);
   }, 150);
+}
+
+/** Close every editor tab except `path` — used by the tab context menu's
+ *  "Close Others". Awaits each close in turn since closeEditorFile may prompt
+ *  for unsaved changes. */
+export async function closeOtherEditorFiles(path: string) {
+  for (const f of store.editorFiles.filter((f) => f.path !== path)) {
+    await closeEditorFile(f.path);
+  }
+}
+
+/** Close every editor tab to the right of `path`, in current tab order. */
+export async function closeEditorFilesToRight(path: string) {
+  const index = store.editorFiles.findIndex((f) => f.path === path);
+  if (index === -1) return;
+  for (const f of store.editorFiles.slice(index + 1)) {
+    await closeEditorFile(f.path);
+  }
+}
+
+/** Close every open editor tab. */
+export async function closeAllEditorFiles() {
+  for (const f of [...store.editorFiles]) {
+    await closeEditorFile(f.path);
+  }
 }
 
 export function setActiveEditorFile(path: string) {

@@ -3,6 +3,7 @@ import { createStore } from "solid-js/store";
 import { store, addTab, setActiveTab, removeTab, type Tab } from "./store";
 import { onPtyOutput, onPtyExit, ptyInput, spawnAgent, continueAgent } from "./ipc";
 import { stripAnsi, agentTuning } from "./agentMeta";
+import { readLegacyJson, readPref, writePref } from "./appPrefs";
 import { toast } from "../components/ui";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -113,6 +114,7 @@ const LAST_OUTPUT_MAX = 120;
 // ── Persistence ──────────────────────────────────────────────────────────────
 
 const FLOWS_KEY = "flipflopper:orchestrator-flows";
+let persistedFlowsCache = readLegacyJson<Record<string, PersistedFlow>>(FLOWS_KEY, {});
 
 interface PersistedNode {
   id: string;
@@ -206,12 +208,15 @@ function persistableFlowSnapshot(): PersistedFlow {
 }
 
 function readAllFlows(): Record<string, PersistedFlow> {
-  try {
-    const raw = localStorage.getItem(FLOWS_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
+  return persistedFlowsCache;
+}
+
+export async function hydrateOrchestratorPersistence() {
+  persistedFlowsCache = await readPref(
+    FLOWS_KEY,
+    persistedFlowsCache,
+    () => persistedFlowsCache,
+  );
 }
 
 export function loadFlowsForProject(projectPath: string | null) {
@@ -274,11 +279,8 @@ function scheduleSave() {
     if (!projectPath) return;
     const all = readAllFlows();
     all[projectPath] = persistableFlowSnapshot();
-    try {
-      localStorage.setItem(FLOWS_KEY, JSON.stringify(all));
-    } catch {
-      /* ignore */
-    }
+    persistedFlowsCache = all;
+    writePref(FLOWS_KEY, all);
   }, 500);
 }
 

@@ -108,14 +108,33 @@ export const NewAgentMenu: Component<{
 const AgentBar: Component = () => {
   const [menuOpen, setMenuOpen] = createSignal(false);
   let toggleRef: HTMLButtonElement | undefined;
+  let stripRef: HTMLDivElement | undefined;
 
   onMount(() => {
     const unregister = registerShortcutHandler("new-agent-menu", () => setMenuOpen(true));
     onCleanup(unregister);
   });
 
+  // Let plain vertical wheel scroll the tab strip horizontally, same as most
+  // browser/editor tab bars — without this, wheel users have no way to reach
+  // tabs once the strip overflows (only drag-scroll or Ctrl-Tab would work).
+  function onStripWheel(e: WheelEvent) {
+    if (!stripRef || stripRef.scrollWidth <= stripRef.clientWidth) return;
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    e.preventDefault();
+    stripRef.scrollLeft += e.deltaY;
+  }
+
   return (
     <>
+      <div
+        ref={stripRef}
+        onWheel={onStripWheel}
+        style={{
+          display: "flex", "align-items": "stretch",
+          overflow: "auto hidden", "min-width": "0",
+        }}
+      >
       <For each={store.tabs}>
         {(tab) => {
           const isActive = () => tab.sessionId === store.activeTabId;
@@ -136,7 +155,7 @@ const AgentBar: Component = () => {
               onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setActiveTab(tab.sessionId); } }}
               style={{
                 display: "flex", "align-items": "center", gap: "9px",
-                padding: "0 15px",
+                padding: "0 15px", "flex-shrink": "0",
                 "border-radius": "var(--radius-lg) var(--radius-lg) 0 0",
                 background: isActive() ? "var(--surface-3)" : "transparent",
                 border: isActive() ? "1px solid var(--border-default)" : "1px solid transparent",
@@ -227,9 +246,10 @@ const AgentBar: Component = () => {
           );
         }}
       </For>
+      </div>
 
       {/* New tab button */}
-      <div style={{ position: "relative", "align-self": "center" }}>
+      <div style={{ position: "relative", "align-self": "center", "flex-shrink": "0" }}>
         <button
           ref={toggleRef}
           class="icon-btn press"

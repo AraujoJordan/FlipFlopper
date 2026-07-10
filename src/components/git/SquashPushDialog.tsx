@@ -5,7 +5,7 @@ import {
   type AgentInfo, type CommitEntry,
 } from "../../lib/ipc";
 import { AgentLogo } from "../../lib/agentMeta";
-import { Button, Menu, MenuItem, Spinner, toast } from "../ui";
+import { Button, Input, Menu, MenuItem, Spinner, toast } from "../ui";
 
 interface SquashPushState {
   commits: CommitEntry[];
@@ -38,7 +38,6 @@ export const SquashPushDialogHost: Component = () => {
   const [selectedAgentId, setSelectedAgentId] = createSignal<string | null>(null);
   const [generating, setGenerating] = createSignal(false);
   const [busy, setBusy] = createSignal<"squash" | "plain" | null>(null);
-  const [focused, setFocused] = createSignal(false);
   let pickerAnchor: HTMLButtonElement | undefined;
 
   // Prefill the name with the newest unpushed commit's subject as a starting
@@ -67,7 +66,6 @@ export const SquashPushDialogHost: Component = () => {
     setPickerOpen(false);
     setGenerating(false);
     setBusy(null);
-    setFocused(false);
   }
 
   async function generate() {
@@ -129,10 +127,10 @@ export const SquashPushDialogHost: Component = () => {
           class="overlay-backdrop-in"
           onclick={close}
           style={{
-            // Below Menu's z-index (150) — the agent-picker dropdown is a
-            // Portal rendered as a sibling in the DOM, so it must stack
-            // above this backdrop to stay clickable.
-            position: "fixed", inset: 0, "z-index": "140",
+            // Below --z-menu — the agent-picker dropdown is a Portal
+            // rendered as a sibling in the DOM, so it must stack above
+            // this backdrop to stay clickable.
+            position: "fixed", inset: 0, "z-index": "var(--z-dialog)",
             display: "flex", "align-items": "center", "justify-content": "center",
             background: "rgba(0,0,0,.5)",
           }}
@@ -284,22 +282,11 @@ export const SquashPushDialogHost: Component = () => {
               </Show>
             </div>
 
-            <input
+            <Input
               value={name()}
-              onInput={(e) => setName(e.currentTarget.value)}
-              onFocus={() => setFocused(true)}
-              onBlur={() => setFocused(false)}
+              onInput={setName}
               placeholder="Describe the squashed commit…"
-              spellcheck={false}
-              style={{
-                width: "100%", "box-sizing": "border-box",
-                padding: "9px 11px", "margin-bottom": "18px",
-                background: "var(--surface-1)",
-                border: `1px solid ${focused() ? "var(--accent)" : "var(--border-default)"}`,
-                "box-shadow": focused() ? "0 0 0 3px rgba(88,166,255,.15)" : "none",
-                outline: "none", transition: "border-color .12s, box-shadow .12s",
-                "border-radius": "var(--radius-md)", "font-size": "13px", color: "var(--fg-default)",
-              }}
+              style={{ padding: "9px 11px", "margin-bottom": "18px", "font-size": "13px" }}
             />
 
             {/* Actions */}

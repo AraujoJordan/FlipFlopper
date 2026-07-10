@@ -5,6 +5,7 @@ import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
 import { store, closeReview, openReview, openEditorFile } from "../lib/store";
 import { getReviewDiff, type FileDiff, type DiffLine } from "../lib/ipc";
+import { getFileIcon } from "../lib/fileIcons";
 import { Button, Spinner } from "./ui";
 
 // ── Layout toggle ────────────────────────────────────────────────────────────
@@ -243,7 +244,7 @@ const SplitCell: Component<{
 };
 
 // ── File block ────────────────────────────────────────────────────────────────
-const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: number }> = (props) => {
+const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: number; index: number }> = (props) => {
   const [collapsed, setCollapsed] = createSignal(false);
   const lang = createMemo(() => langForPath(props.file.new_path ?? props.file.old_path));
   const st = () => STATUS_COLORS[props.file.status] ?? STATUS_COLORS.modified;
@@ -257,12 +258,15 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
   };
 
   return (
-    <div style={{
-      border: "1px solid var(--border-muted)",
-      "border-radius": "8px",
-      overflow: "hidden",
-      "margin-bottom": "16px",
-    }}>
+    <div
+      data-diff-file={props.index}
+      style={{
+        border: "1px solid var(--border-muted)",
+        "border-radius": "8px",
+        overflow: "hidden",
+        "margin-bottom": "16px",
+      }}
+    >
       {/* File header */}
       <div
         onclick={() => setCollapsed((c) => !c)}
@@ -295,6 +299,13 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         }}>
           {st().label}
         </span>
+
+        {/* File icon */}
+        <img
+          src={getFileIcon(displayPath().split("/").pop() ?? displayPath())}
+          alt=""
+          style={{ width: "14px", height: "14px", "flex-shrink": "0" }}
+        />
 
         {/* Path */}
         <span style={{
@@ -337,14 +348,17 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
               {(hunk) => (
                 <>
                   {/* Hunk header */}
-                  <div style={{
-                    padding: "4px 12px",
-                    background: "var(--surface-2)",
-                    color: "var(--fg-faint)",
-                    "font-family": MONO, "font-size": "11px",
-                    "border-top": "1px solid var(--border-muted)",
-                    "border-bottom": "1px solid var(--border-muted)",
-                  }}>
+                  <div
+                    data-diff-hunk
+                    style={{
+                      padding: "4px 12px",
+                      background: "var(--surface-2)",
+                      color: "var(--fg-faint)",
+                      "font-family": MONO, "font-size": "11px",
+                      "border-top": "1px solid var(--border-muted)",
+                      "border-bottom": "1px solid var(--border-muted)",
+                    }}
+                  >
                     {hunk.header}
                   </div>
 
@@ -412,6 +426,57 @@ const DiffPane: Component = () => {
       0
     )
   );
+  const highlightingDisabled = () => totalLines() > MAX_HIGHLIGHT_LINES;
+
+  const [sidebarOpen, setSidebarOpen] = createSignal(false);
+  let bodyRef: HTMLDivElement | undefined;
+
+  /** Scroll-space offset of `el` within `bodyRef`, computed via
+   *  getBoundingClientRect deltas rather than offsetTop so it's correct
+   *  regardless of intermediate elements' positioning context. */
+  function relativeTop(el: HTMLElement): number {
+    if (!bodyRef) return 0;
+    return el.getBoundingClientRect().top - bodyRef.getBoundingClientRect().top + bodyRef.scrollTop;
+  }
+
+  function navigate(selector: string, dir: 1 | -1) {
+    if (!bodyRef) return;
+    const els = Array.from(bodyRef.querySelectorAll<HTMLElement>(selector));
+    if (els.length === 0) return;
+    const tops = els.map(relativeTop);
+    const current = bodyRef.scrollTop;
+    const tolerance = 4;
+    let target: number;
+    if (dir === 1) {
+      target = tops.find((t) => t > current + tolerance) ?? tops[tops.length - 1];
+    } else {
+      const before = tops.filter((t) => t < current - tolerance);
+      target = before.length > 0 ? before[before.length - 1] : tops[0];
+    }
+    bodyRef.scrollTo({ top: target, behavior: "smooth" });
+  }
+
+  function jumpToFile(index: number) {
+    if (!bodyRef) return;
+    const el = bodyRef.querySelector<HTMLElement>(`[data-diff-file="${index}"]`);
+    if (!el) return;
+    bodyRef.scrollTo({ top: relativeTop(el), behavior: "smooth" });
+  }
+
+  /** Next/prev-file (`]`/`[`) and next/prev-hunk (`j`/`k`) review navigation.
+   *  Scoped to the diff body itself (via its own onKeyDown, not a global
+   *  shortcuts.ts binding) so it only fires while the pane has focus and
+   *  never steals these keys from inputs elsewhere in the app. */
+  function handleBodyKeyDown(e: KeyboardEvent) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    switch (e.key) {
+      case "j": e.preventDefault(); navigate("[data-diff-hunk]", 1); break;
+      case "k": e.preventDefault(); navigate("[data-diff-hunk]", -1); break;
+      case "]": e.preventDefault(); navigate("[data-diff-file]", 1); break;
+      case "[": e.preventDefault(); navigate("[data-diff-file]", -1); break;
+      default: return;
+    }
+  }
 
   const headerStyle = {
     height: "38px",
@@ -472,6 +537,21 @@ const DiffPane: Component = () => {
 
         <Show when={store.review}>
           <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "6px" }}>
+            <Show when={(diffs()?.length ?? 0) > 1}>
+              <button
+                class={sidebarOpen() ? undefined : "hover-tint"}
+                onclick={() => setSidebarOpen((o) => !o)}
+                title="Jump to file"
+                aria-label="Toggle file list"
+                aria-pressed={sidebarOpen()}
+                style={segBtnStyle(sidebarOpen())}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style={{ "vertical-align": "-1px" }}>
+                  <path d="M3 6h18M3 12h18M3 18h18" />
+                </svg>
+              </button>
+            </Show>
+
             <div style={{
               display: "flex", "align-items": "center",
               border: "1px solid var(--border-default)", "border-radius": "var(--radius-md)", overflow: "hidden",
@@ -531,7 +611,54 @@ const DiffPane: Component = () => {
         }
       >
         {/* ── Body ── */}
-        <div style={{ flex: "1", overflow: "auto", padding: "16px 20px", "min-height": 0 }}>
+        <div style={{ flex: "1", display: "flex", "min-height": 0 }}>
+          <Show when={sidebarOpen() && (diffs()?.length ?? 0) > 1}>
+            <div style={{
+              width: "220px", "flex-shrink": "0", overflow: "auto",
+              "border-right": "1px solid var(--border-muted)",
+              background: "var(--surface-1)", padding: "8px 0",
+            }}>
+              <For each={diffs() ?? []}>
+                {(file, index) => {
+                  const st = STATUS_COLORS[file.status] ?? STATUS_COLORS.modified;
+                  const path = file.new_path ?? file.old_path ?? "(unknown)";
+                  return (
+                    <button
+                      class="hover-tint"
+                      onclick={() => jumpToFile(index())}
+                      title={path}
+                      style={{
+                        width: "100%", display: "flex", "align-items": "center", gap: "6px",
+                        padding: "5px 10px", "text-align": "left",
+                      }}
+                    >
+                      <span style={{
+                        "flex-shrink": "0", "font-family": MONO, "font-size": "9px", "font-weight": "700",
+                        color: st.color, border: `1px solid ${st.color}44`, padding: "0 4px", "border-radius": "3px",
+                      }}>
+                        {st.label}
+                      </span>
+                      <img src={getFileIcon(path.split("/").pop() ?? path)} alt="" style={{ width: "12px", height: "12px", "flex-shrink": "0" }} />
+                      <span style={{
+                        "font-family": MONO, "font-size": "11px", color: "var(--fg-body)",
+                        overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
+                      }}>
+                        {path.split("/").pop()}
+                      </span>
+                    </button>
+                  );
+                }}
+              </For>
+            </div>
+          </Show>
+
+          <div
+            ref={bodyRef}
+            tabindex={0}
+            onKeyDown={handleBodyKeyDown}
+            onclick={() => bodyRef?.focus()}
+            style={{ flex: "1", overflow: "auto", padding: "16px 20px", "min-height": 0 }}
+          >
 
           {/* Loading */}
           <Show when={diffs.loading}>
@@ -576,15 +703,24 @@ const DiffPane: Component = () => {
               <span style={{ color: DEL_SIGN }}>
                 −{diffs()!.reduce((s, f) => s + f.deletions, 0)}
               </span>
+              <Show when={highlightingDisabled()}>
+                <span style={{
+                  color: "var(--status-mod)", border: "1px solid var(--status-mod)44",
+                  "border-radius": "4px", padding: "1px 6px",
+                }}>
+                  Syntax highlighting disabled — diff over {MAX_HIGHLIGHT_LINES.toLocaleString()} lines
+                </span>
+              </Show>
             </div>
 
             {/* File blocks */}
             <For each={diffs()!}>
-              {(file) => (
-                <FileBlock file={file} mode={mode()} totalLines={totalLines()} />
+              {(file, index) => (
+                <FileBlock file={file} mode={mode()} totalLines={totalLines()} index={index()} />
               )}
             </For>
           </Show>
+          </div>
         </div>
       </Show>
     </div>

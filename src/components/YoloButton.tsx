@@ -21,8 +21,8 @@ const YoloButton: Component = () => {
 
     if (store.tabs.length > 0) {
       const confirmed = await confirmDialog(
-        "YOLO mode will close all current agent tabs. New tabs will launch with dangerous permission bypass mode for supported agents.",
-        "Enable YOLO"
+        `YOLO mode will close ${store.tabs.length} active agent ${store.tabs.length === 1 ? "tab" : "tabs"} now, killing ${store.tabs.length === 1 ? "its" : "their"} process${store.tabs.length === 1 ? "" : "es"}. New tabs will launch with dangerous permission bypass mode for supported agents.`,
+        { confirmLabel: "Enable YOLO", danger: true },
       );
       if (!confirmed) return;
     }

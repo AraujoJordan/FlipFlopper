@@ -4,6 +4,7 @@ import { store, openReview, bumpGitStatus, clearHistoryFilter, updateCurrentBran
 import { getGitLog, gitRollback, renameCommit, gitCheckoutCommit } from "../../lib/ipc";
 import { agentColor, agentLetter } from "../../lib/agentMeta";
 import { Button, Spinner, confirmDialog, toast } from "../ui";
+import { writeClipboardText } from "../../lib/native";
 
 const UNIT_ABBR: Record<string, string> = {
   minute: "m", hour: "h", day: "d", week: "w", month: "mo", year: "y",
@@ -63,7 +64,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
     if (!store.currentProject) return;
     const ok = await confirmDialog(
       `Hard reset ${store.currentBranch || "this branch"} to ${shortSha}? Uncommitted work is lost.`,
-      "Roll back",
+      { confirmLabel: "Roll back", danger: true },
     );
     if (!ok) return;
     setBusySha(sha);
@@ -101,7 +102,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
 
   async function copySha(sha: string) {
     try {
-      await navigator.clipboard.writeText(sha);
+      await writeClipboardText(sha);
       toast("SHA copied", "success");
     } catch {
       toast("Could not copy SHA", "error");
@@ -244,6 +245,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         class="icon-btn press"
                         onclick={(e) => { e.stopPropagation(); copySha(commit.sha); }}
                         title="Copy full SHA"
+                        aria-label={`Copy full SHA for ${commit.short_sha}`}
                         style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -255,6 +257,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         class="icon-btn press"
                         onclick={(e) => { e.stopPropagation(); checkoutCommit(commit.sha, commit.short_sha); }}
                         title="Checkout (detached HEAD)"
+                        aria-label={`Checkout ${commit.short_sha} (detached HEAD)`}
                         style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -266,6 +269,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         class="icon-btn press"
                         onclick={(e) => { e.stopPropagation(); startRename(commit.sha, commit.message); }}
                         title="Rename commit message"
+                        aria-label={`Rename commit message for ${commit.short_sha}`}
                         style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -277,6 +281,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         class="icon-btn-danger press"
                         onclick={(e) => { e.stopPropagation(); rollbackTo(commit.sha, commit.short_sha); }}
                         title="Roll back to this commit"
+                        aria-label={`Roll back to ${commit.short_sha}`}
                         style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">

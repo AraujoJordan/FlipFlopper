@@ -47,6 +47,35 @@ of the affected flow; those are hard to catch with typechecking alone.
 - In the PR description, say what changed and why, and list which checks you
   ran. Screenshots or a short clip are appreciated for UI changes.
 
+## Release signing (maintainers)
+
+`.github/workflows/release.yml` is wired to sign and notarize builds, but it
+stays a no-op until the matching repo secrets exist — releases stay unsigned
+until then.
+
+**macOS** (signing + notarization via `tauri-apps/tauri-action`):
+
+- `APPLE_CERTIFICATE` — base64 of a "Developer ID Application" .p12
+- `APPLE_CERTIFICATE_PASSWORD` — password for that .p12
+- `APPLE_SIGNING_IDENTITY` — e.g. `Developer ID Application: Name (TEAMID)`
+- `APPLE_ID` / `APPLE_PASSWORD` — Apple ID + an app-specific password, for
+  notarization
+- `APPLE_TEAM_ID` — Apple Developer Team ID
+
+Requires an active Apple Developer Program membership.
+
+**Windows** (Authenticode via the bundler's built-in signtool support):
+
+- `WINDOWS_CERTIFICATE` — base64 of a code-signing .pfx
+- `WINDOWS_CERTIFICATE_PASSWORD` — password for that .pfx
+
+Requires a code-signing certificate from a CA (or Azure Trusted Signing).
+
+Once these secrets are set, new tagged releases sign/notarize automatically —
+no workflow changes needed. Until then, update the "unsigned" note in the
+[README](README.md#-download) and the release-notes body in
+`release.yml` if the signing status changes.
+
 ## Reporting bugs / requesting features
 
 Use the issue templates; they ask for the info that's actually useful for a

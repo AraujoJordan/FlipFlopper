@@ -88,8 +88,12 @@ brew install --cask flipflopper
 | Windows | `.msi` or NSIS `.exe` |
 | Linux | `.AppImage` or `.deb` |
 
-> **Heads up:** builds are currently unsigned.
 > macOS: right-click the `.dmg` → Open (not needed via Homebrew). Windows: "More info" → "Run anyway".
+
+### Keeping FlipFlopper up to date
+
+- **macOS** — update via Homebrew, which is the recommended channel here: `brew upgrade flipflopper`.
+- **Windows & Linux** — the app checks for new versions automatically on launch. When an update is available, an indicator appears in the title bar and a **Check for Updates…** entry lives in the Help menu.
 
 ---
 

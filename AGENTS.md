@@ -32,6 +32,13 @@ Currently implemented:
 - In-house agent handoff that reads native session stores when possible, writes
   `.agents/handoff.md`, appends `.agents/context.md`, and launches the target
   agent with seeded context where the target CLI supports it.
+- In-app auto-updater (Windows/Linux only). On launch it silently checks the
+  GitHub release `latest.json`, surfaces an update via a title-bar badge and a
+  Help-menu "Check for Updates…" entry, then downloads + relaunches. macOS is
+  gated out (`platform() === "macos"`); Mac users update via Homebrew. Signing
+  keypair lives in GitHub secrets (`TAURI_PRIVATE_KEY` /
+  `TAURI_PRIVATE_KEY_PASSWORD`); the public key is in
+  `tauri.conf.json` under `plugins.updater.pubkey`.
 - Tool catalog and install-command backend; no dedicated current
   `ToolInstaller.tsx` panel exists.
 - Android-Studio-style UI preview split inside the editor: when the open file

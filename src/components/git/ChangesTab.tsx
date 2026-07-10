@@ -5,7 +5,7 @@ import {
   gitStage, gitUnstage, gitDiscard, gitCommit, gitStashPush, gitStashPop, getGitLog,
   type StatusEntry, type SyncStatus, triggerHaptic,
 } from "../../lib/ipc";
-import { Button, Spinner, confirmDialog, toast } from "../ui";
+import { Button, Spinner, Textarea, confirmDialog, toast } from "../ui";
 import { isProtectedBranch } from "../../lib/constants";
 
 const iconBtnStyle = {
@@ -93,7 +93,7 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
     const untracked = isUntracked();
     const ok = await confirmDialog(
       untracked ? `Delete untracked file ${name}?` : `Discard changes to ${name}? This cannot be undone.`,
-      untracked ? "Delete" : "Discard",
+      { confirmLabel: untracked ? "Delete" : "Discard", danger: true },
     );
     if (!ok) return;
     void triggerHaptic("levelChange");
@@ -134,19 +134,19 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
       </span>
       <span class="git-row-actions" style={{ display: "flex", "align-items": "center", gap: "3px" }}>
         <Show when={props.group === "unstaged"}>
-          <button class="icon-btn-danger press" onclick={discard} title="Discard" style={iconBtnStyle}>
+          <button class="icon-btn-danger press" onclick={discard} title="Discard" aria-label={`Discard changes to ${displayName()}`} style={iconBtnStyle}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6" />
             </svg>
           </button>
-          <button class="icon-btn press" onclick={stage} title="Stage" style={iconBtnStyle}>
+          <button class="icon-btn press" onclick={stage} title="Stage" aria-label={`Stage ${displayName()}`} style={iconBtnStyle}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 5v14M5 12h14" />
             </svg>
           </button>
         </Show>
         <Show when={props.group === "staged"}>
-          <button class="icon-btn press" onclick={unstage} title="Unstage" style={iconBtnStyle}>
+          <button class="icon-btn press" onclick={unstage} title="Unstage" aria-label={`Unstage ${displayName()}`} style={iconBtnStyle}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
               <path d="M5 12h14" />
             </svg>
@@ -260,7 +260,7 @@ const ChangesTab: Component<{
     if (amend() && (props.sync()?.ahead ?? 0) === 0 && props.sync()?.upstream) {
       const ok = await confirmDialog(
         "Amend a commit that's already pushed? This rewrites history.",
-        "Amend anyway",
+        { confirmLabel: "Amend anyway", danger: true },
       );
       if (!ok) return;
     }
@@ -410,10 +410,10 @@ const ChangesTab: Component<{
         "border-top": "1px solid var(--border-muted)",
         display: "flex", "flex-direction": "column", gap: "6px",
       }}>
-        <textarea
+        <Textarea
           value={message()}
-          oninput={(e) => setMessage(e.currentTarget.value)}
-          onkeydown={(e) => {
+          onInput={setMessage}
+          onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
               e.preventDefault();
               doCommit();
@@ -421,11 +421,6 @@ const ChangesTab: Component<{
           }}
           placeholder={staged().length > 0 ? "Commit message…" : "Commit message (will commit all changes)…"}
           rows={3}
-          style={{
-            resize: "none", background: "var(--surface-1)", border: "1px solid var(--border-default)",
-            "border-radius": "var(--radius-md)", padding: "7px 9px",
-            "font-family": "var(--font-mono)", "font-size": "12px", color: "var(--fg-default)",
-          }}
         />
         <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
           <button

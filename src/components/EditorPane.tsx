@@ -47,6 +47,9 @@ import {
   openReview,
   openEditorFile,
   closeEditorFile,
+  closeOtherEditorFiles,
+  closeEditorFilesToRight,
+  closeAllEditorFiles,
   setActiveEditorFile,
   setEditorDirty,
   markEditorSaved,
@@ -88,8 +91,11 @@ import { getFileIcon } from "../lib/fileIcons";
 import PreviewPanel from "./PreviewPanel";
 import { openUsages, byteOffsetToUtf16, type UsageItem } from "../lib/usages";
 import { flipflopperTheme } from "../lib/cmTheme";
+import { useResizable } from "../lib/useResizable";
 import { ContextMenu, MenuDivider, MenuItem, SubMenuItem, toast } from "./ui";
 import { openAgentTaskDialog } from "./AgentTaskDialog";
+import { readLegacyBool, readLegacyNumber, readPref, writePref } from "../lib/appPrefs";
+import { readClipboardText, writeClipboardText } from "../lib/native";
 
 const POLL_MS = 3000;
 const AUTO_SAVE_MS = 500;
@@ -405,7 +411,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     closeContextMenu();
     if (!text) return;
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboardText(text);
       toast(success, "success");
     } catch {
       toast("Failed to copy", "error");
@@ -422,7 +428,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       : Math.min(line.to + (ctx.startLine < view.state.doc.lines ? 1 : 0), view.state.doc.length);
     const text = view.state.sliceDoc(from, to);
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboardText(text);
       view.dispatch({ changes: { from, to, insert: "" } });
       view.focus();
     } catch {
@@ -434,7 +440,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     closeContextMenu();
     if (!view) return;
     try {
-      const text = await navigator.clipboard.readText();
+      const text = await readClipboardText();
       if (!text) return;
       view.dispatch(view.state.replaceSelection(text));
       view.focus();
@@ -1181,26 +1187,54 @@ const PREVIEW_WIDTH_DEFAULT = 420;
 const PREVIEW_WIDTH_MIN = 260;
 const PREVIEW_DEBOUNCE_MS = 2000;
 
+let previewOpenCache = readLegacyBool(PREVIEW_OPEN_KEY, false);
+let previewWidthCache = readLegacyNumber(PREVIEW_WIDTH_KEY, PREVIEW_WIDTH_DEFAULT);
+let previewPrefsPromise: Promise<{ open: boolean; width: number }> | null = null;
+
 function readPreviewOpen(): boolean {
-  try { return localStorage.getItem(PREVIEW_OPEN_KEY) === "1"; } catch { return false; }
+  return previewOpenCache;
 }
 function readPreviewWidth(): number {
-  try {
-    const raw = Number(localStorage.getItem(PREVIEW_WIDTH_KEY));
-    return Number.isFinite(raw) && raw > 0 ? raw : PREVIEW_WIDTH_DEFAULT;
-  } catch { return PREVIEW_WIDTH_DEFAULT; }
+  return Number.isFinite(previewWidthCache) && previewWidthCache > 0
+    ? previewWidthCache
+    : PREVIEW_WIDTH_DEFAULT;
+}
+
+function hydratePreviewPrefs() {
+  if (!previewPrefsPromise) {
+    previewPrefsPromise = Promise.all([
+      readPref(PREVIEW_OPEN_KEY, previewOpenCache, () => previewOpenCache),
+      readPref(PREVIEW_WIDTH_KEY, readPreviewWidth(), () => readPreviewWidth()),
+    ]).then(([open, width]) => {
+      previewOpenCache = open;
+      previewWidthCache = width;
+      return { open, width };
+    });
+  }
+  return previewPrefsPromise;
 }
 
 const EditorPane: Component = () => {
   const activeFile = () => store.editorFiles.find((f) => f.path === store.activeEditorPath);
 
+  const [tabContextMenu, setTabContextMenu] = createSignal<{ path: string; x: number; y: number } | null>(null);
+  const closeTabContextMenu = () => setTabContextMenu(null);
+
   const [previewOpen, setPreviewOpen] = createSignal(readPreviewOpen());
   const [previewWidth, setPreviewWidth] = createSignal(readPreviewWidth());
 
+  onMount(() => {
+    void hydratePreviewPrefs().then(({ open, width }) => {
+      setPreviewOpen(open);
+      setPreviewWidth(width);
+    });
+  });
+
   const togglePreview = () => {
     const next = !previewOpen();
+    previewOpenCache = next;
     setPreviewOpen(next);
-    try { localStorage.setItem(PREVIEW_OPEN_KEY, next ? "1" : "0"); } catch { /* ignore */ }
+    writePref(PREVIEW_OPEN_KEY, next);
   };
 
   // Debounce detection against autosave churn: saves bump gitStatusVersion
@@ -1298,35 +1332,33 @@ const EditorPane: Component = () => {
 
   async function copyActiveFileRef(path: string) {
     try {
-      await navigator.clipboard.writeText(`@${path}`);
+      await writeClipboardText(`@${path}`);
       toast("Copied @path reference", "success");
     } catch {
       toast("Failed to copy", "error");
     }
   }
 
-  // Resize handle drag (mirrors TerminalPanel's pointer-capture pattern).
-  const [dragging, setDragging] = createSignal(false);
-  let dragStartX = 0;
-  let dragStartWidth = 0;
+  // Resize handle drag (shares TerminalPanel/OrchestratorPanel's pointer-capture hook).
+  const previewResize = useResizable({
+    axis: "x",
+    invert: true,
+    getSize: previewWidth,
+    setSize: (px) => {
+      const max = Math.max(PREVIEW_WIDTH_MIN, window.innerWidth * 0.7);
+      setPreviewWidth(Math.min(Math.max(px, PREVIEW_WIDTH_MIN), max));
+    },
+    onEnd: () => {
+      previewWidthCache = previewWidth();
+      writePref(PREVIEW_WIDTH_KEY, previewWidthCache);
+    },
+  });
+  const dragging = previewResize.dragging;
   const onDragStart = (e: PointerEvent) => {
     e.preventDefault();
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    dragStartX = e.clientX;
-    dragStartWidth = previewWidth();
-    setDragging(true);
+    previewResize.onPointerDown(e);
   };
-  const onDragMove = (e: PointerEvent) => {
-    if (!dragging()) return;
-    const max = Math.max(PREVIEW_WIDTH_MIN, window.innerWidth * 0.7);
-    const next = Math.min(Math.max(dragStartWidth + (dragStartX - e.clientX), PREVIEW_WIDTH_MIN), max);
-    setPreviewWidth(next);
-  };
-  const onDragEnd = (e: PointerEvent) => {
-    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    setDragging(false);
-    try { localStorage.setItem(PREVIEW_WIDTH_KEY, String(previewWidth())); } catch { /* ignore */ }
-  };
+  const { onPointerMove: onDragMove, onPointerUp: onDragEnd } = previewResize;
 
   return (
     <div style={{
@@ -1370,12 +1402,18 @@ const EditorPane: Component = () => {
                   onclick={() => setActiveEditorFile(file.path)}
                   oncontextmenu={(e) => {
                     e.preventDefault();
-                    void closeEditorFile(file.path);
+                    setTabContextMenu({ path: file.path, x: e.clientX, y: e.clientY });
+                  }}
+                  onauxclick={(e) => {
+                    if (e.button === 1) {
+                      e.preventDefault();
+                      void closeEditorFile(file.path);
+                    }
                   }}
                   title={file.path}
                   style={{
                     display: "flex", "align-items": "center", gap: "7px",
-                    padding: "0 12px",
+                    padding: "0 12px", "flex-shrink": "0",
                     "font-family": "var(--font-mono)",
                     "font-size": "12px",
                     color: isActive() ? "var(--fg-default)" : "var(--fg-muted)",
@@ -1421,6 +1459,26 @@ const EditorPane: Component = () => {
             }}
           </For>
         </div>
+
+        <ContextMenu
+          open={tabContextMenu() !== null}
+          onClose={closeTabContextMenu}
+          x={tabContextMenu()?.x ?? 0}
+          y={tabContextMenu()?.y ?? 0}
+          width={190}
+        >
+          <Show when={tabContextMenu()} keyed>
+            {(ctx) => (
+              <>
+                <MenuItem onSelect={() => { closeTabContextMenu(); void closeEditorFile(ctx.path); }}>Close</MenuItem>
+                <MenuItem onSelect={() => { closeTabContextMenu(); void closeOtherEditorFiles(ctx.path); }}>Close Others</MenuItem>
+                <MenuItem onSelect={() => { closeTabContextMenu(); void closeEditorFilesToRight(ctx.path); }}>Close to the Right</MenuItem>
+                <MenuDivider />
+                <MenuItem onSelect={() => { closeTabContextMenu(); void closeAllEditorFiles(); }}>Close All</MenuItem>
+              </>
+            )}
+          </Show>
+        </ContextMenu>
 
         {/* ── header row ── */}
         <Show when={activeFile()}>

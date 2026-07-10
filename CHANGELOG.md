@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 - 2026-07-10
+
+### Added
+
+- Added multi-window support: `Cmd/Ctrl+Shift+N` or the "New Window" menu item opens a fresh window showing the project picker, and `Cmd`/`Ctrl`-clicking a recent project (or its picker "open in new window" button) launches it in its own window instead of replacing the current one. Each window tracks its own project and open agent tabs, persisted to `~/.config/flipflopper/windows.json` (replacing the old single-slot `localStorage` workspace record, migrated automatically on first launch). Opening a project that's already open in another window focuses that window instead of duplicating it. Quitting the app preserves the full multi-window layout for next launch; closing an individual window's project tears down its PTY sessions and LSP state and removes it from the saved layout. A single-instance guard now catches a second app launch (double-click, `open`, CLI) and focuses the existing main window instead of spawning a duplicate process.
+- Added a project picker modal, replacing the old direct-to-folder-dialog title-bar button: lists recent projects with per-item "open here," "open in new window," and "remove from recents" actions, plus an "Open Folder…" button.
+- Added an in-app auto-updater for Windows/Linux builds: a silent background check on launch surfaces a sticky toast and a title-bar badge when an update is available, both opening an update dialog with release notes, a download-progress bar, and a "Download & Restart" flow backed by `tauri-plugin-updater`; a "Check for Updates…" Help-menu entry triggers the same flow on demand. Gated out entirely on macOS, where Homebrew remains the update path. Release builds are now signed with the updater's Ed25519 keypair so `latest.json` update manifests verify correctly.
+- Added a Settings panel (new title-bar entry) for user-facing preferences: an "auto-toggle sidebars" checkbox and an adjustable agent-idle-alert timeout (1-60 minutes, previously hardcoded).
+- Added a keyboard-shortcuts reference modal (opened with `?` or a title-bar button) listing every registered shortcut grouped by category.
+- Added native OS integration: clipboard read/write, native notifications (with permission priming), and window-state persistence (size/position/maximized), via new `tauri-plugin-clipboard-manager`, `tauri-plugin-notification`, `tauri-plugin-os`, `tauri-plugin-process`, and `tauri-plugin-window-state` plugins.
+- Added a durable app-preferences store (`preferences.json` via `tauri-plugin-store`, replacing ad hoc `localStorage` reads) with one-time automatic migration from each preference's old `localStorage` key.
+- Added a "Remove from recents" action for recent projects (previously recents could only accumulate).
+
+### Changed
+
+- PTY output, exit, and preview-URL events are now targeted at the specific window that attached the session instead of broadcast to every webview, so terminal bytes no longer get serialized into windows that aren't displaying that session.
+- Native menu clicks and shortcuts are now routed to whichever window most recently gained focus, rather than broadcast globally, since the app menu is a single process-wide object shared across all windows on macOS.
+- Extracted the shared pointer-capture drag-resize logic used by the terminal panel, editor preview split, and orchestrator panel into a common `useResizable` hook, replacing three hand-rolled copies of the same drag-state/pointer-handler logic.
+- The window title now reflects the open project ("<project> — FlipFlopper"), falling back to "FlipFlopper" when no project is open.
+
 ## 0.4.0 - 2026-07-08
 
 ### Added

@@ -12,6 +12,7 @@ import {
   type TerminalKind,
 } from "../lib/store";
 import { agentColor } from "../lib/agentMeta";
+import { useResizable } from "../lib/useResizable";
 
 // Lazy: keeps xterm out of the startup bundle (same chunk as AgentWorkspace's
 // TerminalPane); PTY output is parked backend-side until the pane attaches.
@@ -43,12 +44,24 @@ const CollapseIcon: Component<{ open: boolean }> = (props) => (
 
 const TerminalPanel: Component = () => {
   const [opening, setOpening] = createSignal(false);
-  let dragStartY = 0;
-  let dragStartHeight = 0;
-  const [dragging, setDragging] = createSignal(false);
+  const { dragging, onPointerDown, onPointerMove, onPointerUp } = useResizable({
+    axis: "y",
+    invert: true,
+    getSize: () => store.terminalPanelHeight,
+    setSize: setTerminalPanelHeight,
+  });
 
   const [editingSessionId, setEditingSessionId] = createSignal<string | null>(null);
   const [editVal, setEditVal] = createSignal("");
+  let stripRef: HTMLDivElement | undefined;
+
+  // Let plain vertical wheel scroll the tab strip horizontally (same as AgentBar).
+  function onStripWheel(e: WheelEvent) {
+    if (!stripRef || stripRef.scrollWidth <= stripRef.clientWidth) return;
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    e.preventDefault();
+    stripRef.scrollLeft += e.deltaY;
+  }
 
   async function openShell() {
     const project = store.currentProject;
@@ -64,25 +77,6 @@ const TerminalPanel: Component = () => {
     }
   }
 
-  function onHandlePointerDown(e: PointerEvent) {
-    const target = e.currentTarget as HTMLDivElement;
-    target.setPointerCapture(e.pointerId);
-    dragStartY = e.clientY;
-    dragStartHeight = store.terminalPanelHeight;
-    setDragging(true);
-  }
-
-  function onHandlePointerMove(e: PointerEvent) {
-    if (!dragging()) return;
-    setTerminalPanelHeight(dragStartHeight + (dragStartY - e.clientY));
-  }
-
-  function onHandlePointerUp(e: PointerEvent) {
-    const target = e.currentTarget as HTMLDivElement;
-    target.releasePointerCapture(e.pointerId);
-    setDragging(false);
-  }
-
   return (
     <Show when={store.terminals.length > 0}>
       <div style={{ display: "flex", "flex-direction": "column", flex: "0 0 auto" }}>
@@ -90,9 +84,9 @@ const TerminalPanel: Component = () => {
           <div
             class="terminal-resize-handle"
             classList={{ "terminal-resize-handle-active": dragging() }}
-            onPointerDown={onHandlePointerDown}
-            onPointerMove={onHandlePointerMove}
-            onPointerUp={onHandlePointerUp}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
           />
         </Show>
 
@@ -103,7 +97,11 @@ const TerminalPanel: Component = () => {
           display: "flex", "align-items": "stretch",
           padding: "0 8px", gap: "2px",
         }}>
-          <div style={{ display: "flex", "align-items": "stretch", "overflow-x": "auto", gap: "2px" }}>
+          <div
+            ref={stripRef}
+            onWheel={onStripWheel}
+            style={{ display: "flex", "align-items": "stretch", "overflow-x": "auto", "min-width": "0", gap: "2px" }}
+          >
             <For each={store.terminals}>
               {(term) => {
                 const isActive = () => term.sessionId === store.activeTerminalId;
@@ -125,7 +123,7 @@ const TerminalPanel: Component = () => {
                     }}
                     style={{
                       display: "flex", "align-items": "center", gap: "7px",
-                      padding: "0 10px",
+                      padding: "0 10px", "flex-shrink": "0",
                       "border-radius": "var(--radius-sm)",
                       background: isActive() ? "var(--surface-3)" : "transparent",
                       cursor: "default",

@@ -9,7 +9,9 @@ import {
 // capture-phase stopPropagation() intercepts before the event gets there.
 // We deliberately never bind Mod-S: CodeMirror owns that for save.
 
-type ShortcutAction = "new-agent-menu" | "focus-prompt" | "omni-search" | "prompt-type-through" | "toggle-terminal-panel";
+type ShortcutAction =
+  | "new-agent-menu" | "focus-prompt" | "omni-search" | "prompt-type-through"
+  | "toggle-terminal-panel" | "shortcut-help" | "new-window";
 
 const actionHandlers = new Map<ShortcutAction, (payload?: string) => void>();
 
@@ -33,6 +35,60 @@ let shiftPressWasSolo = false;
 function isMod(e: KeyboardEvent): boolean {
   return isMac ? e.metaKey : e.ctrlKey;
 }
+
+const modKey = isMac ? "⌘" : "Ctrl+";
+const shiftKey = isMac ? "⇧" : "Shift+";
+
+export interface ShortcutEntry {
+  keys: string;
+  description: string;
+}
+
+export interface ShortcutGroup {
+  label: string;
+  items: ShortcutEntry[];
+}
+
+/** Documents keyboard bindings for the shortcut help modal — most are
+ *  installed by `installGlobalShortcuts` below; the Review group is local to
+ *  DiffPane's own onKeyDown (only active while that pane has focus) and is
+ *  listed here purely for discoverability. Keep in sync when bindings change. */
+export const SHORTCUT_GROUPS: ShortcutGroup[] = [
+  {
+    label: "Navigation",
+    items: [
+      { keys: `${modKey}1`, description: "Switch to Code workspace" },
+      { keys: `${modKey}2`, description: "Switch to Agent workspace" },
+      { keys: `${modKey}3`, description: "Switch to Review workspace" },
+      { keys: `${modKey}B`, description: "Toggle file explorer" },
+      { keys: `${modKey}${shiftKey}G`, description: "Toggle git panel" },
+      { keys: `${modKey}J`, description: "Toggle terminal panel" },
+      { keys: "Ctrl+Tab", description: "Cycle to next tab" },
+      { keys: "Ctrl+Shift+Tab", description: "Cycle to previous tab" },
+      { keys: `${modKey}${shiftKey}F`, description: "Open search (or double-tap Shift)" },
+      { keys: `${modKey}${shiftKey}N`, description: "New window" },
+      { keys: "Escape", description: "Close review / dismiss menus" },
+      { keys: "?", description: "Show this shortcuts reference" },
+    ],
+  },
+  {
+    label: "Agent",
+    items: [
+      { keys: `${modKey}T`, description: "New agent session" },
+      { keys: `${modKey}K`, description: "Focus the prompt composer" },
+      { keys: `${modKey}W`, description: "Close active tab or file" },
+    ],
+  },
+  {
+    label: "Review",
+    items: [
+      { keys: "]", description: "Jump to next file in diff" },
+      { keys: "[", description: "Jump to previous file in diff" },
+      { keys: "j", description: "Jump to next hunk in diff" },
+      { keys: "k", description: "Jump to previous hunk in diff" },
+    ],
+  },
+];
 
 function classifyTarget(target: EventTarget | null) {
   const el = target instanceof Element ? target : null;
@@ -69,6 +125,12 @@ export function installGlobalShortcuts(): () => void {
     if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") {
       e.preventDefault(); e.stopPropagation();
       runAction("omni-search");
+      return;
+    }
+
+    if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "n") {
+      e.preventDefault(); e.stopPropagation();
+      runAction("new-window");
       return;
     }
 
@@ -145,12 +207,6 @@ export function installGlobalShortcuts(): () => void {
       return;
     }
 
-    if (mod && e.shiftKey && (e.key === "]" || e.key === "[")) {
-      e.preventDefault(); e.stopPropagation();
-      cycleTab(e.key === "]" ? 1 : -1);
-      return;
-    }
-
     // Escape only acts on the app when nothing else has focus — menus, the
     // prompt composer, and editors/terminals handle their own Escape.
     if (e.key === "Escape" && !inTerminal && !inEditor && !inInput) {
@@ -158,6 +214,13 @@ export function installGlobalShortcuts(): () => void {
         e.preventDefault(); e.stopPropagation();
         closeReview();
       }
+      return;
+    }
+
+    if (!mod && !e.altKey && !inTerminal && !inEditor && !inInput && e.key === "?") {
+      e.preventDefault(); e.stopPropagation();
+      runAction("shortcut-help");
+      return;
     }
   }
 

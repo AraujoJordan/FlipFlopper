@@ -1,6 +1,6 @@
 {
   "name": "flipflopper",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "One cockpit for every CLI AI coding agent. A blazingly fast Tauri + SolidJS desktop GUI that wraps Claude Code, Codex, agy, Aider, and friends.",
   "type": "module",
   "author": "Jordan L. Araujo Jr.",
@@ -13,8 +13,8 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@codemirror/commands": "^6.10.4",
     "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.10.4",
     "@codemirror/language": "^6.12.4",
     "@codemirror/language-data": "^6.5.2",
     "@codemirror/lint": "^6.9.7",
@@ -23,7 +23,13 @@
     "@codemirror/view": "^6.43.4",
     "@lezer/highlight": "^1.2.3",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-clipboard-manager": "^2",
+    "@tauri-apps/plugin-notification": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-os": "^2.3.2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-store": "^2",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "highlight.js": "^11.11.1",

@@ -148,6 +148,11 @@ export interface ValidationTarget {
   category: string;
 }
 
+export interface SingleInstancePayload {
+  args: string[];
+  cwd: string;
+}
+
 // ── PTY ──────────────────────────────────────────────────────────────────────
 
 export const spawnAgent = (
@@ -183,6 +188,9 @@ export const onPtyOutput = (sessionId: string, cb: (data: string) => void): Prom
 export const onPtyExit = (sessionId: string, cb: () => void): Promise<UnlistenFn> =>
   listen(`pty-exit://${sessionId}`, () => cb());
 
+export const onSingleInstance = (cb: (payload: SingleInstancePayload) => void): Promise<UnlistenFn> =>
+  listen<SingleInstancePayload>("single-instance", (event) => cb(event.payload));
+
 // ── Agents ───────────────────────────────────────────────────────────────────
 
 export const getAgents = (includeVersions = true): Promise<AgentInfo[]> =>
@@ -195,6 +203,9 @@ export const openProject = (path: string): Promise<ProjectInfo> =>
 
 export const getRecentProjects = (): Promise<ProjectInfo[]> =>
   invoke("get_recent_projects");
+
+export const removeRecentProject = (projectPath: string): Promise<void> =>
+  invoke("remove_recent_project", { projectPath });
 
 export const getFileTree = (path: string): Promise<FileEntry[]> =>
   invoke("get_file_tree", { path });
@@ -704,3 +715,46 @@ export const syncNativeMenuState = (state: NativeMenuState): Promise<void> =>
 
 export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenFn> =>
   listen<string>("native-menu-command", (e) => cb(e.payload));
+
+// ── Windows ──────────────────────────────────────────────────────────────────
+
+export interface PersistedTabDto {
+  agent_id: string;
+  flow_node_id: string | null;
+}
+
+export interface WindowInitState {
+  label: string;
+  project_path: string | null;
+  tabs: PersistedTabDto[];
+  active_index: number;
+}
+
+export interface OpenWindowOutcome {
+  focused_existing: boolean;
+  label: string;
+}
+
+/** This window's persisted project/tabs, or `null` if never persisted yet
+ * (first launch after upgrading to multi-window — caller should fall back to
+ * the legacy single-slot localStorage workspace). */
+export const getWindowInitState = (): Promise<WindowInitState | null> =>
+  invoke("get_window_init_state");
+
+export const updateWindowWorkspace = (
+  projectPath: string | null,
+  tabs: PersistedTabDto[],
+  activeIndex: number,
+): Promise<void> =>
+  invoke("update_window_workspace", { projectPath, tabs, activeIndex });
+
+/** Opens `path` in its own window, or focuses it if already open elsewhere. */
+export const openProjectWindow = (path: string): Promise<OpenWindowOutcome> =>
+  invoke("open_project_window", { path });
+
+/** Opens a fresh, project-less window (shows the project picker). */
+export const openNewWindow = (): Promise<string> => invoke("open_new_window");
+
+/** If `path` is open in another window, focuses it and returns true. */
+export const focusProjectWindow = (path: string): Promise<boolean> =>
+  invoke("focus_project_window", { path });

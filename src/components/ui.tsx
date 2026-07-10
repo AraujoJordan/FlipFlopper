@@ -26,7 +26,7 @@ export const Spinner: Component<{ size?: number; color?: string }> = (props) => 
 // ── Button ────────────────────────────────────────────────────────────────────
 
 export const Button: Component<{
-  variant?: "outline" | "solid" | "ghost";
+  variant?: "outline" | "solid" | "ghost" | "danger";
   size?: "sm" | "md";
   title?: string;
   disabled?: boolean;
@@ -35,6 +35,7 @@ export const Button: Component<{
   onClick?: (e: MouseEvent) => void;
   style?: JSX.CSSProperties;
   classList?: Record<string, boolean | undefined>;
+  "aria-label"?: string;
   children: JSX.Element;
 }> = (props) => {
   const variant = () => props.variant ?? "outline";
@@ -44,6 +45,8 @@ export const Button: Component<{
     switch (variant()) {
       case "solid":
         return { background: "var(--accent)", border: "1px solid var(--accent)", color: "var(--fg-on-accent)" };
+      case "danger":
+        return { background: "var(--status-del)", border: "1px solid var(--status-del)", color: "var(--fg-on-accent)" };
       case "ghost":
         return { background: "transparent", border: "1px solid transparent", color: "var(--fg-muted)" };
       default:
@@ -58,6 +61,7 @@ export const Button: Component<{
       classList={props.classList}
       type={props.type ?? "button"}
       title={props.title}
+      aria-label={props["aria-label"] ?? props.title}
       disabled={props.disabled}
       onClick={props.onClick}
       style={{
@@ -76,6 +80,135 @@ export const Button: Component<{
     </button>
   );
 };
+
+// ── Input / Textarea / Select / Checkbox ─────────────────────────────────────
+// Shared form field styling (focus ring, border, surface) so consumers stop
+// hand-rolling these — previously duplicated with subtly different focus-ring
+// values in ChangesTab's commit textarea and SquashPushDialog's name input.
+
+const fieldBaseStyle: JSX.CSSProperties = {
+  width: "100%", "box-sizing": "border-box",
+  background: "var(--surface-1)",
+  border: "1px solid var(--border-default)",
+  "border-radius": "var(--radius-md)",
+  color: "var(--fg-default)",
+  "font-size": "12.5px",
+  outline: "none",
+};
+
+export const Input: Component<{
+  value: string;
+  onInput: (value: string) => void;
+  onKeyDown?: (e: KeyboardEvent) => void;
+  onBlur?: (e: FocusEvent) => void;
+  placeholder?: string;
+  disabled?: boolean;
+  spellcheck?: boolean;
+  ref?: (el: HTMLInputElement) => void;
+  style?: JSX.CSSProperties;
+}> = (props) => (
+  <input
+    ref={props.ref}
+    class="ui-field"
+    value={props.value}
+    disabled={props.disabled}
+    placeholder={props.placeholder}
+    spellcheck={props.spellcheck ?? false}
+    onInput={(e) => props.onInput(e.currentTarget.value)}
+    onBlur={props.onBlur}
+    onKeyDown={props.onKeyDown}
+    style={{
+      ...fieldBaseStyle,
+      padding: "8px 10px",
+      opacity: props.disabled ? ".6" : "1",
+      ...(props.style ?? {}),
+    }}
+  />
+);
+
+export const Textarea: Component<{
+  value: string;
+  onInput: (value: string) => void;
+  onKeyDown?: (e: KeyboardEvent) => void;
+  placeholder?: string;
+  rows?: number;
+  disabled?: boolean;
+  ref?: (el: HTMLTextAreaElement) => void;
+  style?: JSX.CSSProperties;
+}> = (props) => (
+  <textarea
+    ref={props.ref}
+    class="ui-field"
+    value={props.value}
+    disabled={props.disabled}
+    placeholder={props.placeholder}
+    rows={props.rows ?? 3}
+    onInput={(e) => props.onInput(e.currentTarget.value)}
+    onKeyDown={props.onKeyDown}
+    style={{
+      ...fieldBaseStyle,
+      resize: "none",
+      padding: "7px 9px",
+      "font-family": "var(--font-mono)",
+      "font-size": "12px",
+      opacity: props.disabled ? ".6" : "1",
+      ...(props.style ?? {}),
+    }}
+  />
+);
+
+export const Select: Component<{
+  value: string;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  options: { value: string; label: string }[];
+  style?: JSX.CSSProperties;
+}> = (props) => (
+  <select
+    class="ui-field"
+    value={props.value}
+    disabled={props.disabled}
+    onChange={(e) => props.onChange(e.currentTarget.value)}
+    style={{
+      ...fieldBaseStyle,
+      padding: "6px 8px",
+      cursor: props.disabled ? "default" : "pointer",
+      opacity: props.disabled ? ".6" : "1",
+      ...(props.style ?? {}),
+    }}
+  >
+    <For each={props.options}>
+      {(opt) => <option value={opt.value}>{opt.label}</option>}
+    </For>
+  </select>
+);
+
+export const Checkbox: Component<{
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label?: JSX.Element;
+  disabled?: boolean;
+  style?: JSX.CSSProperties;
+}> = (props) => (
+  <label
+    style={{
+      display: "inline-flex", "align-items": "center", gap: "8px",
+      cursor: props.disabled ? "default" : "pointer",
+      opacity: props.disabled ? ".6" : "1",
+      "font-size": "12.5px", color: "var(--fg-body)",
+      ...(props.style ?? {}),
+    }}
+  >
+    <input
+      type="checkbox"
+      checked={props.checked}
+      disabled={props.disabled}
+      onChange={(e) => props.onChange(e.currentTarget.checked)}
+      style={{ "accent-color": "var(--accent)", cursor: props.disabled ? "default" : "pointer" }}
+    />
+    {props.label}
+  </label>
+);
 
 // ── Menu / MenuItem ───────────────────────────────────────────────────────────
 // Dropdown card pattern shared by AgentBar's new-session menu and the
@@ -517,17 +650,21 @@ const TOAST_COLOR: Record<ToastKind, string> = {
 };
 
 export const ToastHost: Component = () => (
-  <div style={{
-    position: "fixed", bottom: "84px", right: "16px",
-    display: "flex", "flex-direction": "column", gap: "8px",
-    "z-index": "var(--z-toast)", "max-width": "360px",
-  }}>
+  <div
+    aria-live="polite"
+    aria-atomic="false"
+    style={{
+      position: "fixed", bottom: "84px", right: "16px",
+      display: "flex", "flex-direction": "column", gap: "8px",
+      "z-index": "var(--z-toast)", "max-width": "360px",
+    }}>
     <For each={toasts()}>
       {(t) => {
         const color = TOAST_COLOR[t.kind];
         return (
           <div
             class="toast-item"
+            role="status"
             classList={{ "toast-item-leaving": t.leaving }}
             style={{
               display: "flex", "align-items": "flex-start", gap: "10px",
@@ -557,6 +694,7 @@ export const ToastHost: Component = () => (
               class="icon-btn press"
               onclick={() => dismissToast(t.id)}
               title="Dismiss"
+              aria-label="Dismiss notification"
               style={{ "flex-shrink": "0", color: "var(--fg-subtle)", cursor: "pointer", padding: "2px" }}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
@@ -575,14 +713,24 @@ export const ToastHost: Component = () => (
 interface ConfirmState {
   message: string;
   confirmLabel: string;
+  danger: boolean;
   resolve: (v: boolean) => void;
+}
+
+interface ConfirmOptions {
+  confirmLabel?: string;
+  /** Renders the confirm button in the danger (red) variant, for irreversible
+   *  or high-risk actions (discard, rollback, YOLO enable). */
+  danger?: boolean;
 }
 
 const [confirmState, setConfirmState] = createSignal<ConfirmState | null>(null);
 
-export function confirmDialog(message: string, confirmLabel = "Confirm"): Promise<boolean> {
+export function confirmDialog(message: string, opts?: string | ConfirmOptions): Promise<boolean> {
+  const { confirmLabel = "Confirm", danger = false } =
+    typeof opts === "string" ? { confirmLabel: opts } : (opts ?? {});
   return new Promise((resolve) => {
-    setConfirmState({ message, confirmLabel, resolve });
+    setConfirmState({ message, confirmLabel, danger, resolve });
   });
 }
 
@@ -635,7 +783,12 @@ export const ConfirmHost: Component = () => {
             </div>
             <div style={{ display: "flex", "justify-content": "flex-end", gap: "8px" }}>
               <Button variant="ghost" onClick={() => resolveConfirm(false)}>Cancel</Button>
-              <Button variant="solid" onClick={() => resolveConfirm(true)}>{state().confirmLabel}</Button>
+              <Button
+                variant={state().danger ? "danger" : "solid"}
+                onClick={() => resolveConfirm(true)}
+              >
+                {state().confirmLabel}
+              </Button>
             </div>
           </div>
         </div>

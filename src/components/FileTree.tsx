@@ -17,6 +17,7 @@ import { openOmniSearchInScope } from "./OmniSearch";
 import { openAgentTaskDialog } from "./AgentTaskDialog";
 import { runAction } from "../lib/shortcuts";
 import { getFileIcon, getFolderIconName, iconPath as materialIconPath } from "../lib/fileIcons";
+import { writeClipboardText } from "../lib/native";
 
 const STATUS_STYLE: Record<string, { color: string; bg: string; label: string }> = {
   A: { color: "var(--status-add)", bg: "#1a2a1e", label: "A" },
@@ -422,7 +423,7 @@ const FileTree: Component = () => {
 
   function handleCopyFilename(entry: FileEntry) {
     setMenu(null);
-    void navigator.clipboard.writeText(entry.name).then(
+    void writeClipboardText(entry.name).then(
       () => toast("Copied filename", "success"),
       () => toast("Failed to copy", "error"),
     );
@@ -1249,8 +1250,8 @@ const FileTree: Component = () => {
                 <MenuItem onSelect={() => handleCut(entry())} style={menuPad}>Cut</MenuItem>
                 <MenuItem onSelect={() => handleCopy(entry())} style={menuPad}>Copy</MenuItem>
                 <SubMenuItem label="Copy Path" style={menuPad}>
-                  <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(entry().path); }} style={menuPad}>Copy path</MenuItem>
-                  <MenuItem onSelect={() => { setMenu(null); void navigator.clipboard.writeText(relPath(entry())); }} style={menuPad}>Copy relative path</MenuItem>
+                  <MenuItem onSelect={() => { setMenu(null); void writeClipboardText(entry().path); }} style={menuPad}>Copy path</MenuItem>
+                  <MenuItem onSelect={() => { setMenu(null); void writeClipboardText(relPath(entry())); }} style={menuPad}>Copy relative path</MenuItem>
                   <Show when={!entry().is_dir && !multi()}>
                     <MenuItem onSelect={() => handleCopyFilename(entry())} style={menuPad}>Copy filename</MenuItem>
                   </Show>

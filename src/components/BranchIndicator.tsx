@@ -41,7 +41,7 @@ const BranchIndicator: Component = () => {
     if (!project) return;
     if (store.tabs.length > 0) {
       const ok = await confirmDialog(
-        "An AI agent is currently active/running. Switching branches might interrupt its context or lead to unexpected behavior. Switch anyway?",
+        `${store.tabs.length} active agent ${store.tabs.length === 1 ? "session is" : "sessions are"} running. Switching branches might interrupt ${store.tabs.length === 1 ? "its" : "their"} context or lead to unexpected behavior. Switch anyway?`,
         "Switch Branch"
       );
       if (!ok) return;
@@ -72,7 +72,7 @@ const BranchIndicator: Component = () => {
     if (targetBranch === branch()) return;
     if (store.tabs.length > 0) {
       const ok = await confirmDialog(
-        "An AI agent is currently active/running. Switching branches might interrupt its context or lead to unexpected behavior. Switch anyway?",
+        `${store.tabs.length} active agent ${store.tabs.length === 1 ? "session is" : "sessions are"} running. Switching branches might interrupt ${store.tabs.length === 1 ? "its" : "their"} context or lead to unexpected behavior. Switch anyway?`,
         "Switch Branch"
       );
       if (!ok) return;

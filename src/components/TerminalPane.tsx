@@ -6,6 +6,8 @@ import { onPtyOutput, onPtyExit, ptyInput, ptyResize, ptyAttach, triggerHaptic }
 import { runAction } from "../lib/shortcuts";
 import { clearAgentMode, cycleAgentModeOptimistic, sniffAgentMode, setTabNeedsAttention, store } from "../lib/store";
 import { cleanTerminalText, isMeaningfulOutput } from "../lib/orchestrator";
+import { getIdleTimeoutMinutes } from "../lib/settings";
+import { sendNativeNotification } from "../lib/native";
 
 interface Props {
   sessionId: string;
@@ -100,18 +102,14 @@ const TerminalPane: Component<Props> = (props) => {
         window.clearTimeout(idleTimeoutId);
         idleTimeoutId = null;
       }
+      const minutes = getIdleTimeoutMinutes();
       idleTimeoutId = window.setTimeout(() => {
         setTabNeedsAttention(props.sessionId, true);
-        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-          try {
-            new Notification("Agent Idle Alert", {
-              body: `The agent has been running but silent for 5 minutes. It may need attention.`,
-            });
-          } catch (e) {
-            console.error("Failed to send idle notification:", e);
-          }
-        }
-      }, 5 * 60 * 1000);
+        void sendNativeNotification(
+          "Agent Idle Alert",
+          `The agent has been running but silent for ${minutes} minute${minutes === 1 ? "" : "s"}. It may need attention.`,
+        );
+      }, minutes * 60 * 1000);
     }
 
     unlisten = await onPtyOutput(props.sessionId, (data) => {
@@ -146,13 +144,7 @@ const TerminalPane: Component<Props> = (props) => {
       const tab = store.tabs.find((x) => x.sessionId === props.sessionId);
       if (tab) {
         setTabNeedsAttention(props.sessionId, true);
-        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-          try {
-            new Notification("Agent Completed", {
-              body: `Agent "${tab.label}" has finished executing.`,
-            });
-          } catch {}
-        }
+        void sendNativeNotification("Agent Completed", `Agent "${tab.label}" has finished executing.`);
       }
     });
 

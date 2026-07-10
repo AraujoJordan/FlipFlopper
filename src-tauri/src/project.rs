@@ -1264,6 +1264,12 @@ fn recents_path() -> PathBuf {
         .join("recents.json")
 }
 
+/// Guards the recents.json read-modify-write below. Multiple windows can now
+/// call `open_project`/`remove_recent_project` concurrently; without this,
+/// two racing writers could each read a stale list and overwrite the other's
+/// update.
+static RECENTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn get_recent_projects() -> Vec<ProjectInfo> {
     let path = recents_path();
     if !path.exists() {
@@ -1286,6 +1292,7 @@ pub fn get_recent_projects() -> Vec<ProjectInfo> {
 }
 
 pub fn add_recent_project(info: &ProjectInfo) {
+    let _guard = RECENTS_LOCK.lock().unwrap();
     let path = recents_path();
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
@@ -1296,6 +1303,23 @@ pub fn add_recent_project(info: &ProjectInfo) {
     recents.retain(|r| r.path != info.path);
     recents.insert(0, info.clone());
     recents.truncate(20);
+    let serialized = match serde_json::to_string_pretty(&recents) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("recents: failed to serialize recents list: {e}");
+            return;
+        }
+    };
+    if let Err(e) = fs::write(&path, serialized) {
+        eprintln!("recents: failed to write {}: {e}", path.display());
+    }
+}
+
+pub fn remove_recent_project(project_path: &str) {
+    let _guard = RECENTS_LOCK.lock().unwrap();
+    let path = recents_path();
+    let mut recents = get_recent_projects();
+    recents.retain(|r| r.path != project_path);
     let serialized = match serde_json::to_string_pretty(&recents) {
         Ok(s) => s,
         Err(e) => {

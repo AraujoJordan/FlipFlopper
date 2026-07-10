@@ -90,10 +90,10 @@ export const ConflictFixDialogHost: Component = () => {
           class="overlay-backdrop-in"
           onclick={close}
           style={{
-            // Below Menu's z-index (150) — the agent-picker dropdown is a
-            // Portal rendered as a sibling in the DOM, so it must stack
-            // above this backdrop to stay clickable.
-            position: "fixed", inset: 0, "z-index": "140",
+            // Below --z-menu — the agent-picker dropdown is a Portal
+            // rendered as a sibling in the DOM, so it must stack above
+            // this backdrop to stay clickable.
+            position: "fixed", inset: 0, "z-index": "var(--z-dialog)",
             display: "flex", "align-items": "center", "justify-content": "center",
             background: "rgba(0,0,0,.5)",
           }}

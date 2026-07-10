@@ -16,6 +16,7 @@ import { toast, Spinner } from "./ui";
 import { registerShortcutHandler } from "../lib/shortcuts";
 import { agentColor, AgentLogo, AGENT_SLASH_COMMANDS, agentModeLabel, agentTuning } from "../lib/agentMeta";
 import { markSessionTaskStarted } from "../lib/orchestrator";
+import { readLegacyJson, readPref, writePref } from "../lib/appPrefs";
 
 const composerTuningSelectStyle = {
   "font-family": "var(--font-mono)",
@@ -60,39 +61,42 @@ interface PromptState {
   stash: string | null;
 }
 
-function readPromptState(projectPath: string): PromptState {
-  try {
-    const raw = localStorage.getItem(`flipflopper:prompt-state:${projectPath}`);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return {
-        draft: typeof parsed.draft === "string" ? parsed.draft : "",
-        stash: typeof parsed.stash === "string" ? parsed.stash : null,
-      };
-    }
-  } catch { /* ignore */ }
-  return { draft: "", stash: null };
+function normalizePromptState(value: unknown): PromptState {
+  const parsed = value as Partial<PromptState> | null;
+  return {
+    draft: typeof parsed?.draft === "string" ? parsed.draft : "",
+    stash: typeof parsed?.stash === "string" ? parsed.stash : null,
+  };
+}
+
+async function readPromptState(projectPath: string): Promise<PromptState> {
+  const key = `flipflopper:prompt-state:${projectPath}`;
+  return normalizePromptState(await readPref<PromptState>(
+    key,
+    { draft: "", stash: null },
+    () => normalizePromptState(readLegacyJson<PromptState | null>(key, null)),
+  ));
 }
 
 function writePromptState(projectPath: string, state: PromptState) {
-  try {
-    localStorage.setItem(`flipflopper:prompt-state:${projectPath}`, JSON.stringify(state));
-  } catch { /* ignore */ }
+  writePref(`flipflopper:prompt-state:${projectPath}`, state);
 }
 
-function readPromptHistory(projectPath: string): string[] {
-  try {
-    const raw = localStorage.getItem(`flipflopper:prompt-history:${projectPath}`);
-    const parsed = raw ? JSON.parse(raw) : [];
-    if (Array.isArray(parsed)) return parsed.filter((entry) => typeof entry === "string");
-  } catch { /* ignore */ }
-  return [];
+function normalizePromptHistory(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : [];
+}
+
+async function readPromptHistory(projectPath: string): Promise<string[]> {
+  const key = `flipflopper:prompt-history:${projectPath}`;
+  return normalizePromptHistory(await readPref<string[]>(
+    key,
+    [],
+    () => normalizePromptHistory(readLegacyJson<string[] | null>(key, null)),
+  ));
 }
 
 function writePromptHistory(projectPath: string, history: string[]) {
-  try {
-    localStorage.setItem(`flipflopper:prompt-history:${projectPath}`, JSON.stringify(history));
-  } catch { /* ignore */ }
+  writePref(`flipflopper:prompt-history:${projectPath}`, history);
 }
 
 const NAV_SEQ: Record<string, string> = {
@@ -273,12 +277,14 @@ const PromptComposer: Component = () => {
       setHistory([]);
       return;
     }
-    const saved = readPromptState(path);
-    setHistory(readPromptHistory(path));
-    setValue(saved.draft);
-    setStashedPrompt(saved.stash);
-    setDismissedTokenKey(null);
-    setCaretPosition(saved.draft.length);
+    void Promise.all([readPromptState(path), readPromptHistory(path)]).then(([saved, savedHistory]) => {
+      if (loadedProjectPath !== path) return;
+      setHistory(savedHistory);
+      setValue(saved.draft);
+      setStashedPrompt(saved.stash);
+      setDismissedTokenKey(null);
+      setCaretPosition(saved.draft.length);
+    });
   });
 
   // Persist the draft and stash as they change so nothing is lost on restart.
@@ -649,7 +655,13 @@ const PromptComposer: Component = () => {
           return;
         }
 
-        sessionId = await spawnAgent(agent.id, project.path, store.yoloMode);
+        try {
+          sessionId = await spawnAgent(agent.id, project.path, store.yoloMode);
+        } catch (e) {
+          console.error(e);
+          toast(`Couldn't start ${agent.name}: ${String(e)} — your message is still here.`, "error");
+          return;
+        }
         addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
       }
 

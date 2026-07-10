@@ -11,6 +11,7 @@ import {
   workflowStepCount,
 } from "../../lib/orchestrator";
 import FlowCanvas, { type Viewport } from "./FlowCanvas";
+import { useResizable } from "../../lib/useResizable";
 
 const OrchestratorPanel: Component = () => {
   const [viewport, setViewport] = createSignal<Viewport>({ x: 24, y: 16, k: 1 });
@@ -38,28 +39,12 @@ const OrchestratorPanel: Component = () => {
   });
 
   // Resize handle drag.
-  let dragStartY = 0;
-  let dragStartHeight = 0;
-  const [dragging, setDragging] = createSignal(false);
-
-  function onHandlePointerDown(e: PointerEvent) {
-    const target = e.currentTarget as HTMLDivElement;
-    target.setPointerCapture(e.pointerId);
-    dragStartY = e.clientY;
-    dragStartHeight = store.orchestratorHeight;
-    setDragging(true);
-  }
-
-  function onHandlePointerMove(e: PointerEvent) {
-    if (!dragging()) return;
-    setOrchestratorHeight(dragStartHeight + (dragStartY - e.clientY));
-  }
-
-  function onHandlePointerUp(e: PointerEvent) {
-    const target = e.currentTarget as HTMLDivElement;
-    target.releasePointerCapture(e.pointerId);
-    setDragging(false);
-  }
+  const { dragging, onPointerDown, onPointerMove, onPointerUp } = useResizable({
+    axis: "y",
+    invert: true,
+    getSize: () => store.orchestratorHeight,
+    setSize: setOrchestratorHeight,
+  });
 
   // Zoom controls.
   function zoomBy(factor: number) {
@@ -115,9 +100,9 @@ const OrchestratorPanel: Component = () => {
       <div
         class="terminal-resize-handle"
         classList={{ "terminal-resize-handle-active": dragging() }}
-        onPointerDown={onHandlePointerDown}
-        onPointerMove={onHandlePointerMove}
-        onPointerUp={onHandlePointerUp}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
       />
 
       {/* Header */}

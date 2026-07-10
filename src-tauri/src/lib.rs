@@ -10,10 +10,11 @@ mod pty;
 mod review;
 mod runner;
 mod tools;
+mod windows;
 
 use std::process::Command;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -31,6 +32,7 @@ use runner::{AndroidEnvironment, IosEnvironment, RunTarget, ValidationTarget};
 use tools::ToolInfo;
 
 const MENU_OPEN_PROJECT: &str = "menu-open-project";
+const MENU_NEW_WINDOW: &str = "menu-new-window";
 const MENU_REVEAL_PROJECT: &str = "menu-reveal-project";
 const MENU_CLOSE_PROJECT: &str = "menu-close-project";
 const MENU_NEW_AGENT: &str = "menu-new-agent";
@@ -48,6 +50,8 @@ const MENU_REVIEW_WORKING_CHANGES: &str = "menu-review-working-changes";
 const MENU_SHOW_CHANGES: &str = "menu-show-changes";
 const MENU_SHOW_HISTORY: &str = "menu-show-history";
 const MENU_COMMAND_SEARCH: &str = "menu-command-search";
+#[cfg(not(target_os = "macos"))]
+const MENU_CHECK_FOR_UPDATES: &str = "menu-check-for-updates";
 
 #[derive(Debug, Deserialize)]
 struct NativeMenuState {
@@ -60,6 +64,12 @@ struct NativeMenuState {
     terminal_panel_open: bool,
     auto_toggle_sidebars: bool,
     git_panel_tab: String,
+}
+
+#[derive(Clone, Serialize)]
+struct SingleInstancePayload {
+    args: Vec<String>,
+    cwd: String,
 }
 
 /// How the PTY bridge treats the first local URL it sees in a session's output.
@@ -92,6 +102,18 @@ struct PendingBridge {
 
 #[derive(Default)]
 struct PendingBridges(std::sync::Mutex<std::collections::HashMap<String, PendingBridge>>);
+
+/// Label of the window that most recently gained focus. Used to target
+/// `native-menu-command` at the right window instead of broadcasting a
+/// single click/shortcut to every open window.
+#[derive(Default)]
+struct FocusedWindow(std::sync::Mutex<Option<String>>);
+
+/// Set once `RunEvent::ExitRequested` fires (before windows are destroyed).
+/// While set, window-close cleanup skips rewriting `windows.json` so the file
+/// keeps the full multi-window session for the next launch to restore.
+#[derive(Default)]
+struct Quitting(std::sync::atomic::AtomicBool);
 
 /// Grace period after which a parked session that nobody ever attached is
 /// reclaimed. This **never** auto-starts the event bridge: emitting before the
@@ -147,7 +169,7 @@ fn park_bridge(
 /// Attach a parked session: start its event bridge now that the frontend is
 /// listening. Atomically pops the entry so the watchdog (or a double-call)
 /// can't start two bridges.
-fn attach_bridge(app: &tauri::AppHandle, session_id: &str) {
+fn attach_bridge(app: &tauri::AppHandle, session_id: &str, window_label: &str) {
     let taken = app
         .state::<PendingBridges>()
         .0
@@ -155,16 +177,26 @@ fn attach_bridge(app: &tauri::AppHandle, session_id: &str) {
         .unwrap()
         .remove(session_id);
     if let Some(pb) = taken {
-        bridge_pty_with_url(app.clone(), session_id.to_string(), pb.rx, pb.url_action);
+        bridge_pty_with_url(
+            app.clone(),
+            session_id.to_string(),
+            pb.rx,
+            pb.url_action,
+            window_label.to_string(),
+        );
     }
 }
 
-// Bridge a PtyEvent receiver to Tauri events on the given session_id.
+// Bridge a PtyEvent receiver to Tauri events on the given session_id, scoped
+// to the window that attached (`emit_to`, not a global broadcast) — with
+// multiple windows open, every terminal byte would otherwise be serialized
+// into every webview instead of just the one displaying it.
 fn bridge_pty_with_url(
     app: tauri::AppHandle,
     session_id: String,
     rx: std::sync::mpsc::Receiver<PtyEvent>,
     url_action: UrlAction,
+    window_label: String,
 ) {
     std::thread::spawn(move || {
         let mut url_captured = false;
@@ -186,19 +218,23 @@ fn bridge_pty_with_url(
                                     .unwrap()
                                     .insert(session_id.clone(), url.clone());
                             }
-                            let _ = app.emit(&format!("preview-url://{session_id}"), url.clone());
+                            let _ = app.emit_to(
+                                &window_label,
+                                &format!("preview-url://{session_id}"),
+                                url.clone(),
+                            );
                             if url_action == UrlAction::CaptureAndOpen {
                                 let _ = open_browser_url(&url);
                             }
                         }
                     }
-                    let _ = app.emit(&format!("pty://{session_id}"), data);
+                    let _ = app.emit_to(&window_label, &format!("pty://{session_id}"), data);
                 }
                 PtyEvent::Exit => {
                     if let Some(urls) = app.try_state::<SessionUrls>() {
                         urls.0.lock().unwrap().remove(&session_id);
                     }
-                    let _ = app.emit(&format!("pty-exit://{session_id}"), ());
+                    let _ = app.emit_to(&window_label, &format!("pty-exit://{session_id}"), ());
                     break;
                 }
             }
@@ -300,6 +336,12 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
                 MENU_OPEN_PROJECT,
                 "Open Project...",
                 Some("CmdOrCtrl+O"),
+            )?,
+            &menu_item(
+                handle,
+                MENU_NEW_WINDOW,
+                "New Window",
+                Some("CmdOrCtrl+Shift+N"),
             )?,
             &menu_item(
                 handle,
@@ -461,6 +503,22 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
             let _ = help_menu.append(&help_separator);
         }
         let _ = help_menu.append(&command_search);
+
+        // In-app auto-update is Windows/Linux-only. macOS users update via
+        // Homebrew (`brew upgrade flipflopper`), so the menu entry is gated
+        // out on mac to avoid offering a dead-end action.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let check_for_updates = menu_item(
+                handle,
+                MENU_CHECK_FOR_UPDATES,
+                "Check for Updates…",
+                None,
+            )?;
+            let help_separator = separator(handle)?;
+            let _ = help_menu.append(&help_separator);
+            let _ = help_menu.append(&check_for_updates);
+        }
     }
 
     Ok(menu)
@@ -741,10 +799,11 @@ fn pty_kill(app: tauri::AppHandle, state: State<'_, PtyManager>, session_id: Str
 
 /// Frontend signal that its `pty://` and `pty-exit://` listeners are in place
 /// for this session, so the backend may now start emitting. Must be called
-/// after registering those listeners; see `TerminalPane.onMount`.
+/// after registering those listeners; see `TerminalPane.onMount`. The
+/// attaching window becomes the sole target for this session's events.
 #[tauri::command]
-fn pty_attach(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
-    attach_bridge(&app, &session_id);
+fn pty_attach(app: tauri::AppHandle, window: tauri::WebviewWindow, session_id: String) -> Result<(), String> {
+    attach_bridge(&app, &session_id, window.label());
     Ok(())
 }
 
@@ -788,6 +847,11 @@ fn open_project(path: String) -> Result<ProjectInfo, String> {
 #[tauri::command]
 fn get_recent_projects() -> Vec<ProjectInfo> {
     project::get_recent_projects()
+}
+
+#[tauri::command]
+fn remove_recent_project(project_path: String) {
+    project::remove_recent_project(&project_path)
 }
 
 #[tauri::command]
@@ -1420,6 +1484,139 @@ fn sync_native_menu_state(app: tauri::AppHandle, state: NativeMenuState) -> Resu
 }
 
 // ════════════════════════════════════════════════
+// Window management
+// ════════════════════════════════════════════════
+
+#[derive(Clone, Serialize)]
+struct OpenWindowOutcome {
+    focused_existing: bool,
+    label: String,
+}
+
+fn focus_window(win: &tauri::WebviewWindow) {
+    let _ = win.unminimize();
+    let _ = win.show();
+    let _ = win.set_focus();
+}
+
+#[tauri::command]
+fn get_window_init_state(
+    window: tauri::WebviewWindow,
+    registry: State<'_, windows::WindowRegistry>,
+) -> Option<windows::WindowEntry> {
+    registry.0.lock().unwrap().get(window.label()).cloned()
+}
+
+#[tauri::command]
+fn update_window_workspace(
+    window: tauri::WebviewWindow,
+    registry: State<'_, windows::WindowRegistry>,
+    quitting: State<'_, Quitting>,
+    project_path: Option<String>,
+    tabs: Vec<windows::PersistedTab>,
+    active_index: usize,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    {
+        let mut map = registry.0.lock().unwrap();
+        map.insert(
+            label.clone(),
+            windows::WindowEntry {
+                label,
+                project_path,
+                tabs,
+                active_index,
+            },
+        );
+    }
+    if !quitting.0.load(std::sync::atomic::Ordering::SeqCst) {
+        windows::persist(&registry);
+    }
+    Ok(())
+}
+
+/// Open `path` in a dedicated window. If it's already open elsewhere, that
+/// window is focused instead of creating a duplicate.
+#[tauri::command]
+async fn open_project_window(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<OpenWindowOutcome, String> {
+    let registry = app.state::<windows::WindowRegistry>();
+    if let Some(existing_label) = windows::window_for_project(&registry, &path, None) {
+        if let Some(win) = app.get_webview_window(&existing_label) {
+            focus_window(&win);
+            return Ok(OpenWindowOutcome {
+                focused_existing: true,
+                label: existing_label,
+            });
+        }
+    }
+
+    let label = windows::new_window_label();
+    {
+        let mut map = registry.0.lock().unwrap();
+        map.insert(
+            label.clone(),
+            windows::WindowEntry {
+                label: label.clone(),
+                project_path: Some(path),
+                tabs: vec![],
+                active_index: 0,
+            },
+        );
+    }
+    windows::persist(&registry);
+    windows::create_project_window(&app, &label).map_err(|e| e.to_string())?;
+    Ok(OpenWindowOutcome {
+        focused_existing: false,
+        label,
+    })
+}
+
+/// Open a fresh, project-less window (shows the project picker).
+#[tauri::command]
+async fn open_new_window(app: tauri::AppHandle) -> Result<String, String> {
+    let registry = app.state::<windows::WindowRegistry>();
+    let label = windows::new_window_label();
+    {
+        let mut map = registry.0.lock().unwrap();
+        map.insert(
+            label.clone(),
+            windows::WindowEntry {
+                label: label.clone(),
+                project_path: None,
+                tabs: vec![],
+                active_index: 0,
+            },
+        );
+    }
+    windows::persist(&registry);
+    windows::create_project_window(&app, &label).map_err(|e| e.to_string())?;
+    Ok(label)
+}
+
+/// If `path` is already open in another window, focus it and return true.
+/// Backs the dedup guard on in-window "open project" flows (picker, recents,
+/// folder pick, menu) so a project never ends up open twice.
+#[tauri::command]
+fn focus_project_window(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    registry: State<'_, windows::WindowRegistry>,
+    path: String,
+) -> bool {
+    let Some(label) = windows::window_for_project(&registry, &path, Some(window.label())) else {
+        return false;
+    };
+    let Some(win) = app.get_webview_window(&label) else {
+        return false;
+    };
+    focus_window(&win);
+    true
+}
+
+// ════════════════════════════════════════════════
 // Native dialog
 // ════════════════════════════════════════════════
 
@@ -1762,16 +1959,60 @@ pub fn run() {
     env::install_augmented_path();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit(
+                "single-instance",
+                SingleInstancePayload { args: argv, cwd },
+            );
+        }))
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(PtyManager::new())
         .manage(LspManager::new())
         .manage(SessionUrls::default())
         .manage(PendingBridges::default())
+        .manage(windows::WindowRegistry::new())
+        .manage(FocusedWindow::default())
+        .manage(Quitting::default())
         .setup(|app| {
             let handle = app.handle();
             if let Ok(menu) = build_app_menu(handle) {
                 let _ = app.set_menu(menu);
+            }
+
+            // Restore every window that was open at last quit (see
+            // `windows.rs`). If `windows.json` never existed, leave the
+            // registry empty for "main" — its `get_window_init_state` pull
+            // then returns `None`, signalling the frontend's one-time
+            // legacy-localStorage migration path.
+            if let Some(entries) = windows::load_entries() {
+                if !entries.is_empty() {
+                    let registry = app.state::<windows::WindowRegistry>();
+                    let mut iter = entries.into_iter();
+                    if let Some(mut first) = iter.next() {
+                        first.label = "main".to_string();
+                        registry.0.lock().unwrap().insert(first.label.clone(), first);
+                    }
+                    for mut entry in iter {
+                        entry.label = windows::new_window_label();
+                        registry.0.lock().unwrap().insert(entry.label.clone(), entry.clone());
+                        if let Err(e) = windows::create_project_window(handle, &entry.label) {
+                            eprintln!("windows: failed to recreate window {}: {e}", entry.label);
+                        }
+                    }
+                }
             }
 
             if let Some(win) = app.get_webview_window("main") {
@@ -1782,10 +2023,58 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::Focused(true) => {
+                let app = window.app_handle();
+                *app.state::<FocusedWindow>().0.lock().unwrap() = Some(window.label().to_string());
+            }
+            tauri::WindowEvent::Destroyed => {
+                let app = window.app_handle();
+                let label = window.label().to_string();
+                let quitting = app
+                    .state::<Quitting>()
+                    .0
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let registry = app.state::<windows::WindowRegistry>();
+                let (removed, remaining) = {
+                    let mut map = registry.0.lock().unwrap();
+                    let removed = map.remove(&label);
+                    (removed, map.len())
+                };
+                if !quitting && remaining > 0 {
+                    windows::persist(&registry);
+                }
+                if let Some(project_path) = removed.and_then(|e| e.project_path) {
+                    let pty = app.state::<PtyManager>();
+                    let killed = pty::kill_sessions_for_project(&pty, &project_path);
+                    if !killed.is_empty() {
+                        let urls_state = app.state::<SessionUrls>();
+                        let pending_state = app.state::<PendingBridges>();
+                        let mut urls = urls_state.0.lock().unwrap();
+                        let mut pending = pending_state.0.lock().unwrap();
+                        for id in &killed {
+                            urls.remove(id);
+                            pending.remove(id);
+                        }
+                    }
+                    let lsp = app.state::<LspManager>();
+                    lsp::shutdown_project(&lsp, &project_path);
+                }
+            }
+            _ => {}
+        })
         .on_menu_event(|app, event| {
             let id = event.id.as_ref();
             if id.starts_with("menu-") {
-                let _ = app.emit("native-menu-command", id.to_string());
+                let focused_label = app.state::<FocusedWindow>().0.lock().unwrap().clone();
+                match focused_label {
+                    Some(label) => {
+                        let _ = app.emit_to(&label, "native-menu-command", id.to_string());
+                    }
+                    None => {
+                        let _ = app.emit("native-menu-command", id.to_string());
+                    }
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1802,6 +2091,7 @@ pub fn run() {
             // Project
             open_project,
             get_recent_projects,
+            remove_recent_project,
             get_file_tree,
             search_prompt_files,
             search_project_text,
@@ -1885,7 +2175,26 @@ pub fn run() {
             trigger_haptic,
             // Menu
             sync_native_menu_state,
+            // Windows
+            get_window_init_state,
+            update_window_workspace,
+            open_project_window,
+            open_new_window,
+            focus_project_window,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running FlipFlopper");
+        .build(tauri::generate_context!())
+        .expect("error while building FlipFlopper")
+        .run(|app_handle, event| {
+            // Fires before windows are destroyed, so the Destroyed handler's
+            // "skip rewrite when quitting" check always sees this in time —
+            // it's what lets `windows.json` retain every open window across
+            // a Cmd+Q relaunch instead of being trimmed down as each window
+            // closes.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                app_handle
+                    .state::<Quitting>()
+                    .0
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
 }

@@ -3,6 +3,7 @@ import { searchProjectText, searchPromptFiles, type FileEntry, type TextMatch } 
 import { openEditorFile, store } from "../lib/store";
 import { registerShortcutHandler, runAction } from "../lib/shortcuts";
 import { usagesState, clearUsages, byteRangeToIndices, usageToTextMatch } from "../lib/usages";
+import { getFileIcon } from "../lib/fileIcons";
 import { Spinner } from "./ui";
 
 type SearchItem =
@@ -493,6 +494,7 @@ const OmniSearch: Component = () => {
                           width: "100%",
                           display: "flex",
                           "align-items": "center",
+                          gap: "8px",
                           padding: "8px 10px",
                           "border-radius": "8px",
                           background: active() ? "var(--surface-4)" : "transparent",
@@ -501,6 +503,7 @@ const OmniSearch: Component = () => {
                           "font-size": "12px",
                         }}
                       >
+                        <img src={getFileIcon(file.name)} alt="" style={{ width: "14px", height: "14px", "flex-shrink": "0" }} />
                         <span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
                           {file.name}
                         </span>

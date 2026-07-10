@@ -19,29 +19,42 @@ import {
   updateCurrentBranch,
   getExplorerCollapsedForMode,
   getGitPanelCollapsedForMode,
+  hydrateStorePreferences,
 } from "./lib/store";
 import {
   getAgents,
   getRecentProjects,
+  removeRecentProject,
   lspShutdownProject,
   openProject,
   pickProjectFolder,
   spawnAgent,
   syncNativeMenuState,
   onNativeMenuCommand,
+  onSingleInstance,
+  getWindowInitState,
+  updateWindowWorkspace,
+  openProjectWindow,
+  openNewWindow,
+  focusProjectWindow,
   type ProjectInfo,
+  type NativeMenuState,
 } from "./lib/ipc";
 import type { Tab, WorkspaceMode } from "./lib/store";
 import {
   initOrchestrator,
+  hydrateOrchestratorPersistence,
   loadFlowsForProject,
   rebindNode,
   flowNodeIdForSession,
   markPendingRebinds,
   clearPendingRebinds,
 } from "./lib/orchestrator";
+import { initAppPrefs, readLegacyJson, readPref } from "./lib/appPrefs";
+import { hydrateSettings } from "./lib/settings";
 import AgentWorkspace from "./components/AgentWorkspace";
 import BranchIndicator from "./components/BranchIndicator";
+import UpdateDialog from "./components/UpdateDialog";
 import TerminalPanel from "./components/TerminalPanel";
 import FileTree from "./components/FileTree";
 import GitPanel from "./components/git/GitPanel";
@@ -49,11 +62,15 @@ import { ConflictFixDialogHost } from "./components/git/ConflictFixDialog";
 import { SquashPushDialogHost } from "./components/git/SquashPushDialog";
 import AgentTaskDialogHost from "./components/AgentTaskDialog";
 import OmniSearch from "./components/OmniSearch";
+import ShortcutHelp from "./components/ShortcutHelp";
+import ProjectPicker from "./components/ProjectPicker";
+import SettingsPanel from "./components/SettingsPanel";
 import PromptComposer from "./components/PromptComposer";
 import RunButton from "./components/RunButton";
 import ValidationButton from "./components/ValidationButton";
 import { ToastHost, ConfirmHost, toast } from "./components/ui";
-import { installGlobalShortcuts, runAction } from "./lib/shortcuts";
+import { installGlobalShortcuts, registerShortcutHandler, runAction } from "./lib/shortcuts";
+import { checkForUpdates, isUpdaterEnabled, updateInfo } from "./lib/updater";
 import "./App.css";
 
 // Lazy: keeps CodeMirror and highlight.js out of the startup bundle. The
@@ -83,15 +100,12 @@ interface PersistedWorkspace {
   activeIndex: number;
 }
 
-function readWorkspace(): PersistedWorkspace | null {
-  try {
-    const raw = localStorage.getItem(WORKSPACE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
-}
-
-function writeWorkspace(ws: PersistedWorkspace) {
-  try { localStorage.setItem(WORKSPACE_KEY, JSON.stringify(ws)); } catch { /* ignore */ }
+async function readWorkspace(): Promise<PersistedWorkspace | null> {
+  return readPref<PersistedWorkspace | null>(
+    WORKSPACE_KEY,
+    null,
+    () => readLegacyJson<PersistedWorkspace | null>(WORKSPACE_KEY, null),
+  );
 }
 
 const WORKSPACE_MODES: { mode: WorkspaceMode; label: string }[] = [
@@ -282,6 +296,9 @@ const App: Component = () => {
       case "menu-open-project":
         await handlePickProject();
         return;
+      case "menu-new-window":
+        await handleNewWindow();
+        return;
       case "menu-reveal-project":
         if (store.currentProject) {
           revealItemInDir(store.currentProject.path).catch((e) => toast(`Failed to reveal project: ${String(e)}`, "error"));
@@ -338,11 +355,34 @@ const App: Component = () => {
       case "menu-command-search":
         runAction("omni-search");
         return;
+      case "menu-check-for-updates":
+        void checkForUpdatesInteractive();
+        return;
+    }
+  }
+
+  async function checkForUpdatesInteractive() {
+    if (!isUpdaterEnabled()) return;
+    try {
+      const info = await checkForUpdates();
+      if (info) {
+        setUpdateDialogOpen(true);
+      } else {
+        toast("You're up to date");
+      }
+    } catch (e) {
+      toast(`Update check failed: ${String(e)}`, "error");
     }
   }
 
   onMount(async () => {
     initOrchestrator();
+    await initAppPrefs();
+    await Promise.all([
+      hydrateSettings(),
+      hydrateStorePreferences(),
+      hydrateOrchestratorPersistence(),
+    ]);
     requestAnimationFrame(() => {
       void win.show().then(() => win.setFocus());
     });
@@ -356,15 +396,31 @@ const App: Component = () => {
     setStore("agents", agents);
     setStore("recentProjects", recents);
 
-    const persisted = readWorkspace();
-    const lastPath = persisted?.projectPath ?? recents[0]?.path;
+    // This window's own persisted project/tabs (multi-window restore, or a
+    // freshly created window). `null` means `windows.json` doesn't exist yet
+    // — first launch after upgrading to multi-window — so fall back to the
+    // old single-slot workspace record; it migrates into windows.json
+    // automatically the first time the persist effect below runs.
+    const windowInit = await getWindowInitState();
+    let lastPath: string | null;
+    let tabsToRestore: { agentId: string; flowNodeId?: string }[];
+    if (windowInit) {
+      lastPath = windowInit.project_path;
+      tabsToRestore = windowInit.tabs.map((t) => ({
+        agentId: t.agent_id,
+        flowNodeId: t.flow_node_id ?? undefined,
+      }));
+    } else {
+      const persisted = await readWorkspace();
+      lastPath = persisted?.projectPath ?? recents[0]?.path ?? null;
+      tabsToRestore = persisted?.tabs ?? [];
+    }
 
     if (lastPath) {
       try {
         const project = await openProject(lastPath);
         setActiveProject(project);
 
-        const tabsToRestore = persisted?.tabs ?? [];
         const restoredTabs: Tab[] = [];
 
         // Mark persisted live nodes as pending-rebind so the tab-sync effect
@@ -410,24 +466,54 @@ const App: Component = () => {
         if (gatedCount > 0) {
           toast("Workflow restored — chains paused for review");
         }
-      } catch { /* first run or path gone */ }
+      } catch (e) {
+        toast(`Couldn't reopen ${lastPath}: ${String(e)}`, "error");
+      }
     }
 
     // Backfill agent versions (spawns `--version` per installed agent) once
     // the workspace is up.
     void getAgents(true).then((full) => setStore("agents", full));
 
+    // Silent background update check (Windows/Linux only). The title-bar
+    // badge reacts to the resulting signal; failures are swallowed.
+    void checkForUpdates({ silent: true }).then((info) => {
+      if (info) {
+        toast(`FlipFlopper ${info.version} is available`, "info", {
+          actionLabel: "Update",
+          onAction: () => setUpdateDialogOpen(true),
+          sticky: true,
+        });
+      }
+    });
+
     const unlistenMenu = await onNativeMenuCommand((id) => {
       void handleNativeMenuCommand(id);
+    });
+    const unlistenSingleInstance = await onSingleInstance(() => {
+      requestAnimationFrame(() => {
+        void win.show().then(() => win.setFocus());
+      });
+    });
+    // The native app menu is one process-wide object shared by every window
+    // (macOS has a single menu bar regardless of window count). Re-push this
+    // window's state whenever it gains focus so the menu always reflects
+    // whichever window the user is actually looking at.
+    const unlistenFocus = await win.onFocusChanged(({ payload: focused }) => {
+      if (focused) void syncNativeMenuState(menuSnapshot());
     });
 
     const branchInterval = setInterval(updateCurrentBranch, 15_000);
     const uninstallShortcuts = installGlobalShortcuts();
+    const unregisterNewWindow = registerShortcutHandler("new-window", () => void handleNewWindow());
 
     onCleanup(() => {
       clearInterval(branchInterval);
       uninstallShortcuts();
       unlistenMenu();
+      unlistenSingleInstance();
+      unlistenFocus();
+      unregisterNewWindow();
     });
   });
 
@@ -435,14 +521,14 @@ const App: Component = () => {
     const project = store.currentProject;
     const tabs = store.tabs;
     const activeIndex = tabs.findIndex((t) => t.sessionId === store.activeTabId);
-    writeWorkspace({
-      projectPath: project?.path ?? null,
-      tabs: tabs.map((t) => ({
-        agentId: t.agentId,
-        flowNodeId: flowNodeIdForSession(t.sessionId) ?? undefined,
+    void updateWindowWorkspace(
+      project?.path ?? null,
+      tabs.map((t) => ({
+        agent_id: t.agentId,
+        flow_node_id: flowNodeIdForSession(t.sessionId) ?? null,
       })),
-      activeIndex: Math.max(0, activeIndex),
-    });
+      Math.max(0, activeIndex),
+    );
   });
 
   createEffect(() => {
@@ -452,8 +538,8 @@ const App: Component = () => {
     setStore("gitPanelCollapsed", getGitPanelCollapsedForMode(mode));
   });
 
-  createEffect(() => {
-    void syncNativeMenuState({
+  function menuSnapshot(): NativeMenuState {
+    return {
       hasProject: !!store.currentProject,
       hasActiveAgent: !!store.activeTabId,
       workspaceMode: store.workspaceMode,
@@ -463,19 +549,96 @@ const App: Component = () => {
       terminalPanelOpen: store.terminalPanelOpen,
       autoToggleSidebars: store.autoToggleSidebars,
       gitPanelTab: store.gitPanelTab,
-    });
+    };
+  }
+
+  createEffect(() => {
+    void syncNativeMenuState(menuSnapshot());
   });
+
+  createEffect(() => {
+    const title = store.currentProject ? `${store.currentProject.name} — FlipFlopper` : "FlipFlopper";
+    void win.setTitle(title);
+  });
+
+  const [projectBusy, setProjectBusy] = createSignal(false);
+  const [pickerOpen, setPickerOpen] = createSignal(false);
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [updateDialogOpen, setUpdateDialogOpen] = createSignal(false);
+
+  async function refreshRecentProjects() {
+    setStore("recentProjects", await getRecentProjects());
+  }
 
   async function handlePickProject() {
     const path = await pickProjectFolder();
     if (!path) return;
+    if (await focusProjectWindow(path)) {
+      setPickerOpen(false);
+      return;
+    }
+    setProjectBusy(true);
     try {
       const project = await openProject(path);
       setActiveProject(project);
       updateCurrentBranch();
+      void refreshRecentProjects();
+      setPickerOpen(false);
     } catch (e) {
       console.error("Failed to open project:", e);
       toast(`Failed to open project: ${String(e)}`, "error");
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
+  async function openRecentProject(path: string) {
+    if (store.currentProject?.path === path) {
+      setPickerOpen(false);
+      return;
+    }
+    if (await focusProjectWindow(path)) {
+      setPickerOpen(false);
+      return;
+    }
+    setProjectBusy(true);
+    try {
+      const project = await openProject(path);
+      setActiveProject(project);
+      updateCurrentBranch();
+      void refreshRecentProjects();
+      setPickerOpen(false);
+    } catch (e) {
+      console.error("Failed to open project:", e);
+      toast(`Failed to open ${path}: ${String(e)}`, "error");
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
+  async function openRecentInNewWindow(path: string) {
+    try {
+      await openProjectWindow(path);
+      setPickerOpen(false);
+    } catch (e) {
+      toast(`Failed to open ${path} in a new window: ${String(e)}`, "error");
+    }
+  }
+
+  async function handleNewWindow() {
+    try {
+      await openNewWindow();
+    } catch (e) {
+      toast(`Failed to open new window: ${String(e)}`, "error");
+    }
+  }
+
+  async function removeRecentProjectEntry(path: string) {
+    try {
+      await removeRecentProject(path);
+      setStore("recentProjects", (recents) => recents.filter((r) => r.path !== path));
+    } catch (e) {
+      toast(`Failed to remove ${path}: ${String(e)}`, "error");
     }
   }
 
@@ -569,7 +732,7 @@ const App: Component = () => {
         }}>
           <button
             class="hover-lift"
-            onclick={handlePickProject}
+            onclick={() => setPickerOpen(true)}
             style={{
               color: "var(--fg-body)",
               "font-size": "12px", "font-weight": "500",
@@ -597,6 +760,79 @@ const App: Component = () => {
         </div>
 
         <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "14px", color: "var(--fg-subtle)" }}>
+          <Show when={updateInfo()}>
+            <button
+              class="icon-btn press"
+              onclick={() => setUpdateDialogOpen(true)}
+              title={`Update available: ${updateInfo()!.version}`}
+              aria-label={`Update available, version ${updateInfo()!.version}`}
+              style={{
+                position: "relative",
+                display: "flex", "align-items": "center", "justify-content": "center",
+                width: "26px", height: "26px", color: "var(--accent)",
+                "border-radius": "var(--radius-md)",
+              }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <path d="M21 3v6h-6" />
+              </svg>
+              <span style={{
+                position: "absolute", top: "3px", right: "3px",
+                width: "7px", height: "7px", "border-radius": "50%",
+                background: "var(--accent)", border: "1.5px solid var(--surface-3)",
+              }} />
+            </button>
+          </Show>
+          <button
+            class="icon-btn press"
+            onclick={() => runAction("omni-search")}
+            title="Search files and text (⌘⇧F)"
+            aria-label="Search files and text"
+            style={{
+              display: "flex", "align-items": "center", "justify-content": "center",
+              width: "26px", height: "26px", color: "var(--fg-subtle)",
+              "border-radius": "var(--radius-md)",
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="7" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+          </button>
+          <button
+            class="icon-btn press"
+            onclick={() => runAction("shortcut-help")}
+            title="Keyboard shortcuts (?)"
+            aria-label="Show keyboard shortcuts"
+            style={{
+              display: "flex", "align-items": "center", "justify-content": "center",
+              width: "26px", height: "26px", color: "var(--fg-subtle)",
+              "border-radius": "var(--radius-md)",
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M9.5 9.2a2.5 2.5 0 0 1 4.6 1.4c0 1.6-2.1 1.9-2.1 3.4" />
+              <path d="M12 17.5h.01" stroke-linecap="round" />
+            </svg>
+          </button>
+          <button
+            class="icon-btn press"
+            onclick={() => setSettingsOpen(true)}
+            title="Settings"
+            aria-label="Open settings"
+            style={{
+              display: "flex", "align-items": "center", "justify-content": "center",
+              width: "26px", height: "26px", color: "var(--fg-subtle)",
+              "border-radius": "var(--radius-md)",
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
           <RunButton />
           <ValidationButton />
           <BranchIndicator />
@@ -782,10 +1018,24 @@ const App: Component = () => {
 
       <ToastHost />
       <OmniSearch />
+      <ShortcutHelp />
+      <ProjectPicker
+        open={pickerOpen()}
+        onClose={() => setPickerOpen(false)}
+        busy={projectBusy()}
+        recents={store.recentProjects}
+        currentPath={store.currentProject?.path ?? null}
+        onPickFolder={handlePickProject}
+        onOpenRecent={openRecentProject}
+        onOpenRecentNewWindow={openRecentInNewWindow}
+        onRemoveRecent={removeRecentProjectEntry}
+      />
+      <SettingsPanel open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
       <ConfirmHost />
       <AgentTaskDialogHost />
       <ConflictFixDialogHost />
       <SquashPushDialogHost />
+      <UpdateDialog open={updateDialogOpen()} onClose={() => setUpdateDialogOpen(false)} />
     </div>
   );
 };

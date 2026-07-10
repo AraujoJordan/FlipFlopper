@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FlipFlopper",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "identifier": "com.araujojordan.flipflopper",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -43,5 +43,13 @@
     ],
     "license": "MIT",
     "licenseFile": "LICENSE"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZBQjc5REJDOUIwQjg0OTMKUldTVGhBdWJ2SjIzYWhNOHdzYS8vTzAvRDZoaDg1Tk5xWkF2NEhhOW9pK2NEOCtMSG1FdmZIL1AK",
+      "endpoints": [
+        "https://github.com/AraujoJordan/FlipFlopper/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
