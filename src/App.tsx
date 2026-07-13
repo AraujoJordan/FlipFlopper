@@ -5,8 +5,6 @@ import {
   store,
   setStore,
   addTab,
-  killAndClearAllTabs,
-  killAndClearAllTerminals,
   removeTab,
   openReview,
   selectWorkspaceMode,
@@ -20,25 +18,33 @@ import {
   getExplorerCollapsedForMode,
   getGitPanelCollapsedForMode,
   hydrateStorePreferences,
+  setPendingPromptSeed,
+  beginProjectTab,
+  switchToProject,
+  closeProjectTab,
+  closeActiveProjectTab,
+  findOpenProjectTab,
+  newProjectTabId,
+  snapshotActiveProject,
+  type ProjectSnapshot,
 } from "./lib/store";
 import {
   getAgents,
   getRecentProjects,
   removeRecentProject,
-  lspShutdownProject,
   openProject,
   pickProjectFolder,
   spawnAgent,
   syncNativeMenuState,
   onNativeMenuCommand,
   onSingleInstance,
-  getWindowInitState,
-  updateWindowWorkspace,
-  openProjectWindow,
-  openNewWindow,
-  focusProjectWindow,
+  getSessionTabs,
+  updateSessionTabs,
   type ProjectInfo,
   type NativeMenuState,
+  type PersistedProjectTabDto,
+  type SessionStateDto,
+  type AgentInfo,
 } from "./lib/ipc";
 import type { Tab, WorkspaceMode } from "./lib/store";
 import {
@@ -54,17 +60,15 @@ import { initAppPrefs, readLegacyJson, readPref } from "./lib/appPrefs";
 import { hydrateSettings } from "./lib/settings";
 import AgentWorkspace from "./components/AgentWorkspace";
 import BranchIndicator from "./components/BranchIndicator";
-import UpdateDialog from "./components/UpdateDialog";
 import TerminalPanel from "./components/TerminalPanel";
 import FileTree from "./components/FileTree";
+import ProjectTabStrip from "./components/ProjectTabStrip";
 import GitPanel from "./components/git/GitPanel";
 import { ConflictFixDialogHost } from "./components/git/ConflictFixDialog";
 import { SquashPushDialogHost } from "./components/git/SquashPushDialog";
 import AgentTaskDialogHost from "./components/AgentTaskDialog";
 import OmniSearch from "./components/OmniSearch";
 import ShortcutHelp from "./components/ShortcutHelp";
-import ProjectPicker from "./components/ProjectPicker";
-import SettingsPanel from "./components/SettingsPanel";
 import PromptComposer from "./components/PromptComposer";
 import RunButton from "./components/RunButton";
 import ValidationButton from "./components/ValidationButton";
@@ -78,6 +82,14 @@ import "./App.css";
 // visitedModes below).
 const EditorPane = lazy(() => import("./components/EditorPane"));
 const DiffPane = lazy(() => import("./components/DiffPane"));
+
+// Lazy modals: each is also wrapped in a `Show` at its call site — without
+// the gate a lazy component that's always rendered (just internally hidden)
+// would fetch its chunk at startup anyway.
+const ProjectPicker = lazy(() => import("./components/ProjectPicker"));
+const NewProjectWizard = lazy(() => import("./components/NewProjectWizard"));
+const SettingsPanel = lazy(() => import("./components/SettingsPanel"));
+const UpdateDialog = lazy(() => import("./components/UpdateDialog"));
 
 type OS = "macos" | "windows" | "linux";
 
@@ -106,6 +118,57 @@ async function readWorkspace(): Promise<PersistedWorkspace | null> {
     null,
     () => readLegacyJson<PersistedWorkspace | null>(WORKSPACE_KEY, null),
   );
+}
+
+/** Spawn the persisted agent tabs for a project in parallel, rebind their
+ *  orchestrator flow nodes, and return the live `Tab[]` (in persisted order)
+ *  plus the count of gated (chain-paused) rebinds. `onTab` is called for each
+ *  successfully spawned tab in order so the caller can register it with the
+ *  store either via `addTab` (active project) or directly into a snapshot. */
+async function spawnProjectAgentTabs(
+  projectPath: string,
+  tabsToRestore: { agentId: string; flowNodeId?: string }[],
+  agents: AgentInfo[],
+  yolo: boolean,
+  onTab?: (tab: Tab) => void,
+): Promise<{ tabs: Tab[]; gatedCount: number }> {
+  const restoredTabs: Tab[] = [];
+
+  // Mark persisted live nodes as pending-rebind so the tab-sync effect
+  // doesn't prune them as edge-less detached nodes before rebind runs.
+  const pendingIds = tabsToRestore
+    .map((t) => t.flowNodeId)
+    .filter((id): id is string => !!id);
+  if (pendingIds.length > 0) markPendingRebinds(pendingIds);
+
+  let gatedCount = 0;
+
+  const spawnable = tabsToRestore
+    .map((saved) => ({ saved, agent: agents.find((a) => a.id === saved.agentId) }))
+    .filter((entry) => entry.agent?.installed);
+  const spawned = await Promise.allSettled(
+    spawnable.map(({ agent }) => spawnAgent(agent!.id, projectPath, yolo)),
+  );
+  spawnable.forEach(({ saved, agent }, i) => {
+    const result = spawned[i];
+    if (result.status !== "fulfilled") return; // skip failed restore
+    const sessionId = result.value;
+    const tab: Tab = {
+      sessionId,
+      label: agent!.name,
+      agentId: agent!.id,
+      agentIcon: agent!.icon,
+    };
+    restoredTabs.push(tab);
+    // Rebind BEFORE the tab is registered so the tab-sync effect sees the
+    // already-bound node instead of creating a duplicate live node.
+    if (saved.flowNodeId) {
+      gatedCount += rebindNode(saved.flowNodeId, sessionId);
+    }
+    onTab?.(tab);
+  });
+  clearPendingRebinds();
+  return { tabs: restoredTabs, gatedCount };
 }
 
 const WORKSPACE_MODES: { mode: WorkspaceMode; label: string }[] = [
@@ -257,47 +320,25 @@ const App: Component = () => {
     }
   });
 
-  function setActiveProject(project: ProjectInfo) {
-    const previousPath = store.currentProject?.path;
-    if (previousPath && previousPath !== project.path) {
-      void lspShutdownProject(previousPath);
-      void killAndClearAllTerminals();
-      setStore("editorFiles", []);
-      setStore("activeEditorPath", null);
-      setStore("editorOpen", false);
-      setStore("selectedFiles", []);
-      setStore("review", null);
-    }
+  function setActiveProject(project: ProjectInfo, id?: string) {
     setStore("currentProject", project);
     setStore("fileTreePath", project.path);
+    setStore("activeProjectId", id ?? store.activeProjectId ?? newProjectTabId());
     loadFlowsForProject(project.path);
   }
 
   function closeProject() {
-    const path = store.currentProject?.path;
-    if (path) void lspShutdownProject(path);
-    void killAndClearAllTabs();
-    void killAndClearAllTerminals();
-    setStore("currentProject", null);
-    setStore("fileTreePath", null);
-    setStore("editorFiles", []);
-    setStore("activeEditorPath", null);
-    setStore("editorOpen", false);
-    setStore("selectedFiles", []);
-    setStore("review", null);
-    setStore("currentBranch", "");
-    setStore("historyFilterPath", null);
-    setStore("workspaceMode", "agent");
+    void closeActiveProjectTab();
     loadFlowsForProject(null);
   }
 
   async function handleNativeMenuCommand(id: string) {
     switch (id) {
+      case "menu-new-project":
+        showNewProjectWizard();
+        return;
       case "menu-open-project":
         await handlePickProject();
-        return;
-      case "menu-new-window":
-        await handleNewWindow();
         return;
       case "menu-reveal-project":
         if (store.currentProject) {
@@ -377,99 +418,171 @@ const App: Component = () => {
 
   onMount(async () => {
     initOrchestrator();
-    await initAppPrefs();
-    await Promise.all([
-      hydrateSettings(),
-      hydrateStorePreferences(),
-      hydrateOrchestratorPersistence(),
-    ]);
+    // Show the window before any await: the store is already seeded
+    // synchronously from localStorage, so nothing below is needed for the
+    // first paint — the skeleton states cover the restore gap.
     requestAnimationFrame(() => {
       void win.show().then(() => win.setFocus());
     });
 
-    // Fast agent detection (no per-agent `--version` subprocess); versions
-    // are backfilled after the workspace is restored.
-    const [agents, recents] = await Promise.all([
+    // Kick the pref store load; readPref awaits it internally, so the
+    // hydrate calls below don't need an explicit gate.
+    void initAppPrefs();
+
+    // Preference hydration, fast agent detection (no per-agent `--version`
+    // subprocess; versions are backfilled after the workspace is restored),
+    // recents, and the persisted session are all independent — one parallel
+    // round. Hydration still completes before the restore below so restored
+    // agents spawn with the final yolo mode.
+    //
+    // `session` is the single-window project-tab session (active project plus
+    // inactive tabs). `null` means neither `session.json` nor a migratable
+    // legacy `windows.json` exists — true first run — so fall back to the old
+    // single-slot localStorage workspace.
+    console.log("[FlipFlopper] Starting workspace restoration...");
+    const [, , , agents, recents, session] = await Promise.all([
+      hydrateSettings(),
+      hydrateStorePreferences(),
+      hydrateOrchestratorPersistence(),
       getAgents(false),
       getRecentProjects(),
+      getSessionTabs(),
     ]);
+    console.log("[FlipFlopper] Prefs, agents, and session loaded.");
     setStore("agents", agents);
     setStore("recentProjects", recents);
 
-    // This window's own persisted project/tabs (multi-window restore, or a
-    // freshly created window). `null` means `windows.json` doesn't exist yet
-    // — first launch after upgrading to multi-window — so fall back to the
-    // old single-slot workspace record; it migrates into windows.json
-    // automatically the first time the persist effect below runs.
-    const windowInit = await getWindowInitState();
-    let lastPath: string | null;
-    let tabsToRestore: { agentId: string; flowNodeId?: string }[];
-    if (windowInit) {
-      lastPath = windowInit.project_path;
-      tabsToRestore = windowInit.tabs.map((t) => ({
+    // Resolve the active project (+ its persisted agent tabs) and the list of
+    // inactive project tabs to restore as dormant snapshots.
+    let primaryPath: string | null = null;
+    let primaryTabs: { agentId: string; flowNodeId?: string }[] = [];
+    let primaryId: string | null = null;
+    if (session && session.tabs.length > 0) {
+      console.log(`[FlipFlopper] Restoring session with ${session.tabs.length} tabs.`);
+      let activeIdx = session.tabs.findIndex((t) => t.id === session.active_id);
+      if (activeIdx === -1) activeIdx = 0;
+
+      const initialSnaps = session.tabs.map(() => null as any as ProjectSnapshot);
+      setStore("projectTabs", initialSnaps);
+
+      const active = session.tabs[activeIdx];
+      primaryPath = active.project_path;
+      primaryTabs = active.tabs.map((t) => ({
         agentId: t.agent_id,
         flowNodeId: t.flow_node_id ?? undefined,
       }));
-    } else {
-      const persisted = await readWorkspace();
-      lastPath = persisted?.projectPath ?? recents[0]?.path ?? null;
-      tabsToRestore = persisted?.tabs ?? [];
-    }
+      primaryId = active.id;
 
-    if (lastPath) {
-      try {
-        const project = await openProject(lastPath);
-        setActiveProject(project);
+      if (primaryPath) {
+        try {
+          console.log(`[FlipFlopper] Opening active project: ${primaryPath}`);
+          const project = await openProject(primaryPath);
+          setActiveProject(project, primaryId ?? undefined);
+          updateCurrentBranch();
 
-        const restoredTabs: Tab[] = [];
-
-        // Mark persisted live nodes as pending-rebind so the tab-sync effect
-        // doesn't prune them as edge-less detached nodes before rebind runs.
-        const pendingIds = tabsToRestore
-          .map((t) => t.flowNodeId)
-          .filter((id): id is string => !!id);
-        if (pendingIds.length > 0) markPendingRebinds(pendingIds);
-
-        let gatedCount = 0;
-
-        updateCurrentBranch();
-
-        // Spawn all restored agents in parallel, then register tabs in the
-        // original persisted order.
-        const spawnable = tabsToRestore
-          .map((saved) => ({ saved, agent: agents.find((a) => a.id === saved.agentId) }))
-          .filter((entry) => entry.agent?.installed);
-        const spawned = await Promise.allSettled(
-          spawnable.map(({ agent }) =>
-            spawnAgent(agent!.id, project.path, store.yoloMode)
-          )
-        );
-        spawnable.forEach(({ saved, agent }, i) => {
-          const result = spawned[i];
-          if (result.status !== "fulfilled") return; // skip failed restore
-          const sessionId = result.value;
-          const tab: Tab = {
-            sessionId,
-            label: agent!.name,
-            agentId: agent!.id,
-            agentIcon: agent!.icon,
-          };
-          restoredTabs.push(tab);
-          // Rebind BEFORE addTab so the tab-sync effect sees the already-
-          // bound node instead of creating a duplicate live node.
-          if (saved.flowNodeId) {
-            gatedCount += rebindNode(saved.flowNodeId, sessionId);
+          const activeSnap = snapshotActiveProject();
+          if (activeSnap) {
+            setStore("projectTabs", activeIdx, activeSnap);
           }
-          addTab(tab);
-        });
-        clearPendingRebinds();
-        if (gatedCount > 0) {
-          toast("Workflow restored — chains paused for review");
+          console.log(`[FlipFlopper] Active project ${primaryPath} opened. Spawning agent tabs...`);
+
+          const { gatedCount } = await spawnProjectAgentTabs(
+            project.path,
+            primaryTabs,
+            agents,
+            store.yoloMode,
+            (tab) => addTab(tab),
+          );
+          if (gatedCount > 0) toast("Workflow restored — chains paused for review");
+          console.log(`[FlipFlopper] Active project agent tabs spawned.`);
+        } catch (e) {
+          console.error(`[FlipFlopper] Failed to reopen active project ${primaryPath}:`, e);
+          toast(`Couldn't reopen ${primaryPath}: ${String(e)}`, "error");
         }
-      } catch (e) {
-        toast(`Couldn't reopen ${lastPath}: ${String(e)}`, "error");
+      }
+
+      console.log(`[FlipFlopper] Preloading ${session.tabs.length - 1} inactive projects...`);
+      await Promise.all(
+        session.tabs.map(async (entry, i) => {
+          if (i === activeIdx) return;
+          try {
+            console.log(`[FlipFlopper] Preloading inactive project [${i}]: ${entry.project_path}`);
+            const project = await openProject(entry.project_path);
+            const snap: ProjectSnapshot = {
+              id: entry.id,
+              project: { ...project },
+              tabs: [],
+              agentModes: {},
+              activeTabId: null,
+              terminals: [],
+              activeTerminalId: null,
+              runSessionId: null,
+              validationSessionId: null,
+              editorFiles: [],
+              activeEditorPath: null,
+              editorOpen: false,
+              selectedFiles: [],
+              review: null,
+              fileTreePath: project.path,
+              currentBranch: "",
+              gitStatusVersion: 0,
+              fileTreeVersion: 0,
+              historyFilterPath: null,
+              gitPanelTab: "changes",
+              pendingLineFocus: null,
+              restoringWorkspace: false,
+              workspaceMode: "agent",
+              explorerCollapsed: getExplorerCollapsedForMode("agent"),
+              gitPanelCollapsed: getGitPanelCollapsedForMode("agent"),
+              pendingTabs: entry.tabs.map((t) => ({
+                agentId: t.agent_id,
+                flowNodeId: t.flow_node_id ?? undefined,
+              })),
+            };
+            setStore("projectTabs", i, snap);
+            console.log(`[FlipFlopper] Preloaded inactive project [${i}]: ${entry.project_path}`);
+          } catch (e) {
+            console.error(`[FlipFlopper] Preload failed for inactive project [${i}] ${entry.project_path}:`, e);
+          }
+        })
+      );
+      setStore("projectTabs", (tabs) => tabs.filter((t) => t !== null));
+      console.log("[FlipFlopper] Inactive projects preloading complete.");
+    } else {
+      console.log("[FlipFlopper] No session found, loading legacy/fallback workspace...");
+      // Legacy single-slot localStorage workspace (pre multi-window).
+      const persisted = await readWorkspace();
+      primaryPath = persisted?.projectPath ?? recents[0]?.path ?? null;
+      primaryTabs = persisted?.tabs ?? [];
+
+      if (primaryPath) {
+        try {
+          console.log(`[FlipFlopper] Opening legacy active project: ${primaryPath}`);
+          const project = await openProject(primaryPath);
+          setActiveProject(project, primaryId ?? undefined);
+          updateCurrentBranch();
+
+          const activeSnap = snapshotActiveProject();
+          if (activeSnap && !store.projectTabs.some((p) => p && p.id === activeSnap.id)) {
+            setStore("projectTabs", (tabs) => [...tabs, activeSnap]);
+          }
+
+          const { gatedCount } = await spawnProjectAgentTabs(
+            project.path,
+            primaryTabs,
+            agents,
+            store.yoloMode,
+            (tab) => addTab(tab),
+          );
+          if (gatedCount > 0) toast("Workflow restored — chains paused for review");
+        } catch (e) {
+          console.error(`[FlipFlopper] Failed to open legacy active project ${primaryPath}:`, e);
+          toast(`Couldn't reopen ${primaryPath}: ${String(e)}`, "error");
+        }
       }
     }
+    setStore("restoringWorkspace", false);
+    console.log("[FlipFlopper] Workspace restoration complete.");
 
     // Backfill agent versions (spawns `--version` per installed agent) once
     // the workspace is up.
@@ -503,32 +616,89 @@ const App: Component = () => {
       if (focused) void syncNativeMenuState(menuSnapshot());
     });
 
-    const branchInterval = setInterval(updateCurrentBranch, 15_000);
+    // Poll only while visible; one immediate refresh on becoming visible
+    // again so the branch isn't stale after the window was hidden.
+    const branchInterval = setInterval(() => {
+      if (!document.hidden) updateCurrentBranch();
+    }, 15_000);
+    const onVisibilityChange = () => {
+      if (!document.hidden) updateCurrentBranch();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     const uninstallShortcuts = installGlobalShortcuts();
-    const unregisterNewWindow = registerShortcutHandler("new-window", () => void handleNewWindow());
+    const unregisterOpenProject = registerShortcutHandler("open-project", () => setPickerOpen(true));
+    const unregisterNewProject = registerShortcutHandler("new-project", showNewProjectWizard);
+    const unregisterProjectNext = registerShortcutHandler("project-tab-next", () => cycleProjectTab(1));
+    const unregisterProjectPrev = registerShortcutHandler("project-tab-prev", () => cycleProjectTab(-1));
+    window.addEventListener("beforeunload", flushSessionPersist);
 
     onCleanup(() => {
       clearInterval(branchInterval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("beforeunload", flushSessionPersist);
       uninstallShortcuts();
       unlistenMenu();
       unlistenSingleInstance();
       unlistenFocus();
-      unregisterNewWindow();
+      unregisterOpenProject();
+      unregisterNewProject();
+      unregisterProjectNext();
+      unregisterProjectPrev();
     });
   });
 
+  // Session persistence is debounced: the effect below fires on every tab or
+  // project-tab mutation, and each backend call rewrites session.json on disk.
+  // The trailing write is flushed on beforeunload; a hard kill can lose at
+  // most the last <500ms of tab-structure changes.
+  let pendingSession: SessionStateDto | null = null;
+  let sessionPersistTimer: number | undefined;
+  function flushSessionPersist() {
+    if (sessionPersistTimer !== undefined) {
+      window.clearTimeout(sessionPersistTimer);
+      sessionPersistTimer = undefined;
+    }
+    if (pendingSession) {
+      const state = pendingSession;
+      pendingSession = null;
+      void updateSessionTabs(state);
+    }
+  }
+
   createEffect(() => {
-    const project = store.currentProject;
-    const tabs = store.tabs;
-    const activeIndex = tabs.findIndex((t) => t.sessionId === store.activeTabId);
-    void updateWindowWorkspace(
-      project?.path ?? null,
-      tabs.map((t) => ({
-        agent_id: t.agentId,
-        flow_node_id: flowNodeIdForSession(t.sessionId) ?? null,
-      })),
-      Math.max(0, activeIndex),
-    );
+    // Persist the full single-window session: either the active project or
+    // the inactive snapshot from store.projectTabs. Either way we persist
+    // agent_id + flow_node_id so the next launch can re-spawn them.
+    const activeId = store.activeProjectId;
+    const activeTabs = store.tabs;
+    const activeIndex = activeTabs.findIndex((t) => t.sessionId === store.activeTabId);
+    const tabs: PersistedProjectTabDto[] = [];
+
+    for (const snap of store.projectTabs) {
+      if (!snap) continue;
+      if (snap.id === activeId) {
+        const activePath = store.currentProject?.path ?? null;
+        if (activePath) {
+          tabs.push({
+            id: activeId,
+            project_path: activePath,
+            tabs: activeTabs.map((t) => ({
+              agent_id: t.agentId,
+              flow_node_id: flowNodeIdForSession(t.sessionId) ?? null,
+            })),
+            active_index: Math.max(0, activeIndex),
+          });
+        }
+      } else {
+        const snapTabs = snap.pendingTabs
+          ? snap.pendingTabs.map((p) => ({ agent_id: p.agentId, flow_node_id: p.flowNodeId ?? null }))
+          : snap.tabs.map((t) => ({ agent_id: t.agentId, flow_node_id: flowNodeIdForSession(t.sessionId) ?? null }));
+        tabs.push({ id: snap.id, project_path: snap.project.path, tabs: snapTabs, active_index: 0 });
+      }
+    }
+    pendingSession = { active_id: activeId, tabs };
+    if (sessionPersistTimer !== undefined) window.clearTimeout(sessionPersistTimer);
+    sessionPersistTimer = window.setTimeout(flushSessionPersist, 500);
   });
 
   createEffect(() => {
@@ -563,6 +733,7 @@ const App: Component = () => {
 
   const [projectBusy, setProjectBusy] = createSignal(false);
   const [pickerOpen, setPickerOpen] = createSignal(false);
+  const [newProjectOpen, setNewProjectOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [updateDialogOpen, setUpdateDialogOpen] = createSignal(false);
 
@@ -573,14 +744,16 @@ const App: Component = () => {
   async function handlePickProject() {
     const path = await pickProjectFolder();
     if (!path) return;
-    if (await focusProjectWindow(path)) {
+    const existing = findOpenProjectTab(path);
+    if (existing) {
+      await handleSwitchProject(existing);
       setPickerOpen(false);
       return;
     }
     setProjectBusy(true);
     try {
       const project = await openProject(path);
-      setActiveProject(project);
+      beginProjectTab(project);
       updateCurrentBranch();
       void refreshRecentProjects();
       setPickerOpen(false);
@@ -592,19 +765,36 @@ const App: Component = () => {
     }
   }
 
+  function showNewProjectWizard() {
+    setPickerOpen(false);
+    setStore("pendingLaunchAgentId", null);
+    setNewProjectOpen(true);
+  }
+
+  async function handleProjectCreated(project: ProjectInfo, prompt: string) {
+    beginProjectTab(project);
+    selectWorkspaceMode("agent");
+    updateCurrentBranch();
+    void refreshRecentProjects();
+    setNewProjectOpen(false);
+    setPendingPromptSeed({ text: prompt, projectPath: project.path });
+  }
+
   async function openRecentProject(path: string) {
     if (store.currentProject?.path === path) {
       setPickerOpen(false);
       return;
     }
-    if (await focusProjectWindow(path)) {
+    const existing = findOpenProjectTab(path);
+    if (existing) {
+      await handleSwitchProject(existing);
       setPickerOpen(false);
       return;
     }
     setProjectBusy(true);
     try {
       const project = await openProject(path);
-      setActiveProject(project);
+      beginProjectTab(project);
       updateCurrentBranch();
       void refreshRecentProjects();
       setPickerOpen(false);
@@ -616,20 +806,61 @@ const App: Component = () => {
     }
   }
 
-  async function openRecentInNewWindow(path: string) {
+  /** Switch to an already-open project tab. If the target is dormant (restored
+   *  from disk but never viewed), spawn its agents first, then restore its
+   *  snapshot into the flat store. */
+  async function handleSwitchProject(id: string) {
+    if (store.activeProjectId === id) return;
+    const idx = store.projectTabs.findIndex((p) => p.id === id);
+    if (idx === -1) return;
+    const target = store.projectTabs[idx];
+    setProjectBusy(true);
     try {
-      await openProjectWindow(path);
-      setPickerOpen(false);
+      if (target.pendingTabs && target.pendingTabs.length > 0) {
+        setStore("projectTabs", idx, "restoringWorkspace", true);
+        const { tabs, gatedCount } = await spawnProjectAgentTabs(
+          target.project.path,
+          target.pendingTabs,
+          store.agents,
+          store.yoloMode,
+        );
+        setStore("projectTabs", idx, {
+          tabs,
+          agentModes: {},
+          activeTabId: tabs.length > 0 ? tabs[tabs.length - 1].sessionId : null,
+          pendingTabs: undefined,
+        });
+        if (gatedCount > 0) toast("Workflow restored — chains paused for review");
+      }
+      const project = await switchToProject(id);
+      if (project) {
+        loadFlowsForProject(project.path);
+        updateCurrentBranch();
+      }
     } catch (e) {
-      toast(`Failed to open ${path} in a new window: ${String(e)}`, "error");
+      toast(`Couldn't switch to ${target.project.name}: ${String(e)}`, "error");
+    } finally {
+      setProjectBusy(false);
+      setStore("restoringWorkspace", false);
     }
   }
 
-  async function handleNewWindow() {
+  /** Cycle through open project tabs in stable strip order. */
+  function cycleProjectTab(dir: 1 | -1) {
+    if (projectBusy()) return;
+    const ids = store.projectTabs.map((p) => p && p.id).filter((x): x is string => !!x);
+    if (ids.length < 2) return;
+    const currentIdx = ids.indexOf(store.activeProjectId ?? "");
+    if (currentIdx === -1) return;
+    const nextIdx = (currentIdx + dir + ids.length) % ids.length;
+    void handleSwitchProject(ids[nextIdx]);
+  }
+
+  async function handleCloseProjectTab(id: string) {
     try {
-      await openNewWindow();
+      await closeProjectTab(id);
     } catch (e) {
-      toast(`Failed to open new window: ${String(e)}`, "error");
+      toast(`Failed to close project: ${String(e)}`, "error");
     }
   }
 
@@ -725,7 +956,7 @@ const App: Component = () => {
         </Show>
 
         {/* Project Picker (on the left side: next to traffic lights on macOS, far left on Windows/Linux) */}
-        <div style={{
+        <div class="project-title-control" style={{
           "margin-left": CURRENT_OS === "macos" ? "24px" : "0px",
           display: "flex",
           "align-items": "center"
@@ -738,7 +969,7 @@ const App: Component = () => {
               "font-size": "12px", "font-weight": "500",
               cursor: "pointer",
               display: "flex", "align-items": "center", gap: "6px",
-              padding: "4px 8px", "border-radius": "var(--radius-md)",
+              padding: "4px 8px", "border-radius": "var(--radius-md) 0 0 var(--radius-md)",
               background: "var(--surface-3)", border: "1px solid var(--border-default)",
               "pointer-events": "all"
             }}
@@ -746,7 +977,22 @@ const App: Component = () => {
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--fg-muted)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
-            {store.currentProject?.name ?? "no project"}
+            <Show
+              when={store.currentProject || !store.restoringWorkspace}
+              fallback={<span class="skeleton-shimmer" style={{ width: "84px", height: "10px" }} />}
+            >
+              {store.currentProject?.name ?? "Open project"}
+            </Show>
+          </button>
+          <button
+            class="project-title-create press"
+            onclick={showNewProjectWizard}
+            title="New Project"
+            aria-label="Create new project"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
           </button>
         </div>
 
@@ -958,60 +1204,67 @@ const App: Component = () => {
         </div>
       </div>
 
-      {/* ── BODY ── */}
-      <div style={{ flex: "1", display: "flex", "min-height": 0 }}>
+      {/* ── PROJECT TAB STRIP ── (rendered only when more than one project is open) */}
+      <ProjectTabStrip onSwitch={(id) => void handleSwitchProject(id)} onClose={(id) => void handleCloseProjectTab(id)} />
 
-        {/* File tree */}
-        <FileTree />
+      {/* ── BODY ── (keyed by activeProjectId so the whole workspace remounts
+          on project switch — FileTree/editor/terminals/git all rebind to the
+          newly active project) */}
+      <Show when={store.activeProjectId ?? "none"} keyed>
+        <div style={{ flex: "1", display: "flex", "min-height": 0 }}>
 
-        {/* Workspace area */}
-        <div style={{
-          flex: "1", display: "flex", "flex-direction": "column",
-          "min-width": 0, background: "var(--surface-1)",
-        }}>
+          {/* File tree */}
+          <FileTree />
+
+          {/* Workspace area */}
           <div style={{
-            flex: "1",
-            position: "relative",
-            overflow: "hidden",
-            "min-height": 0,
+            flex: "1", display: "flex", "flex-direction": "column",
+            "min-width": 0, background: "var(--surface-1)",
           }}>
-            <div
-              class="workspace-pane"
-              classList={{ "workspace-pane-active": store.workspaceMode === "code" }}
-              aria-hidden={store.workspaceMode !== "code"}
-            >
-              {/* code editor */}
-              <Show when={visitedModes().has("code")}>
-                <EditorPane />
-              </Show>
+            <div style={{
+              flex: "1",
+              position: "relative",
+              overflow: "hidden",
+              "min-height": 0,
+            }}>
+              <div
+                class="workspace-pane"
+                classList={{ "workspace-pane-active": store.workspaceMode === "code" }}
+                aria-hidden={store.workspaceMode !== "code"}
+              >
+                {/* code editor */}
+                <Show when={visitedModes().has("code")}>
+                  <EditorPane />
+                </Show>
+              </div>
+              <div
+                class="workspace-pane"
+                classList={{ "workspace-pane-active": store.workspaceMode === "review" }}
+                aria-hidden={store.workspaceMode !== "review"}
+              >
+                {/* native diff review */}
+                <Show when={visitedModes().has("review")}>
+                  <DiffPane />
+                </Show>
+              </div>
+              <div
+                class="workspace-pane"
+                classList={{ "workspace-pane-active": store.workspaceMode === "agent" }}
+                aria-hidden={store.workspaceMode !== "agent"}
+              >
+                {/* AI agent terminals */}
+                <AgentWorkspace />
+              </div>
             </div>
-            <div
-              class="workspace-pane"
-              classList={{ "workspace-pane-active": store.workspaceMode === "review" }}
-              aria-hidden={store.workspaceMode !== "review"}
-            >
-              {/* native diff review */}
-              <Show when={visitedModes().has("review")}>
-                <DiffPane />
-              </Show>
-            </div>
-            <div
-              class="workspace-pane"
-              classList={{ "workspace-pane-active": store.workspaceMode === "agent" }}
-              aria-hidden={store.workspaceMode !== "agent"}
-            >
-              {/* AI agent terminals */}
-              <AgentWorkspace />
-            </div>
+
+            {/* Run / validate / plain shell terminals — visible in every workspace mode */}
+            <TerminalPanel />
           </div>
 
-          {/* Run / validate / plain shell terminals — visible in every workspace mode */}
-          <TerminalPanel />
+          {/* Git panel */}
+          <GitPanel />
         </div>
-
-        {/* Git panel */}
-        <GitPanel />
-      </div>
+      </Show>
 
       {/* ── FOOTER PROMPT ── */}
       <PromptComposer />
@@ -1019,23 +1272,35 @@ const App: Component = () => {
       <ToastHost />
       <OmniSearch />
       <ShortcutHelp />
-      <ProjectPicker
-        open={pickerOpen()}
-        onClose={() => setPickerOpen(false)}
-        busy={projectBusy()}
-        recents={store.recentProjects}
-        currentPath={store.currentProject?.path ?? null}
-        onPickFolder={handlePickProject}
-        onOpenRecent={openRecentProject}
-        onOpenRecentNewWindow={openRecentInNewWindow}
-        onRemoveRecent={removeRecentProjectEntry}
-      />
-      <SettingsPanel open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
+      <Show when={pickerOpen()}>
+        <ProjectPicker
+          open={pickerOpen()}
+          onClose={() => { setPickerOpen(false); setStore("pendingLaunchAgentId", null); }}
+          busy={projectBusy()}
+          recents={store.recentProjects}
+          currentPath={store.currentProject?.path ?? null}
+          onPickFolder={handlePickProject}
+          onOpenRecent={openRecentProject}
+          onRemoveRecent={removeRecentProjectEntry}
+        />
+      </Show>
+      <Show when={newProjectOpen()}>
+        <NewProjectWizard
+          open={newProjectOpen()}
+          onClose={() => setNewProjectOpen(false)}
+          onCreated={(project, prompt) => void handleProjectCreated(project, prompt)}
+        />
+      </Show>
+      <Show when={settingsOpen()}>
+        <SettingsPanel open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
+      </Show>
       <ConfirmHost />
       <AgentTaskDialogHost />
       <ConflictFixDialogHost />
       <SquashPushDialogHost />
-      <UpdateDialog open={updateDialogOpen()} onClose={() => setUpdateDialogOpen(false)} />
+      <Show when={updateDialogOpen()}>
+        <UpdateDialog open={updateDialogOpen()} onClose={() => setUpdateDialogOpen(false)} />
+      </Show>
     </div>
   );
 };

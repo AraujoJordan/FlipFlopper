@@ -2,13 +2,12 @@ import { Component, For, Show } from "solid-js";
 import type { ProjectInfo } from "../lib/ipc";
 import { Button, Spinner } from "./ui";
 
-const modClickHint = navigator.platform.toLowerCase().includes("mac") ? "⌘-click" : "Ctrl-click";
-
 /** Modal opened from the title-bar project button. Surfaces
  *  `store.recentProjects` (previously fetched on every launch and never
  *  rendered anywhere) as an actual picker, plus "Open Folder…" for a new
  *  project. All IPC/state-mutation stays in App.tsx — this is a controlled
- *  view over it. */
+ *  view over it. Opening a project always opens it as a new project tab (or
+ *  switches to its tab if already open). */
 const ProjectPicker: Component<{
   open: boolean;
   onClose: () => void;
@@ -17,7 +16,6 @@ const ProjectPicker: Component<{
   currentPath: string | null;
   onPickFolder: () => void;
   onOpenRecent: (path: string) => void;
-  onOpenRecentNewWindow: (path: string) => void;
   onRemoveRecent: (path: string) => void;
 }> = (props) => {
   function handleKeyDown(e: KeyboardEvent) {
@@ -97,11 +95,8 @@ const ProjectPicker: Component<{
                   >
                     <button
                       type="button"
-                      onclick={(e) => {
-                        if (e.metaKey || e.ctrlKey) props.onOpenRecentNewWindow(project.path);
-                        else props.onOpenRecent(project.path);
-                      }}
-                      title={`${project.path}\n${modClickHint} to open in a new window`}
+                      onclick={() => props.onOpenRecent(project.path)}
+                      title={project.path}
                       style={{
                         flex: "1", "min-width": "0", "text-align": "left",
                         display: "flex", "flex-direction": "column", gap: "2px",
@@ -118,7 +113,7 @@ const ProjectPicker: Component<{
                             border: "1px solid var(--accent)66", "border-radius": "4px",
                             padding: "0 4px",
                           }}>
-                            current
+                            open
                           </span>
                         </Show>
                       </span>
@@ -128,22 +123,6 @@ const ProjectPicker: Component<{
                       }}>
                         {project.path}
                       </span>
-                    </button>
-                    <button
-                      class="icon-btn press"
-                      onclick={(e) => { e.stopPropagation(); props.onOpenRecentNewWindow(project.path); }}
-                      title="Open in new window"
-                      aria-label={`Open ${project.name} in a new window`}
-                      style={{
-                        display: "flex", "align-items": "center", "justify-content": "center",
-                        width: "22px", height: "22px", "flex-shrink": "0",
-                        color: "var(--fg-subtle)", "border-radius": "var(--radius-sm)",
-                      }}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <rect x="3" y="4" width="18" height="15" rx="2" />
-                        <path d="M3 9h18" />
-                      </svg>
                     </button>
                     <button
                       class="icon-btn-danger press"

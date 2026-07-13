@@ -1,7 +1,8 @@
 import { createStore } from "solid-js/store";
-import type { AgentInfo, ProjectInfo, ToolInfo } from "./ipc";
-import { getAgents, getToolCatalog, installTool, onPtyExit, ptyKill, readFileText, getCurrentBranch } from "./ipc";
-import { confirmDialog } from "../components/ui";
+import type { AgentInfo, ProjectInfo, ToolInfo, LspTextEdit, LspWorkspaceEdit } from "./ipc";
+import { getAgents, getToolCatalog, installTool, onPtyExit, ptyKill, readFileText, writeFileText, getCurrentBranch, lspShutdownProject, closeProjectTabBackend } from "./ipc";
+import { disposeCachedTerminal, disposeCachedTerminals } from "./terminalCache";
+import { confirmDialog, toast } from "../components/ui";
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import {
   readLegacyBool,
@@ -64,6 +65,8 @@ export interface EditorFile {
   modifiedMs: number;
   /** binary or too-large → placeholder buffer, not editable */
   binary: boolean;
+  /** tab created optimistically; content still being read from disk */
+  loading?: boolean;
   isClosing?: boolean;
 }
 
@@ -76,8 +79,53 @@ export interface EditorSelectionInfo {
   hasSelection: boolean;
 }
 
+/** A snapshot of one inactive project tab's workspace state. The active
+ *  project's state lives in the flat `store` fields below; switching tabs
+ *  snapshots the active project into a `ProjectSnapshot`, restores the
+ *  target's snapshot into the flat fields, and remounts the workspace body.
+ *  PTY/LSP sessions for an inactive project keep running in the backend —
+ *  only the visible workspace is swapped. */
+export interface ProjectSnapshot {
+  id: string;
+  project: ProjectInfo;
+  tabs: Tab[];
+  agentModes: Record<string, AgentMode>;
+  activeTabId: string | null;
+  terminals: TerminalTab[];
+  activeTerminalId: string | null;
+  runSessionId: string | null;
+  validationSessionId: string | null;
+  editorFiles: EditorFile[];
+  activeEditorPath: string | null;
+  editorOpen: boolean;
+  selectedFiles: string[];
+  review: ReviewState | null;
+  fileTreePath: string;
+  currentBranch: string;
+  gitStatusVersion: number;
+  fileTreeVersion: number;
+  historyFilterPath: string | null;
+  gitPanelTab: "changes" | "history";
+  pendingLineFocus: { path: string; line: number; character?: number } | null;
+  restoringWorkspace: boolean;
+  workspaceMode: WorkspaceMode;
+  explorerCollapsed: boolean;
+  gitPanelCollapsed: boolean;
+  /** Persisted agent tabs not yet spawned. Present when a project tab is
+   *  restored from disk but hasn't been viewed yet — its agents are spawned
+   *  lazily on first switch (avoids spawning every CLI agent at launch and
+   *  tripping the PTY park-cleanup timer for unattached sessions). */
+  pendingTabs?: { agentId: string; flowNodeId?: string }[];
+}
+
 export interface AppStore {
   currentProject: ProjectInfo | null;
+  /** Inactive project tabs. The active project's state is in the flat fields
+   *  below; everything here is a snapshot restored on switch. */
+  projectTabs: ProjectSnapshot[];
+  /** Stable id of the active project tab (drives the keyed workspace remount).
+   *  `null` when no project is open. */
+  activeProjectId: string | null;
   recentProjects: ProjectInfo[];
   agents: AgentInfo[];
   tabs: Tab[];
@@ -111,7 +159,14 @@ export interface AppStore {
   /** One-shot channel: external components seed the prompt composer with a
    *  ready-made instruction (e.g. "Explain @src/foo.ts"). The composer
    *  appends/focuses it as editable text and clears this. */
-  pendingPromptSeed: { text: string } | null;
+  pendingPromptSeed: { text: string; projectPath?: string } | null;
+  /** One-shot channel: when an agent launch button is clicked with no
+   *  project open, the chosen agent id is stashed here and the project
+   *  picker opens; once a project lands, AgentWorkspace launches it. */
+  pendingLaunchAgentId: string | null;
+  /** True from launch until the persisted workspace (project + agent tabs)
+   *  has been restored or determined absent; drives skeleton states. */
+  restoringWorkspace: boolean;
   yoloMode: boolean;
   explorerCollapsed: boolean;
   gitPanelCollapsed: boolean;
@@ -164,6 +219,8 @@ export function getGitPanelCollapsedForMode(mode: WorkspaceMode): boolean {
 
 const initial: AppStore = {
   currentProject: null,
+  projectTabs: [],
+  activeProjectId: null,
   recentProjects: [],
   agents: [],
   tabs: [],
@@ -189,6 +246,8 @@ const initial: AppStore = {
   editorSelectionInfo: null,
   fileClipboard: null,
   pendingPromptSeed: null,
+  pendingLaunchAgentId: null,
+  restoringWorkspace: true,
   yoloMode: readYoloMode(),
   explorerCollapsed: getExplorerCollapsedForMode("agent"),
   gitPanelCollapsed: getGitPanelCollapsedForMode("agent"),
@@ -430,6 +489,7 @@ export function removeTab(sessionId: string) {
     setTimeout(() => {
       clearAgentMode(sessionId);
       setStore("tabs", (t) => t.filter((x) => x.sessionId !== sessionId));
+      disposeCachedTerminal(sessionId);
     }, 150);
   }
 }
@@ -486,6 +546,7 @@ export function clearFileSelection() {
 }
 
 export function clearAllTabs() {
+  disposeCachedTerminals(store.tabs.map((tab) => tab.sessionId));
   setStore("tabs", []);
   setStore("agentModes", {});
   setStore("activeTabId", null);
@@ -516,6 +577,7 @@ export function setActiveTerminal(sessionId: string) {
 
 export function removeTerminal(sessionId: string) {
   ptyKill(sessionId).catch(() => { /* already exited */ });
+  disposeCachedTerminal(sessionId);
   setStore("terminals", (t) => t.filter((x) => x.sessionId !== sessionId));
   setStore("activeTerminalId", (cur) => {
     if (cur !== sessionId) return cur;
@@ -555,6 +617,7 @@ export function toggleOrchestratorMaximized() {
 export async function killAndClearAllTerminals() {
   const sessionIds = store.terminals.map((t) => t.sessionId);
   await Promise.allSettled(sessionIds.map((sessionId) => ptyKill(sessionId)));
+  disposeCachedTerminals(sessionIds);
   setStore("terminals", []);
   setStore("activeTerminalId", null);
   setStore("terminalPanelOpen", false);
@@ -623,18 +686,18 @@ export async function hydrateStorePreferences() {
   setStore("autoToggleSidebars", autoToggleSidebars);
 
   const modes: WorkspaceMode[] = ["code", "review", "agent"];
-  for (const mode of modes) {
-    explorerCollapsedByMode[mode] = await readPref(
+  await Promise.all(modes.flatMap((mode) => [
+    readPref(
       `flipflopper:explorer-collapsed:${mode}`,
       explorerCollapsedByMode[mode],
       () => explorerCollapsedByMode[mode],
-    );
-    gitPanelCollapsedByMode[mode] = await readPref(
+    ).then((v) => { explorerCollapsedByMode[mode] = v; }),
+    readPref(
       `flipflopper:gitpanel-collapsed:${mode}`,
       gitPanelCollapsedByMode[mode],
       () => gitPanelCollapsedByMode[mode],
-    );
-  }
+    ).then((v) => { gitPanelCollapsedByMode[mode] = v; }),
+  ]));
 
   setStore("explorerCollapsed", explorerCollapsedByMode[store.workspaceMode]);
   setStore("gitPanelCollapsed", gitPanelCollapsedByMode[store.workspaceMode]);
@@ -792,7 +855,7 @@ export function clearFileClipboard() {
 /** Seed the prompt composer with a ready-made instruction (e.g. AI quick
  *  actions from the file-tree context menu: "Explain @src/foo.ts"). The
  *  composer appends/focuses it as editable text and clears this. */
-export function setPendingPromptSeed(seed: { text: string } | null) {
+export function setPendingPromptSeed(seed: { text: string; projectPath?: string } | null) {
   setStore("pendingPromptSeed", seed);
 }
 
@@ -828,32 +891,42 @@ export async function openEditorFile(
   }
   inFlightOpens.add(normalizedRelPath);
 
+  // Optimistic open: create the tab and switch to it before the disk read so
+  // a large file shows a loading pane instead of appearing to do nothing.
+  // Concurrent opens of the same path hit the `existing` check above.
+  setStore("editorFiles", (files) => [
+    ...files,
+    {
+      path: relPath,
+      name,
+      baseline: "",
+      dirty: false,
+      modifiedMs: 0,
+      binary: false,
+      loading: true,
+    },
+  ]);
+  setStore("activeEditorPath", relPath);
+  showCode();
+
   try {
     const file = await readFileText(project.path, relPath);
-    
-    // Check again, in case it was added while we were reading the file
-    const doubleCheck = store.editorFiles.find((f) => norm(f.path) === normalizedRelPath);
-    if (!doubleCheck) {
-      setStore("editorFiles", (files) => [
-        ...files,
-        {
-          path: relPath,
-          name,
-          baseline: file.content,
-          dirty: false,
-          modifiedMs: file.modified_ms,
-          binary: file.is_binary || file.too_large,
-        },
-      ]);
-    }
-    const finalPath = doubleCheck ? doubleCheck.path : relPath;
-    setStore("activeEditorPath", finalPath);
+    setStore("editorFiles", (f) => f.path === relPath, {
+      baseline: file.content,
+      modifiedMs: file.modified_ms,
+      binary: file.is_binary || file.too_large,
+      loading: false,
+    });
     if (lineNo !== undefined) {
-      setStore("pendingLineFocus", { path: finalPath, line: lineNo, character });
+      setStore("pendingLineFocus", { path: relPath, line: lineNo, character });
     }
-    showCode();
   } catch (e) {
     console.error("Failed to open file:", e);
+    setStore("editorFiles", (files) => files.filter((f) => f.path !== relPath));
+    if (store.activeEditorPath === relPath) {
+      setStore("activeEditorPath", store.editorFiles[0]?.path ?? null);
+    }
+    toast(`Failed to open ${name}: ${String(e)}`, "error");
   } finally {
     inFlightOpens.delete(normalizedRelPath);
   }
@@ -979,6 +1052,77 @@ export async function refreshOpenedFiles() {
   }
 }
 
+function offsetAtLspPosition(text: string, line: number, character: number): number {
+  if (line < 0 || character < 0) throw new Error("Language server returned a negative edit range");
+  let lineStart = 0;
+  for (let current = 0; current < line; current += 1) {
+    const newline = text.indexOf("\n", lineStart);
+    if (newline < 0) throw new Error("Language server edit points past the end of the file");
+    lineStart = newline + 1;
+  }
+  const newline = text.indexOf("\n", lineStart);
+  let lineEnd = newline < 0 ? text.length : newline;
+  if (lineEnd > lineStart && text[lineEnd - 1] === "\r") lineEnd -= 1;
+  if (lineStart + character > lineEnd) throw new Error("Language server edit points past the end of a line");
+  return lineStart + character;
+}
+
+function applyTextEdits(text: string, edits: readonly LspTextEdit[]): string {
+  const normalized = edits.map((edit) => ({
+    from: offsetAtLspPosition(text, edit.range.start.line, edit.range.start.character),
+    to: offsetAtLspPosition(text, edit.range.end.line, edit.range.end.character),
+    insert: edit.new_text,
+  })).sort((a, b) => b.from - a.from || b.to - a.to);
+  for (let i = 0; i < normalized.length; i += 1) {
+    const edit = normalized[i];
+    if (edit.from > edit.to) throw new Error("Language server returned a reversed edit range");
+    if (i > 0 && edit.to > normalized[i - 1].from) {
+      throw new Error("Language server returned overlapping edits");
+    }
+  }
+  return normalized.reduce((content, edit) => (
+    content.slice(0, edit.from) + edit.insert + content.slice(edit.to)
+  ), text);
+}
+
+/** Preflight and immediately apply an LSP workspace edit. Open buffers are
+ * flushed first, then explicitly reloaded so CodeMirror and disk stay in sync. */
+export async function applyLspWorkspaceEdit(workspaceEdit: LspWorkspaceEdit): Promise<string[]> {
+  const project = store.currentProject;
+  if (!project) throw new Error("No project is open");
+  await flushAllEditorSaves();
+
+  const prepared = await Promise.all(workspaceEdit.files.map(async (fileEdit) => {
+    const file = await readFileText(project.path, fileEdit.path);
+    if (file.is_binary || file.too_large) throw new Error(`Cannot edit ${fileEdit.path}: file is binary or too large`);
+    return {
+      path: fileEdit.path,
+      original: file.content,
+      content: applyTextEdits(file.content, fileEdit.edits),
+    };
+  }));
+
+  const written: typeof prepared = [];
+  try {
+    for (const file of prepared) {
+      if (file.content === file.original) continue;
+      await writeFileText(project.path, file.path, file.content);
+      written.push(file);
+    }
+  } catch (error) {
+    for (const file of written.reverse()) {
+      try { await writeFileText(project.path, file.path, file.original); } catch { /* best-effort rollback */ }
+    }
+    throw error;
+  }
+
+  for (const file of prepared) {
+    await editorReloadCallbacks.get(file.path)?.();
+  }
+  if (prepared.length > 0) bumpGitStatus();
+  return prepared.map((file) => file.path);
+}
+
 // ── Git branch helpers ─────────────────────────────────────────────────────────
 
 /** Fetch current git branch and update the store. Empty string means
@@ -995,4 +1139,253 @@ export async function updateCurrentBranch() {
   } catch {
     setStore("currentBranch", "");
   }
+}
+
+// ── Project tabs (single-window multi-project) ────────────────────────────────
+
+export function newProjectTabId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function clearFlatWorkspace() {
+  setStore("currentProject", null);
+  setStore("fileTreePath", null);
+  setStore("tabs", []);
+  setStore("agentModes", {});
+  setStore("activeTabId", null);
+  setStore("terminals", []);
+  setStore("activeTerminalId", null);
+  setStore("runSessionId", null);
+  setStore("validationSessionId", null);
+  setStore("editorFiles", []);
+  setStore("activeEditorPath", null);
+  setStore("editorOpen", false);
+  setStore("selectedFiles", []);
+  setStore("review", null);
+  setStore("currentBranch", "");
+  setStore("historyFilterPath", null);
+  setStore("gitPanelTab", "changes");
+  setStore("pendingLineFocus", null);
+  setStore("restoringWorkspace", false);
+}
+
+/** Snapshot the active project's workspace state into a `ProjectSnapshot`.
+ *  Returns `null` if no project is active. */
+export function snapshotActiveProject(): ProjectSnapshot | null {
+  if (!store.currentProject) return null;
+  return {
+    id: store.activeProjectId ?? newProjectTabId(),
+    project: { ...store.currentProject },
+    tabs: store.tabs.map((t) => ({ ...t })),
+    agentModes: { ...store.agentModes },
+    activeTabId: store.activeTabId,
+    terminals: store.terminals.map((t) => ({ ...t })),
+    activeTerminalId: store.activeTerminalId,
+    runSessionId: store.runSessionId,
+    validationSessionId: store.validationSessionId,
+    editorFiles: store.editorFiles.map((f) => ({ ...f })),
+    activeEditorPath: store.activeEditorPath,
+    editorOpen: store.editorOpen,
+    selectedFiles: [...store.selectedFiles],
+    review: store.review,
+    fileTreePath: store.fileTreePath ?? store.currentProject.path,
+    currentBranch: store.currentBranch,
+    gitStatusVersion: store.gitStatusVersion,
+    fileTreeVersion: store.fileTreeVersion,
+    historyFilterPath: store.historyFilterPath,
+    gitPanelTab: store.gitPanelTab,
+    pendingLineFocus: store.pendingLineFocus,
+    restoringWorkspace: store.restoringWorkspace,
+    workspaceMode: store.workspaceMode,
+    explorerCollapsed: store.explorerCollapsed,
+    gitPanelCollapsed: store.gitPanelCollapsed,
+  };
+}
+
+/** Restore a snapshot into the flat store fields (active project). */
+function restoreProject(snap: ProjectSnapshot) {
+  setStore("currentProject", { ...snap.project });
+  setStore("fileTreePath", snap.fileTreePath);
+  setStore("tabs", snap.tabs.map((t) => ({ ...t })));
+  setStore("agentModes", { ...snap.agentModes });
+  setStore("activeTabId", snap.activeTabId);
+  setStore("terminals", snap.terminals.map((t) => ({ ...t })));
+  setStore("activeTerminalId", snap.activeTerminalId);
+  setStore("runSessionId", snap.runSessionId);
+  setStore("validationSessionId", snap.validationSessionId);
+  setStore("editorFiles", snap.editorFiles.map((f) => ({ ...f })));
+  setStore("activeEditorPath", snap.activeEditorPath);
+  setStore("editorOpen", snap.editorOpen);
+  setStore("selectedFiles", [...snap.selectedFiles]);
+  setStore("review", snap.review);
+  setStore("currentBranch", snap.currentBranch);
+  setStore("gitStatusVersion", snap.gitStatusVersion);
+  setStore("fileTreeVersion", snap.fileTreeVersion);
+  setStore("historyFilterPath", snap.historyFilterPath);
+  setStore("gitPanelTab", snap.gitPanelTab);
+  setStore("pendingLineFocus", snap.pendingLineFocus);
+  setStore("restoringWorkspace", snap.restoringWorkspace);
+  setStore("workspaceMode", snap.workspaceMode);
+  setStore("explorerCollapsed", snap.explorerCollapsed);
+  setStore("gitPanelCollapsed", snap.gitPanelCollapsed);
+  setStore("activeProjectId", snap.id);
+}
+
+/** Total number of open project tabs (active + inactive). Drives the tab
+ *  strip visibility (shown only when more than one project is open). */
+export function openProjectCount(): number {
+  return store.projectTabs.filter(Boolean).length;
+}
+
+/** Returns the tab id of an open project by path, or `null`. Checks the active
+ *  project first, then inactive snapshots. */
+export function findOpenProjectTab(path: string): string | null {
+  return store.projectTabs.find((p) => p && p.project.path === path)?.id ?? null;
+}
+
+/** Begin a new project tab: snapshot the current project (if any) into
+ *  `projectTabs`, then set the flat store to a fresh state for the new
+ *  project. Caller is responsible for spawning agent tabs / loading flows. */
+export function beginProjectTab(project: ProjectInfo) {
+  const oldActiveId = store.activeProjectId;
+  const oldSnap = snapshotActiveProject();
+  if (oldSnap && oldActiveId) {
+    const idx = store.projectTabs.findIndex((p) => p && p.id === oldActiveId);
+    if (idx !== -1) {
+      setStore("projectTabs", idx, oldSnap);
+    } else {
+      setStore("projectTabs", (tabs) => [...tabs, oldSnap]);
+    }
+  }
+
+  const newId = newProjectTabId();
+  setStore("currentProject", { ...project });
+  setStore("fileTreePath", project.path);
+  setStore("tabs", []);
+  setStore("agentModes", {});
+  setStore("activeTabId", null);
+  setStore("terminals", []);
+  setStore("activeTerminalId", null);
+  setStore("runSessionId", null);
+  setStore("validationSessionId", null);
+  setStore("editorFiles", []);
+  setStore("activeEditorPath", null);
+  setStore("editorOpen", false);
+  setStore("selectedFiles", []);
+  setStore("review", null);
+  setStore("currentBranch", "");
+  setStore("historyFilterPath", null);
+  setStore("gitPanelTab", "changes");
+  setStore("pendingLineFocus", null);
+  setStore("restoringWorkspace", false);
+  setStore("workspaceMode", "agent");
+  setStore("explorerCollapsed", getExplorerCollapsedForMode("agent"));
+  setStore("gitPanelCollapsed", getGitPanelCollapsedForMode("agent"));
+  setStore("activeProjectId", newId);
+
+  const newSnap = snapshotActiveProject();
+  if (newSnap) {
+    setStore("projectTabs", (tabs) => [...tabs, newSnap]);
+  }
+}
+
+/** Clone a snapshot into a plain object. Solid store array-element proxies
+ *  alias to the current value at an index, so a reference held across a
+ *  `setStore("projectTabs", i, ...)` overwrite would silently switch to the
+ *  new value — callers must clone before swapping a slot. */
+function cloneSnapshot(snap: ProjectSnapshot): ProjectSnapshot {
+  return {
+    ...snap,
+    project: { ...snap.project },
+    tabs: snap.tabs.map((t) => ({ ...t })),
+    agentModes: { ...snap.agentModes },
+    terminals: snap.terminals.map((t) => ({ ...t })),
+    editorFiles: snap.editorFiles.map((f) => ({ ...f })),
+    selectedFiles: [...snap.selectedFiles],
+    pendingTabs: snap.pendingTabs ? snap.pendingTabs.map((p) => ({ ...p })) : undefined,
+  };
+}
+
+/** Switch to an inactive project tab. Flushes editor saves first (no data
+ *  loss on remount), snapshots the current project, restores the target, and
+ *  updates the backend cleanup record. Resolves with the restored project so
+ *  callers can re-bind flow nodes / refresh branch. */
+export async function switchToProject(id: string): Promise<ProjectInfo | null> {
+  if (store.activeProjectId === id) return store.currentProject;
+  const targetIndex = store.projectTabs.findIndex((p) => p && p.id === id);
+  if (targetIndex === -1) return null;
+  const targetClone = cloneSnapshot(store.projectTabs[targetIndex]);
+
+  // Flush unsaved editor content to disk so the remounted editor reloads it
+  // instead of dropping it.
+  await flushAllEditorSaves().catch((e) => console.error("flush saves on switch:", e));
+
+  const snap = snapshotActiveProject();
+  if (snap && store.activeProjectId) {
+    const activeIdx = store.projectTabs.findIndex((p) => p && p.id === store.activeProjectId);
+    if (activeIdx !== -1) {
+      setStore("projectTabs", activeIdx, snap);
+    }
+  }
+  restoreProject(targetClone);
+  return targetClone.project;
+}
+
+/** Close a project tab by id. Kills its PTY + LSP via the backend, removes it
+ *  from `projectTabs` (or clears the active project if it's the active one),
+ *  and switches to another tab if available. */
+export async function closeProjectTab(id: string) {
+  const isActive = store.activeProjectId === id;
+  const projectPath = isActive
+    ? store.currentProject?.path
+    : store.projectTabs.find((p) => p && p.id === id)?.project.path;
+
+  if (isActive) {
+    // Kill this project's live sessions via the backend, then clear locally.
+    if (projectPath) {
+      try { await closeProjectTabBackend(projectPath); } catch (e) { console.error("close_project_tab:", e); }
+    }
+    await killAndClearAllTabs();
+    await killAndClearAllTerminals();
+    if (projectPath) void lspShutdownProject(projectPath);
+
+    const closedIdx = store.projectTabs.findIndex((p) => p && p.id === id);
+    const remainingSnaps = store.projectTabs.filter((p) => p && p.id !== id);
+
+    if (remainingSnaps.length > 0) {
+      const nextActiveIdx = Math.min(closedIdx, remainingSnaps.length - 1);
+      const next = cloneSnapshot(remainingSnaps[nextActiveIdx]);
+      setStore("projectTabs", remainingSnaps);
+      restoreProject(next);
+    } else {
+      clearFlatWorkspace();
+      setStore("projectTabs", []);
+      setStore("activeProjectId", null);
+    }
+  } else {
+    // Inactive tab: kill its sessions via the backend, drop the snapshot.
+    if (projectPath) {
+      try { await closeProjectTabBackend(projectPath); } catch (e) { console.error("close_project_tab:", e); }
+    }
+    const snap = store.projectTabs.find((p) => p && p.id === id);
+    if (snap) {
+      // Dormant snapshots (pendingTabs) never spawned, so they have no
+      // cached terminals; live ones do — release their xterm instances.
+      disposeCachedTerminals([
+        ...snap.tabs.map((t) => t.sessionId),
+        ...snap.terminals.map((t) => t.sessionId),
+        snap.runSessionId,
+        snap.validationSessionId,
+      ]);
+    }
+    setStore("projectTabs", (tabs) => tabs.filter((p) => p && p.id !== id));
+  }
+}
+
+/** Close the active project tab (menu / shortcut). No-op if none. */
+export async function closeActiveProjectTab() {
+  if (store.activeProjectId) await closeProjectTab(store.activeProjectId);
 }

@@ -1047,7 +1047,22 @@ const FileTree: Component = () => {
           outline: "none",
         }}
       >
-        <Show when={!store.fileTreePath}>
+        {/* Workspace restore in flight: shimmer rows instead of flashing the
+            "no project" empty state before the persisted project lands. */}
+        <Show when={!store.fileTreePath && store.restoringWorkspace}>
+          <div>
+            <For each={[72, 56, 84, 48, 64, 76, 52, 68]}>
+              {(width, i) => (
+                <div
+                  class="skeleton-shimmer skeleton-row"
+                  style={{ width: `${width}%`, "margin-left": `${10 + (i() % 3) * 12}px` }}
+                />
+              )}
+            </For>
+          </div>
+        </Show>
+
+        <Show when={!store.fileTreePath && !store.restoringWorkspace}>
           <div class="overlay-pop-in" style={{
             padding: "32px 16px", display: "flex", "flex-direction": "column",
             "align-items": "center", gap: "8px", "text-align": "center",

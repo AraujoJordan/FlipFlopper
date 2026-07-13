@@ -28,7 +28,7 @@ import {
   toggleComment,
   undo,
 } from "@codemirror/commands";
-import { bracketMatching, indentOnInput, foldGutter, foldKeymap } from "@codemirror/language";
+import { bracketMatching, indentOnInput, foldGutter, foldKeymap, getIndentUnit } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import {
   autocompletion,
@@ -36,6 +36,8 @@ import {
   closeBracketsKeymap,
   completeAnyWord,
   completionKeymap,
+  snippet,
+  type Completion,
   type CompletionContext,
   type CompletionResult,
 } from "@codemirror/autocomplete";
@@ -63,6 +65,8 @@ import {
   setPendingPromptInsert,
   setPendingLineFocus,
   hiddenInstallTool,
+  applyLspWorkspaceEdit,
+  flushAllEditorSaves,
   type EditorFile,
 } from "../lib/store";
 import {
@@ -72,18 +76,26 @@ import {
   lspStatus,
   lspOpenDocument,
   lspChangeDocument,
+  lspCloseDocument,
   lspCompletion,
   lspCompletionResolve,
   lspSignatureHelp,
   lspHover,
   lspDefinition,
   lspReferences,
+  lspCodeActions,
+  lspResolveCodeAction,
+  lspPrepareRename,
+  lspRename,
+  lspFormatDocument,
   lspDiagnostics,
   searchProjectText,
   detectPreview,
   type LspDiagnostic,
   type LspStatus,
   type LspCompletion,
+  type LspCodeAction,
+  type LspTextEdit,
   type LspSignatureHelp as LspSignatureHelpType,
 } from "../lib/ipc";
 import { renderMarkdownLite } from "../lib/markdownLite";
@@ -92,7 +104,7 @@ import PreviewPanel from "./PreviewPanel";
 import { openUsages, byteOffsetToUtf16, type UsageItem } from "../lib/usages";
 import { flipflopperTheme } from "../lib/cmTheme";
 import { useResizable } from "../lib/useResizable";
-import { ContextMenu, MenuDivider, MenuItem, SubMenuItem, toast } from "./ui";
+import { ContextMenu, MenuDivider, MenuItem, SubMenuItem, Spinner, toast } from "./ui";
 import { openAgentTaskDialog } from "./AgentTaskDialog";
 import { readLegacyBool, readLegacyNumber, readPref, writePref } from "../lib/appPrefs";
 import { readClipboardText, writeClipboardText } from "../lib/native";
@@ -100,6 +112,7 @@ import { readClipboardText, writeClipboardText } from "../lib/native";
 const POLL_MS = 3000;
 const AUTO_SAVE_MS = 500;
 const LSP_SYNC_MS = 350;
+const FORMAT_ON_SAVE_KEY = "flipflopper:format-on-save";
 
 interface EditorContextMenuState {
   x: number;
@@ -237,10 +250,14 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
   let saveTimer: number | undefined;
   let lspTimer: number | undefined;
   let sessionStatus: LspStatus | undefined;
+  let formatOnSave = false;
+  let formatting = false;
 
   const [saveError, setSaveError] = createSignal<string | null>(null);
   const [conflict, setConflict] = createSignal(false);
   const [contextMenu, setContextMenu] = createSignal<EditorContextMenuState | null>(null);
+  const [codeActionMenu, setCodeActionMenu] = createSignal<{ x: number; y: number; actions: LspCodeAction[]; revision: string } | null>(null);
+  const [renameInput, setRenameInput] = createSignal<{ x: number; y: number; value: string; line: number; character: number } | null>(null);
 
   const isImage = () => {
     const ext = props.file.path.split('.').pop()?.toLowerCase();
@@ -267,6 +284,9 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     if (!view || props.file.binary || conflict()) return;
     const project = store.currentProject;
     if (!project) return;
+    if (formatOnSave && !formatting && view.state.doc.toString() !== props.file.baseline) {
+      await formatDocument(false);
+    }
     const content = view.state.doc.toString();
     if (content === props.file.baseline) {
       setEditorDirty(props.file.path, false);
@@ -303,6 +323,128 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     const lineNo = Math.min(point.line + 1, view.state.doc.lines);
     const line = view.state.doc.line(lineNo);
     return Math.min(line.from + point.character, line.to);
+  }
+
+  function posFromPoint(point: { line: number; character: number }): number {
+    if (!view) return 0;
+    const lineNo = Math.min(point.line + 1, view.state.doc.lines);
+    const line = view.state.doc.line(lineNo);
+    return Math.min(line.from + point.character, line.to);
+  }
+
+  function applyCurrentFileEdits(edits: readonly LspTextEdit[]) {
+    if (!view || edits.length === 0) return;
+    const changes = edits.map((edit) => ({
+      from: posFromPoint(edit.range.start),
+      to: posFromPoint(edit.range.end),
+      insert: edit.new_text,
+    })).sort((a, b) => a.from - b.from || a.to - b.to);
+    for (let i = 1; i < changes.length; i += 1) {
+      if (changes[i].from < changes[i - 1].to) throw new Error("Language server returned overlapping edits");
+    }
+    view.dispatch({ changes });
+  }
+
+  async function formatDocument(showSuccess = true): Promise<boolean> {
+    const project = store.currentProject;
+    if (!project || !view || formatting) return false;
+    formatting = true;
+    try {
+      await flushLspSync();
+      const indentUnit = getIndentUnit(view.state);
+      const edit = await lspFormatDocument(project.path, props.file.path, indentUnit, true);
+      const fileEdit = edit.files.find((file) => file.path === props.file.path);
+      if (fileEdit) applyCurrentFileEdits(fileEdit.edits);
+      if (showSuccess) toast(fileEdit?.edits.length ? "Document formatted" : "Already formatted", "success");
+      return true;
+    } catch (error) {
+      if (showSuccess) toast(String(error), "error");
+      return false;
+    } finally {
+      formatting = false;
+    }
+  }
+
+  async function showCodeActions(pos?: number) {
+    const project = store.currentProject;
+    if (!project || !view) return;
+    closeContextMenu();
+    await flushAllEditorSaves();
+    await flushLspSync();
+    const sel = view.state.selection.main;
+    const from = pos ?? sel.from;
+    const to = pos ?? sel.to;
+    const start = lspPosition(Math.min(from, to));
+    const end = lspPosition(Math.max(from, to));
+    try {
+      const allDiagnostics = await lspDiagnostics(project.path, props.file.path).catch(() => []);
+      const actions = await lspCodeActions(project.path, props.file.path, { start, end }, allDiagnostics);
+      if (actions.length === 0) {
+        toast("No code actions available", "info");
+        return;
+      }
+      const coords = view.coordsAtPos(sel.head);
+      setCodeActionMenu({ x: coords?.left ?? 24, y: coords?.bottom ?? 48, actions, revision: view.state.doc.toString() });
+    } catch (error) {
+      toast(String(error), "error");
+    }
+  }
+
+  async function applyCodeAction(action: LspCodeAction) {
+    const project = store.currentProject;
+    if (!project || action.disabled_reason) return;
+    const menu = codeActionMenu();
+    setCodeActionMenu(null);
+    if (!view || menu?.revision !== view.state.doc.toString()) {
+      toast("Code changed after these actions were requested; open Quick Fix again", "info");
+      return;
+    }
+    try {
+      const edit = await lspResolveCodeAction(project.path, props.file.path, action.raw);
+      const changed = await applyLspWorkspaceEdit(edit);
+      toast(`Applied ${action.title}${changed.length > 1 ? ` in ${changed.length} files` : ""}`, "success");
+    } catch (error) {
+      toast(String(error), "error");
+    }
+  }
+
+  async function beginRename() {
+    const project = store.currentProject;
+    if (!project || !view) return;
+    await flushAllEditorSaves();
+    await flushLspSync();
+    const head = view.state.selection.main.head;
+    const point = lspPosition(head);
+    try {
+      const prepared = await lspPrepareRename(project.path, props.file.path, point.line, point.character);
+      if (!prepared) {
+        toast("This symbol cannot be renamed", "info");
+        return;
+      }
+      const from = posFromPoint(prepared.range.start);
+      const to = posFromPoint(prepared.range.end);
+      const value = prepared.placeholder ?? view.state.sliceDoc(from, to) ?? wordAt(head) ?? "";
+      const coords = view.coordsAtPos(from);
+      setRenameInput({ x: coords?.left ?? 24, y: coords?.bottom ?? 48, value, line: point.line, character: point.character });
+      window.setTimeout(() => document.querySelector<HTMLInputElement>(".editor-rename-input")?.select(), 0);
+    } catch (error) {
+      toast(String(error), "error");
+    }
+  }
+
+  async function commitRename() {
+    const project = store.currentProject;
+    const state = renameInput();
+    const newName = state?.value.trim();
+    if (!project || !state || !newName) return;
+    setRenameInput(null);
+    try {
+      const edit = await lspRename(project.path, props.file.path, state.line, state.character, newName);
+      const changed = await applyLspWorkspaceEdit(edit);
+      toast(`Renamed in ${changed.length} file${changed.length === 1 ? "" : "s"}`, "success");
+    } catch (error) {
+      toast(String(error), "error");
+    }
   }
 
   async function sendLspChange(): Promise<void> {
@@ -617,9 +759,34 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       if (!project) return docNode(item.documentation, item.detail);
       try {
         const resolved = await lspCompletionResolve(project.path, props.file.path, item.raw);
+        if (resolved.completion) Object.assign(item, resolved.completion);
         return docNode(resolved.documentation ?? item.documentation, resolved.detail ?? item.detail);
       } catch {
         return docNode(item.documentation, item.detail);
+      }
+    };
+  }
+
+  function applyLspCompletion(item: LspCompletion) {
+    return (editor: EditorView, completion: Completion, fallbackFrom: number, fallbackTo: number) => {
+      const range = item.replace_range;
+      const from = range ? posFromPoint(range.start) : fallbackFrom;
+      const to = range ? posFromPoint(range.end) : fallbackTo;
+      const additional = item.additional_text_edits.map((edit) => ({
+        from: posFromPoint(edit.range.start),
+        to: posFromPoint(edit.range.end),
+        insert: edit.new_text,
+      })).sort((a, b) => a.from - b.from || a.to - b.to);
+
+      if (item.insert_text_format === 2) {
+        const changeSet = editor.state.changes(additional);
+        if (additional.length > 0) editor.dispatch({ changes: changeSet });
+        snippet(item.insert_text)(editor, completion, changeSet.mapPos(from, 1), changeSet.mapPos(to, -1));
+      } else {
+        editor.dispatch({
+          changes: [...additional, { from, to, insert: item.insert_text }].sort((a, b) => a.from - b.from || a.to - b.to),
+          scrollIntoView: true,
+        });
       }
     };
   }
@@ -648,9 +815,11 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       from,
       validFor: /^[\w$]*$/,
       options: items.map((item, index) => ({
-        label: item.label,
+        label: item.filter_text ?? item.label,
+        displayLabel: item.label,
+        sortText: item.sort_text ?? undefined,
         detail: item.detail ?? undefined,
-        apply: item.insert_text || item.label,
+        apply: applyLspCompletion(item),
         type: completionType(item.kind),
         boost: -index,
         info: completionInfo(item),
@@ -860,6 +1029,9 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
             { key: "Alt-ArrowUp", run: () => { void jumpToDiagnostic(-1); return true; } },
             { key: "Alt-ArrowDown", run: () => { void jumpToDiagnostic(1); return true; } },
             { key: "F12", run: (v) => { void gotoDefinition(v.state.selection.main.head); return true; } },
+            { key: "F2", run: () => { void beginRename(); return true; } },
+            { key: "Mod-.", run: () => { void showCodeActions(); return true; } },
+            { key: "Shift-Alt-f", run: () => { void formatDocument(); return true; } },
             { key: "Escape", run: () => { dismissSignatureHelp(); return false; } },
             ...defaultKeymap,
             ...historyKeymap,
@@ -956,6 +1128,13 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
         .catch(() => {});
     }
 
+    void readPref(FORMAT_ON_SAVE_KEY, false, () => readLegacyBool(FORMAT_ON_SAVE_KEY, false))
+      .then((enabled) => { formatOnSave = enabled; });
+    const onFormatPreference = (event: Event) => {
+      formatOnSave = Boolean((event as CustomEvent<boolean>).detail);
+    };
+    window.addEventListener("flipflopper:format-on-save", onFormatPreference);
+
     registerEditorSaveFlush(props.file.path, flushAutoSave);
     registerEditorReload(props.file.path, reloadFromDisk);
     const poll = window.setInterval(() => {
@@ -966,9 +1145,11 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       window.clearInterval(poll);
       if (saveTimer !== undefined) window.clearTimeout(saveTimer);
       if (lspTimer !== undefined) window.clearTimeout(lspTimer);
-      void flushAutoSave();
+      const finalSave = flushAutoSave();
       unregisterEditorSaveFlush(props.file.path);
       unregisterEditorReload(props.file.path);
+      window.removeEventListener("flipflopper:format-on-save", onFormatPreference);
+      if (project) void finalSave.finally(() => lspCloseDocument(project.path, props.file.path));
       view?.destroy();
     });
   });
@@ -1105,6 +1286,54 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
         <div ref={host} style={{ flex: "1", "min-height": 0, overflow: "hidden" }} />
       </Show>
 
+      <Show when={renameInput()}>
+        {(state) => (
+          <input
+            class="editor-rename-input"
+            value={state().value}
+            oninput={(event) => setRenameInput({ ...state(), value: event.currentTarget.value })}
+            onkeydown={(event) => {
+              event.stopPropagation();
+              if (event.key === "Enter") { event.preventDefault(); void commitRename(); }
+              if (event.key === "Escape") { event.preventDefault(); setRenameInput(null); view?.focus(); }
+            }}
+            onblur={() => setRenameInput(null)}
+            style={{
+              position: "fixed", left: `${state().x}px`, top: `${state().y}px`,
+              "z-index": "var(--z-menu)", width: "220px", padding: "6px 9px",
+              background: "var(--surface-4)", color: "var(--fg-default)",
+              border: "1px solid var(--accent)", "border-radius": "6px",
+              "font-family": "var(--font-mono)", "font-size": "12px",
+              outline: "none", "box-shadow": "var(--shadow-menu)",
+            }}
+          />
+        )}
+      </Show>
+
+      <ContextMenu
+        open={codeActionMenu() !== null}
+        onClose={() => setCodeActionMenu(null)}
+        x={codeActionMenu()?.x ?? 0}
+        y={codeActionMenu()?.y ?? 0}
+        width={300}
+      >
+        <Show when={codeActionMenu()} keyed>
+          {(menu) => (
+            <For each={menu.actions}>
+              {(action) => (
+                <MenuItem
+                  disabled={Boolean(action.disabled_reason)}
+                  onSelect={() => void applyCodeAction(action)}
+                  style={{ padding: "7px 9px" }}
+                >
+                  {action.is_preferred ? "★ " : ""}{action.title}{action.disabled_reason ? ` — ${action.disabled_reason}` : ""}
+                </MenuItem>
+              )}
+            </For>
+          )}
+        </Show>
+      </ContextMenu>
+
       <ContextMenu
         open={contextMenu() !== null}
         onClose={closeContextMenu}
@@ -1132,6 +1361,12 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
                 <MenuDivider />
 
                 <Show when={ctx.symbol}>
+                  <MenuItem onSelect={() => { closeContextMenu(); void showCodeActions(ctx.pos); }} style={menuPad}>
+                    Quick Fix… <span style={{ "margin-left": "auto", color: "var(--fg-faint)" }}>⌘.</span>
+                  </MenuItem>
+                  <MenuItem onSelect={() => { closeContextMenu(); void beginRename(); }} style={menuPad}>
+                    Rename Symbol… <span style={{ "margin-left": "auto", color: "var(--fg-faint)" }}>F2</span>
+                  </MenuItem>
                   <MenuItem onSelect={() => { closeContextMenu(); void gotoDefinition(ctx.pos); }} style={menuPad}>
                     Go to Definition
                   </MenuItem>
@@ -1154,6 +1389,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
                 <MenuItem onSelect={() => runEditorCommand(selectAll)} style={menuPad}>Select All</MenuItem>
                 <MenuDivider />
                 <SubMenuItem label="Format" style={menuPad}>
+                  <MenuItem onSelect={() => { closeContextMenu(); void formatDocument(); }} style={menuPad}>Format Document</MenuItem>
                   <MenuItem onSelect={() => runEditorCommand(toggleComment)} style={menuPad}>Toggle Comment</MenuItem>
                   <MenuItem onSelect={() => runEditorCommand(indentMore)} style={menuPad}>Indent</MenuItem>
                   <MenuItem onSelect={() => runEditorCommand(indentLess)} style={menuPad}>Outdent</MenuItem>
@@ -1709,10 +1945,26 @@ const EditorPane: Component = () => {
           <div style={{ flex: "1", position: "relative", "min-width": 0 }}>
             <For each={store.editorFiles}>
               {(file) => (
-                <EditorBuffer
-                  file={file}
-                  active={file.path === store.activeEditorPath && store.workspaceMode === "code"}
-                />
+                <Show
+                  when={!file.loading}
+                  fallback={
+                    /* optimistic tab: content still being read from disk */
+                    <div style={{
+                      position: "absolute", inset: "0",
+                      display: file.path === store.activeEditorPath && store.workspaceMode === "code"
+                        ? "flex" : "none",
+                      "align-items": "center", "justify-content": "center",
+                      background: "var(--surface-1)",
+                    }}>
+                      <Spinner />
+                    </div>
+                  }
+                >
+                  <EditorBuffer
+                    file={file}
+                    active={file.path === store.activeEditorPath && store.workspaceMode === "code"}
+                  />
+                </Show>
               )}
             </For>
           </div>

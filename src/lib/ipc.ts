@@ -201,6 +201,9 @@ export const getAgents = (includeVersions = true): Promise<AgentInfo[]> =>
 export const openProject = (path: string): Promise<ProjectInfo> =>
   invoke("open_project", { path });
 
+export const createProject = (parentPath: string, name: string): Promise<ProjectInfo> =>
+  invoke("create_project", { parentPath, name });
+
 export const getRecentProjects = (): Promise<ProjectInfo[]> =>
   invoke("get_recent_projects");
 
@@ -292,6 +295,11 @@ export interface LspStatus {
   completion_trigger_characters: string[];
   signature_trigger_characters: string[];
   resolve_provider: boolean;
+  code_action_provider: boolean;
+  code_action_resolve_provider: boolean;
+  rename_provider: boolean;
+  prepare_rename_provider: boolean;
+  formatting_provider: boolean;
 }
 
 export interface LspPosition {
@@ -313,12 +321,44 @@ export interface LspCompletion {
   filter_text: string | null;
   documentation: string | null;
   replace_start: LspPosition | null;
+  replace_range: LspRange | null;
+  insert_text_format: number;
+  additional_text_edits: LspTextEdit[];
+  command: unknown | null;
   raw: unknown;
 }
 
 export interface LspCompletionDetail {
   detail: string | null;
   documentation: string | null;
+  completion: LspCompletion | null;
+}
+
+export interface LspTextEdit {
+  range: LspRange;
+  new_text: string;
+}
+
+export interface LspFileEdit {
+  path: string;
+  edits: LspTextEdit[];
+}
+
+export interface LspWorkspaceEdit {
+  files: LspFileEdit[];
+}
+
+export interface LspCodeAction {
+  title: string;
+  kind: string | null;
+  is_preferred: boolean;
+  disabled_reason: string | null;
+  raw: unknown;
+}
+
+export interface LspPrepareRename {
+  range: LspRange;
+  placeholder: string | null;
 }
 
 export interface LspSignatureParameter {
@@ -367,6 +407,9 @@ export const lspChangeDocument = (
 ): Promise<LspStatus> =>
   invoke("lsp_change_document", { projectPath, relPath, content });
 
+export const lspCloseDocument = (projectPath: string, relPath: string): Promise<void> =>
+  invoke("lsp_close_document", { projectPath, relPath });
+
 export const lspCompletion = (
   projectPath: string,
   relPath: string,
@@ -414,6 +457,46 @@ export const lspReferences = (
   character: number,
 ): Promise<LspDefinition[]> =>
   invoke("lsp_references", { projectPath, relPath, line, character });
+
+export const lspCodeActions = (
+  projectPath: string,
+  relPath: string,
+  range: LspRange,
+  diagnostics: LspDiagnostic[],
+): Promise<LspCodeAction[]> =>
+  invoke("lsp_code_actions", { projectPath, relPath, range, diagnostics });
+
+export const lspResolveCodeAction = (
+  projectPath: string,
+  relPath: string,
+  action: unknown,
+): Promise<LspWorkspaceEdit> =>
+  invoke("lsp_resolve_code_action", { projectPath, relPath, action });
+
+export const lspPrepareRename = (
+  projectPath: string,
+  relPath: string,
+  line: number,
+  character: number,
+): Promise<LspPrepareRename | null> =>
+  invoke("lsp_prepare_rename", { projectPath, relPath, line, character });
+
+export const lspRename = (
+  projectPath: string,
+  relPath: string,
+  line: number,
+  character: number,
+  newName: string,
+): Promise<LspWorkspaceEdit> =>
+  invoke("lsp_rename", { projectPath, relPath, line, character, newName });
+
+export const lspFormatDocument = (
+  projectPath: string,
+  relPath: string,
+  tabSize: number,
+  insertSpaces: boolean,
+): Promise<LspWorkspaceEdit> =>
+  invoke("lsp_format_document", { projectPath, relPath, tabSize, insertSpaces });
 
 export const lspDiagnostics = (
   projectPath: string,
@@ -716,45 +799,35 @@ export const syncNativeMenuState = (state: NativeMenuState): Promise<void> =>
 export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenFn> =>
   listen<string>("native-menu-command", (e) => cb(e.payload));
 
-// ── Windows ──────────────────────────────────────────────────────────────────
+// ── Project tabs (single-window session) ─────────────────────────────────────
 
-export interface PersistedTabDto {
+export interface PersistedAgentTabDto {
   agent_id: string;
   flow_node_id: string | null;
 }
 
-export interface WindowInitState {
-  label: string;
-  project_path: string | null;
-  tabs: PersistedTabDto[];
+export interface PersistedProjectTabDto {
+  id: string;
+  project_path: string;
+  tabs: PersistedAgentTabDto[];
   active_index: number;
 }
 
-export interface OpenWindowOutcome {
-  focused_existing: boolean;
-  label: string;
+export interface SessionStateDto {
+  active_id: string | null;
+  tabs: PersistedProjectTabDto[];
 }
 
-/** This window's persisted project/tabs, or `null` if never persisted yet
- * (first launch after upgrading to multi-window — caller should fall back to
- * the legacy single-slot localStorage workspace). */
-export const getWindowInitState = (): Promise<WindowInitState | null> =>
-  invoke("get_window_init_state");
+/** The persisted single-window session (every open project tab + active id),
+ *  or `null` on a true first run — caller falls back to the legacy
+ *  single-slot localStorage workspace. */
+export const getSessionTabs = (): Promise<SessionStateDto | null> =>
+  invoke("get_session_tabs");
 
-export const updateWindowWorkspace = (
-  projectPath: string | null,
-  tabs: PersistedTabDto[],
-  activeIndex: number,
-): Promise<void> =>
-  invoke("update_window_workspace", { projectPath, tabs, activeIndex });
+/** Persist the full session (every project tab + active id). */
+export const updateSessionTabs = (state: SessionStateDto): Promise<void> =>
+  invoke("update_session_tabs", { state });
 
-/** Opens `path` in its own window, or focuses it if already open elsewhere. */
-export const openProjectWindow = (path: string): Promise<OpenWindowOutcome> =>
-  invoke("open_project_window", { path });
-
-/** Opens a fresh, project-less window (shows the project picker). */
-export const openNewWindow = (): Promise<string> => invoke("open_new_window");
-
-/** If `path` is open in another window, focuses it and returns true. */
-export const focusProjectWindow = (path: string): Promise<boolean> =>
-  invoke("focus_project_window", { path });
+/** Tear down a project tab: kill its PTY sessions and shut down its LSPs. */
+export const closeProjectTabBackend = (projectPath: string): Promise<void> =>
+  invoke("close_project_tab", { projectPath });

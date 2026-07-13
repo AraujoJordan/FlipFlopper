@@ -1,5 +1,4 @@
 import { Component, Show, createSignal } from "solid-js";
-import type { Resource } from "solid-js";
 import { store, bumpGitStatus, toggleGitPanelCollapsed, updateCurrentBranch } from "../../lib/store";
 import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, commitsAheadOfRemote, type SyncStatus, triggerHaptic } from "../../lib/ipc";
 import { Button, Spinner, toast } from "../ui";
@@ -10,7 +9,7 @@ import { isProtectedBranch } from "../../lib/constants";
 type BusyOp = "fetch" | "pull" | "push" | null;
 
 /** Branch / ahead-behind / fetch-pull-push strip pinned to the top of the git panel. */
-const SyncHeader: Component<{ sync: Resource<SyncStatus | null> }> = (props) => {
+const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (props) => {
   const [busyOp, setBusyOp] = createSignal<BusyOp>(null);
   const [pushFlash, setPushFlash] = createSignal(false);
 

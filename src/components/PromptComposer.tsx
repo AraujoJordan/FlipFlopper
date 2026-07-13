@@ -193,6 +193,7 @@ const PromptComposer: Component = () => {
   const [historyIndex, setHistoryIndex] = createSignal<number | null>(null);
   let historyDraft = "";
   let loadedProjectPath: string | null = null;
+  const [hydratedProjectPath, setHydratedProjectPath] = createSignal<string | null>(null);
   const [sending, setSending] = createSignal(false);
   const [focused, setFocused] = createSignal(false);
   const [caretPosition, setCaretPosition] = createSignal(0);
@@ -257,8 +258,10 @@ const PromptComposer: Component = () => {
   createEffect(() => {
     const seed = store.pendingPromptSeed;
     if (!seed) return;
+    const currentPath = store.currentProject?.path ?? null;
+    if (seed.projectPath && (seed.projectPath !== currentPath || hydratedProjectPath() !== currentPath)) return;
     setPendingPromptSeed(null);
-    const next = value().length === 0 ? seed.text : `${value()}\n${seed.text}`;
+    const next = value().length === 0 ? seed.text : `${value()}\n\n---\n\n${seed.text}`;
     setValue(next);
     setDismissedTokenKey(null);
     const caret = next.length;
@@ -271,10 +274,12 @@ const PromptComposer: Component = () => {
     const path = store.currentProject?.path ?? null;
     if (path === loadedProjectPath) return;
     loadedProjectPath = path;
+    setHydratedProjectPath(null);
     setHistoryIndex(null);
     historyDraft = "";
     if (!path) {
       setHistory([]);
+      setHydratedProjectPath(null);
       return;
     }
     void Promise.all([readPromptState(path), readPromptHistory(path)]).then(([saved, savedHistory]) => {
@@ -284,6 +289,7 @@ const PromptComposer: Component = () => {
       setStashedPrompt(saved.stash);
       setDismissedTokenKey(null);
       setCaretPosition(saved.draft.length);
+      setHydratedProjectPath(path);
     });
   });
 
@@ -292,7 +298,7 @@ const PromptComposer: Component = () => {
     const draft = value();
     const stash = stashedPrompt();
     const path = store.currentProject?.path ?? null;
-    if (!path || path !== loadedProjectPath) return;
+    if (!path || path !== loadedProjectPath || hydratedProjectPath() !== path) return;
     writePromptState(path, { draft, stash });
   });
 
@@ -314,9 +320,11 @@ const PromptComposer: Component = () => {
     (key) => key ? searchPromptFiles(key.projectPath, key.query, 10) : Promise.resolve([]),
   );
 
+  // Keyed on the project path (null key → no fetch) so no skills IPC fires
+  // at boot before a project is open.
   const [skills] = createResource(
-    () => store.currentProject?.path ?? "",
-    (projectPath) => listPromptSkills(projectPath || null),
+    () => store.currentProject?.path ?? null,
+    (projectPath) => listPromptSkills(projectPath),
   );
 
   const skillItems = createMemo<CompletionItem[]>(() => {

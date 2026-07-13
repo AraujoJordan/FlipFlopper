@@ -165,10 +165,11 @@ pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
     // path is already inside a work tree (its own repo or a subfolder of a
     // parent repo) so we never create a nested `.git`. Best-effort: a missing
     // git binary must not fail project open.
-    if !crate::git::is_inside_work_tree(project_path) {
-        let _ = crate::git::init_repo(project_path);
-    }
-    let is_git = crate::git::is_inside_work_tree(project_path);
+    let is_git = if crate::git::is_inside_work_tree(project_path) {
+        true
+    } else {
+        crate::git::init_repo(project_path).is_ok()
+    };
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -180,6 +181,44 @@ pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
         has_agents_md: true,
         is_git,
     })
+}
+
+/// Create a new project as one direct child of an existing parent, then apply
+/// the same idempotent FlipFlopper scaffold used by `open_project`.
+pub fn create_project(parent_path: &str, name: &str) -> Result<ProjectInfo, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Project name cannot be empty".into());
+    }
+    if name == "."
+        || name == ".."
+        || Path::new(name).is_absolute()
+        || name.contains('/')
+        || name.contains('\\')
+    {
+        return Err("Project name must be a single folder name".into());
+    }
+
+    let parent = Path::new(parent_path);
+    if !parent.is_dir() {
+        return Err(format!("Parent folder does not exist: {parent_path}"));
+    }
+
+    let target = parent.join(name);
+    if target.exists() {
+        return Err(format!("A folder named '{name}' already exists"));
+    }
+    fs::create_dir(&target).map_err(|e| format!("Failed to create project folder: {e}"))?;
+
+    match scaffold(&target.to_string_lossy()) {
+        Ok(info) => Ok(info),
+        Err(error) => {
+            // Only remove a still-empty directory. Partial scaffold output is
+            // intentionally retained so no successful write is hidden.
+            let _ = fs::remove_dir(&target);
+            Err(error)
+        }
+    }
 }
 
 // ────────────────────────────────────────────────
@@ -1329,5 +1368,46 @@ pub fn remove_recent_project(project_path: &str) {
     };
     if let Err(e) = fs::write(&path, serialized) {
         eprintln!("recents: failed to write {}: {e}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod create_project_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_parent() -> PathBuf {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("flipflopper-create-{}-{id}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn creates_and_scaffolds_a_direct_child() {
+        let parent = temp_parent();
+        let info = create_project(parent.to_str().unwrap(), "sample-app").unwrap();
+        let target = parent.join("sample-app");
+        assert_eq!(Path::new(&info.path), target);
+        assert!(target.join("AGENTS.md").is_file());
+        assert!(target.join(".agents/settings.json").is_file());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn rejects_unsafe_or_existing_names() {
+        let parent = temp_parent();
+        fs::create_dir(parent.join("taken")).unwrap();
+        for name in ["", ".", "..", "nested/name", "nested\\name", "taken"] {
+            assert!(
+                create_project(parent.to_str().unwrap(), name).is_err(),
+                "accepted {name:?}"
+            );
+        }
+        fs::remove_dir_all(parent).unwrap();
     }
 }

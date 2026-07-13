@@ -1,14 +1,17 @@
-import { Component, createSignal, For, lazy, onCleanup, onMount, Show } from "solid-js";
-import { store, addTab, rankContinueCandidates, recordContinueAgentUse } from "../lib/store";
+import { Component, createEffect, createSignal, For, lazy, onCleanup, onMount, Show } from "solid-js";
+import { store, setStore, addTab, rankContinueCandidates, recordContinueAgentUse, hiddenInstallTool } from "../lib/store";
 import { continueAgent, spawnAgent, type AgentInfo } from "../lib/ipc";
 import { agentColor, AgentLogo } from "../lib/agentMeta";
+import { runAction } from "../lib/shortcuts";
 import AgentBar from "./AgentBar";
 
 // Lazy: keeps xterm out of the startup bundle; panes only mount once a tab
 // exists, and PTY output is parked backend-side until the pane attaches.
 const TerminalPane = lazy(() => import("./TerminalPane"));
+// Lazy: splits the whole flow/* orchestrator subtree out of the startup
+// bundle; it only renders once an agent tab exists.
+const OrchestratorPanel = lazy(() => import("./flow/OrchestratorPanel"));
 import YoloButton from "./YoloButton";
-import OrchestratorPanel from "./flow/OrchestratorPanel";
 import { Menu, MenuLabel, MenuItem, Spinner, toast } from "./ui";
 
 const LIQUID_DOT_COUNT = 6200;
@@ -346,6 +349,14 @@ const AgentWorkspace: Component = () => {
   const [emptySpawningId, setEmptySpawningId] = createSignal<string | null>(null);
   const [hoveredAgentColor, setHoveredAgentColor] = createSignal<string | null>(null);
 
+  // Defer the 6200-dot WebGL background past first paint so shader compile
+  // and geometry upload never compete with initial layout.
+  const [liquidDotsReady, setLiquidDotsReady] = createSignal(false);
+  onMount(() => {
+    const idle = window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 200));
+    idle(() => setLiquidDotsReady(true));
+  });
+
   const emptyAgentBlockReason = (agent: AgentInfo) => {
     if (!store.currentProject) return "Open a project first";
     if (!agent.installed) return "Not installed";
@@ -354,13 +365,38 @@ const AgentWorkspace: Component = () => {
   };
 
   const emptyAgentStatus = (agent: AgentInfo) => {
-    if (emptySpawningId() === agent.id) return "Launching...";
+    if (emptySpawningId() === agent.id) {
+      return agent.installed ? "Launching..." : "Installing...";
+    }
     return emptyAgentBlockReason(agent) ?? agent.version ?? "Ready";
   };
 
   async function launchEmptyAgent(agent: AgentInfo) {
+    if (emptySpawningId()) return;
     const project = store.currentProject;
-    if (!project || emptyAgentBlockReason(agent) || emptySpawningId()) return;
+    if (!project) {
+      // Defer: stash the chosen agent and open the project picker. Once a
+      // project lands, the effect below consumes the stash and launches it.
+      setStore("pendingLaunchAgentId", agent.id);
+      runAction("open-project");
+      return;
+    }
+
+    if (!agent.installed) {
+      setEmptySpawningId(agent.id);
+      try {
+        await hiddenInstallTool(agent.id, project.path);
+      } catch (e) {
+        console.error(e);
+        toast(`Failed to install ${agent.name}: ${String(e)}`, "error");
+      } finally {
+        setEmptySpawningId(null);
+      }
+      return;
+    }
+
+    if (emptyAgentBlockReason(agent)) return;
+
     setEmptySpawningId(agent.id);
     try {
       const sessionId = await spawnAgent(agent.id, project.path, store.yoloMode);
@@ -372,6 +408,18 @@ const AgentWorkspace: Component = () => {
       setEmptySpawningId(null);
     }
   }
+
+  // Consume a deferred launch (no project was open when the button was
+  // clicked): once a project lands, spawn the stashed agent. The stash is
+  // cleared on picker cancel (App.tsx) and here on success.
+  createEffect(() => {
+    const agentId = store.pendingLaunchAgentId;
+    const project = store.currentProject;
+    if (!agentId || !project) return;
+    setStore("pendingLaunchAgentId", null);
+    const agent = store.agents.find((a) => a.id === agentId);
+    if (agent) void launchEmptyAgent(agent);
+  });
 
   return (
     <div style={{
@@ -486,18 +534,49 @@ const AgentWorkspace: Component = () => {
       }}>
         <Show when={store.tabs.length === 0}>
           <div class="empty-agent-workspace">
-            <EmptyAgentLiquidDotsBackground targetColor={() => hoveredAgentColor() ?? DEFAULT_LIQUID_COLOR} />
+            <Show when={liquidDotsReady()}>
+              <EmptyAgentLiquidDotsBackground targetColor={() => hoveredAgentColor() ?? DEFAULT_LIQUID_COLOR} />
+            </Show>
 
+            <Show when={store.restoringWorkspace}>
+              <div class="empty-agent-content" style={{
+                display: "flex", "flex-direction": "column",
+                "align-items": "center", gap: "12px",
+                color: "var(--fg-subtle)",
+              }}>
+                <Spinner size={18} />
+                <div style={{ "font-size": "12.5px" }}>Restoring workspace...</div>
+              </div>
+            </Show>
+
+            <Show when={!store.restoringWorkspace}>
             <div class="empty-agent-content">
-              <img class="empty-agent-icon" src="/flipflopper-icon.png" alt="FlipFlopper" width={56} height={56} />
-              <h2>No agent running</h2>
-              <p>
-                {store.currentProject
-                  ? "Launch an agent to get started."
-                  : "Open a project, then launch an agent."}
-              </p>
+              <Show when={store.currentProject} fallback={
+                <div class="project-welcome">
+                  <div class="project-welcome-mark" aria-hidden="true">
+                    <span class="folder-plus-art" />
+                  </div>
+                  <span class="project-welcome-kicker">START A WORKSPACE</span>
+                  <h2>What will you build next?</h2>
+                  <p>Create a guided project brief or open a folder you already work in. Then choose an agent to bring it to life.</p>
+                  <div class="project-welcome-actions">
+                    <button class="project-welcome-create" type="button" onclick={() => runAction("new-project")}>
+                      <span class="project-welcome-action-icon">+</span>
+                      <span><strong>Create New Project</strong><small>Choose a stack and shape the first prompt</small></span>
+                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"><path d="M5 12h14m-6-6 6 6-6 6" /></svg>
+                    </button>
+                    <button class="project-welcome-open" type="button" onclick={() => runAction("open-project")}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
+                      Open Existing Folder
+                    </button>
+                  </div>
+                </div>
+              }>
+                <img class="empty-agent-icon" src="/flipflopper-icon.png" alt="FlipFlopper" width={56} height={56} />
+                <h2>No agent running</h2>
+                <p>Launch an agent to get started.</p>
 
-              <div class="empty-agent-grid" aria-label="Launch an agent">
+                <div class="empty-agent-grid" aria-label="Launch an agent">
                 <Show
                   when={store.agents.length > 0}
                   fallback={
@@ -509,9 +588,12 @@ const AgentWorkspace: Component = () => {
                 >
                   <For each={store.agents}>
                     {(agent, index) => {
-                      const blockedReason = () => emptyAgentBlockReason(agent);
                       const launching = () => emptySpawningId() === agent.id;
-                      const disabled = () => Boolean(blockedReason()) || (emptySpawningId() !== null && !launching());
+                      const disabled = () => {
+                        if (emptySpawningId() !== null && !launching()) return true;
+                        if (agent.installed && store.yoloMode && !agent.yolo_supported) return true;
+                        return false;
+                      };
                       const color = () => agentColor(agent.id);
 
                       return (
@@ -520,6 +602,7 @@ const AgentWorkspace: Component = () => {
                           classList={{
                             "empty-agent-launch-button-disabled": disabled(),
                             "empty-agent-launch-button-active": launching(),
+                            "empty-agent-launch-button-uninstalled": !agent.installed,
                           }}
                           disabled={disabled()}
                           title={`${agent.name}: ${emptyAgentStatus(agent)}`}
@@ -546,8 +629,10 @@ const AgentWorkspace: Component = () => {
                     }}
                   </For>
                 </Show>
-              </div>
+                </div>
+              </Show>
             </div>
+            </Show>
           </div>
         </Show>
         <For each={store.tabs}>

@@ -1,4 +1,4 @@
-import { Component, Show, createResource, createSignal, onCleanup } from "solid-js";
+import { Component, For, Show, createResource, createSignal, onCleanup } from "solid-js";
 import { store, setGitPanelTab, toggleGitPanelCollapsed, addTerminal, toggleTerminalPanel } from "../../lib/store";
 import { getSyncStatus, getGitStatusV2, openTerminal } from "../../lib/ipc";
 import SyncHeader from "./SyncHeader";
@@ -32,8 +32,20 @@ const countBadgeStyle = {
  *  old read-only CommitTimeline. */
 const GitPanel: Component = () => {
   const [tick, setTick] = createSignal(0);
-  const interval = setInterval(() => setTick((n) => n + 1), 30_000);
-  onCleanup(() => clearInterval(interval));
+  // Poll only while visible; refresh once immediately when the window comes
+  // back so the panel isn't stale. Keeps ticking while merely collapsed —
+  // the rail badge (changedCount) still needs fresh status.
+  const interval = setInterval(() => {
+    if (!document.hidden) setTick((n) => n + 1);
+  }, 30_000);
+  const onVisibilityChange = () => {
+    if (!document.hidden) setTick((n) => n + 1);
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  onCleanup(() => {
+    clearInterval(interval);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+  });
 
   const resourceKey = () => ({
     path: store.currentProject?.path,
@@ -41,15 +53,38 @@ const GitPanel: Component = () => {
     _v: store.gitStatusVersion,
   });
 
-  const [sync] = createResource(resourceKey, ({ path }) =>
-    path ? getSyncStatus(path) : Promise.resolve(null)
+  // Results are tagged with the path they were fetched for: on a project
+  // switch Solid keeps the previous value while refetching, and without the
+  // tag the panel shows the OLD project's changes/branch until the new data
+  // lands. The derived accessors below hide cross-project data so consumers
+  // fall into their loading states instead.
+  const [syncRaw] = createResource(resourceKey, async ({ path }) =>
+    path ? { path, value: await getSyncStatus(path) } : null
   );
 
-  const [status] = createResource(resourceKey, ({ path }) =>
-    path ? getGitStatusV2(path) : Promise.resolve([])
+  const [statusRaw] = createResource(resourceKey, async ({ path }) =>
+    path ? { path, value: await getGitStatusV2(path) } : null
   );
 
-  const changedCount = () => (status() ?? []).length;
+  const currentPath = () => store.currentProject?.path;
+
+  const syncData = () => {
+    const r = syncRaw();
+    if (!currentPath()) return null;
+    return r && r.path === currentPath() ? r.value : null;
+  };
+
+  /** `undefined` = no valid data for the current project yet (loading). */
+  const statusData = () => {
+    const r = statusRaw();
+    if (!currentPath()) return [];
+    return r && r.path === currentPath() ? r.value : undefined;
+  };
+
+  const statusLoading = () =>
+    statusRaw.loading || (!!currentPath() && statusData() === undefined);
+
+  const changedCount = () => (statusData() ?? []).length;
   const collapsed = () => store.gitPanelCollapsed;
 
   const [openingTerminal, setOpeningTerminal] = createSignal(false);
@@ -99,7 +134,7 @@ const GitPanel: Component = () => {
         classList={{ "side-panel-content-hidden": collapsed() }}
         style={{ width: "312px" }}
       >
-      <SyncHeader sync={sync} />
+      <SyncHeader sync={syncData} />
 
       <div style={{
         display: "flex", "align-items": "center", gap: "4px",
@@ -141,8 +176,20 @@ const GitPanel: Component = () => {
         </button>
       </div>
 
-      <Show when={store.gitPanelTab === "changes"} fallback={<HistoryTab tick={tick} />}>
-        <ChangesTab status={status} sync={sync} />
+      <Show
+        when={store.currentProject || !store.restoringWorkspace}
+        fallback={
+          /* Workspace restore in flight: shimmer rows until the project lands. */
+          <div style={{ flex: "1", "min-height": 0, overflow: "hidden" }}>
+            <For each={[68, 52, 76, 44, 60]}>
+              {(width) => <div class="skeleton-shimmer skeleton-row" style={{ width: `${width}%` }} />}
+            </For>
+          </div>
+        }
+      >
+        <Show when={store.gitPanelTab === "changes"} fallback={<HistoryTab tick={tick} />}>
+          <ChangesTab status={statusData} statusLoading={statusLoading} sync={syncData} />
+        </Show>
       </Show>
 
       {/* Toggle Terminal Bottom Button (Expanded Panel) */}

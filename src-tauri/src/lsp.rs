@@ -17,6 +17,11 @@ pub struct LspStatus {
     pub completion_trigger_characters: Vec<String>,
     pub signature_trigger_characters: Vec<String>,
     pub resolve_provider: bool,
+    pub code_action_provider: bool,
+    pub code_action_resolve_provider: bool,
+    pub rename_provider: bool,
+    pub prepare_rename_provider: bool,
+    pub formatting_provider: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -24,6 +29,17 @@ struct LspCapabilities {
     completion_trigger_characters: Vec<String>,
     signature_trigger_characters: Vec<String>,
     resolve_provider: bool,
+    code_action_provider: bool,
+    code_action_resolve_provider: bool,
+    rename_provider: bool,
+    prepare_rename_provider: bool,
+    formatting_provider: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspTextEdit {
+    pub range: LspRange,
+    pub new_text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +52,10 @@ pub struct LspCompletion {
     pub filter_text: Option<String>,
     pub documentation: Option<String>,
     pub replace_start: Option<LspPosition>,
+    pub replace_range: Option<LspRange>,
+    pub insert_text_format: u64,
+    pub additional_text_edits: Vec<LspTextEdit>,
+    pub command: Option<Value>,
     pub raw: Value,
 }
 
@@ -43,6 +63,33 @@ pub struct LspCompletion {
 pub struct LspCompletionDetail {
     pub detail: Option<String>,
     pub documentation: Option<String>,
+    pub completion: Option<LspCompletion>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspCodeAction {
+    pub title: String,
+    pub kind: Option<String>,
+    pub is_preferred: bool,
+    pub disabled_reason: Option<String>,
+    pub raw: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspPrepareRename {
+    pub range: LspRange,
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspFileEdit {
+    pub path: String,
+    pub edits: Vec<LspTextEdit>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspWorkspaceEdit {
+    pub files: Vec<LspFileEdit>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,7 +124,7 @@ pub struct LspRange {
     pub end: LspPosition,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspDiagnostic {
     pub range: LspRange,
     pub severity: Option<u64>,
@@ -132,6 +179,11 @@ pub fn status(project_path: &str, rel_path: &str) -> LspStatus {
             completion_trigger_characters: Vec::new(),
             signature_trigger_characters: Vec::new(),
             resolve_provider: false,
+            code_action_provider: false,
+            code_action_resolve_provider: false,
+            rename_provider: false,
+            prepare_rename_provider: false,
+            formatting_provider: false,
         },
         Some(spec) => match resolve_command(project_path, spec.command) {
             Some(_) => LspStatus {
@@ -142,6 +194,11 @@ pub fn status(project_path: &str, rel_path: &str) -> LspStatus {
                 completion_trigger_characters: Vec::new(),
                 signature_trigger_characters: Vec::new(),
                 resolve_provider: false,
+                code_action_provider: false,
+                code_action_resolve_provider: false,
+                rename_provider: false,
+                prepare_rename_provider: false,
+                formatting_provider: false,
             },
             None => LspStatus {
                 available: false,
@@ -151,6 +208,11 @@ pub fn status(project_path: &str, rel_path: &str) -> LspStatus {
                 completion_trigger_characters: Vec::new(),
                 signature_trigger_characters: Vec::new(),
                 resolve_provider: false,
+                code_action_provider: false,
+                code_action_resolve_provider: false,
+                rename_provider: false,
+                prepare_rename_provider: false,
+                formatting_provider: false,
             },
         },
     }
@@ -161,6 +223,11 @@ fn status_with_capabilities(project_path: &str, rel_path: &str, session: &LspSes
     base.completion_trigger_characters = session.capabilities.completion_trigger_characters.clone();
     base.signature_trigger_characters = session.capabilities.signature_trigger_characters.clone();
     base.resolve_provider = session.capabilities.resolve_provider;
+    base.code_action_provider = session.capabilities.code_action_provider;
+    base.code_action_resolve_provider = session.capabilities.code_action_resolve_provider;
+    base.rename_provider = session.capabilities.rename_provider;
+    base.prepare_rename_provider = session.capabilities.prepare_rename_provider;
+    base.formatting_provider = session.capabilities.formatting_provider;
     base
 }
 
@@ -232,6 +299,29 @@ pub fn change_document(
     Ok(status_with_capabilities(project_path, rel_path, session))
 }
 
+pub fn close_document(
+    manager: &LspManager,
+    project_path: &str,
+    rel_path: &str,
+) -> Result<(), String> {
+    let Some(spec) = server_for_path(rel_path) else {
+        return Ok(());
+    };
+    let key = session_key(project_path, spec.id);
+    let sessions = manager.sessions.lock().unwrap();
+    let Some(session) = sessions.get(&key) else {
+        return Ok(());
+    };
+    if session.open_docs.lock().unwrap().remove(rel_path).is_none() {
+        return Ok(());
+    }
+    notify(
+        session,
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": file_uri(&absolute_path(project_path, rel_path)?) } }),
+    )
+}
+
 pub fn completion(
     manager: &LspManager,
     project_path: &str,
@@ -249,7 +339,9 @@ pub fn completion(
         .ok_or_else(|| "Language server session disappeared".to_string())?;
     let uri = file_uri(&absolute_path(project_path, rel_path)?);
     let context = match trigger_character {
-        Some(trigger_character) => json!({ "triggerKind": 2, "triggerCharacter": trigger_character }),
+        Some(trigger_character) => {
+            json!({ "triggerKind": 2, "triggerCharacter": trigger_character })
+        }
         None => json!({ "triggerKind": 1 }),
     };
     let result = request(
@@ -272,7 +364,11 @@ pub fn completion_resolve(
     item: Value,
 ) -> Result<LspCompletionDetail, String> {
     let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
-        return Ok(LspCompletionDetail { detail: None, documentation: None });
+        return Ok(LspCompletionDetail {
+            detail: None,
+            documentation: None,
+            completion: None,
+        });
     };
     let sessions = manager.sessions.lock().unwrap();
     let session = sessions
@@ -280,14 +376,22 @@ pub fn completion_resolve(
         .ok_or_else(|| "Language server session disappeared".to_string())?;
     if !session.capabilities.resolve_provider {
         return Ok(LspCompletionDetail {
-            detail: item.get("detail").and_then(|v| v.as_str()).map(String::from),
+            detail: item
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             documentation: parse_documentation(&item),
+            completion: parse_completion_item(item),
         });
     }
     let result = request(manager, session, "completionItem/resolve", item)?;
     Ok(LspCompletionDetail {
-        detail: result.get("detail").and_then(|v| v.as_str()).map(String::from),
+        detail: result
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         documentation: parse_documentation(&result),
+        completion: parse_completion_item(result),
     })
 }
 
@@ -400,6 +504,193 @@ pub fn references(
     Ok(parse_references(project_path, result))
 }
 
+pub fn code_actions(
+    manager: &LspManager,
+    project_path: &str,
+    rel_path: &str,
+    range: LspRange,
+    diagnostics: Vec<LspDiagnostic>,
+) -> Result<Vec<LspCodeAction>, String> {
+    let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
+        return Ok(Vec::new());
+    };
+    let sessions = manager.sessions.lock().unwrap();
+    let session = sessions
+        .get(&key)
+        .ok_or_else(|| "Language server session disappeared".to_string())?;
+    if !session.capabilities.code_action_provider {
+        return Ok(Vec::new());
+    }
+    let result = request(
+        manager,
+        session,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": file_uri(&absolute_path(project_path, rel_path)?) },
+            "range": range,
+            "context": { "diagnostics": diagnostics }
+        }),
+    )?;
+    let mut actions: Vec<LspCodeAction> = result
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(parse_code_action)
+        .collect();
+    actions.sort_by_key(|action| (!action.is_preferred, action.title.to_lowercase()));
+    Ok(actions)
+}
+
+pub fn resolve_code_action(
+    manager: &LspManager,
+    project_path: &str,
+    rel_path: &str,
+    action: Value,
+) -> Result<LspWorkspaceEdit, String> {
+    let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
+        return Err("No language server is available for this file".into());
+    };
+    let sessions = manager.sessions.lock().unwrap();
+    let session = sessions
+        .get(&key)
+        .ok_or_else(|| "Language server session disappeared".to_string())?;
+    let resolved =
+        if action.get("edit").is_none() && session.capabilities.code_action_resolve_provider {
+            request(manager, session, "codeAction/resolve", action)?
+        } else {
+            action
+        };
+    let edit = resolved.get("edit").ok_or_else(|| {
+        if resolved.get("command").is_some() {
+            "This language server returned a command-only action, which cannot be applied safely yet".to_string()
+        } else {
+            "The selected code action did not contain edits".to_string()
+        }
+    })?;
+    parse_workspace_edit(project_path, edit)
+}
+
+pub fn prepare_rename(
+    manager: &LspManager,
+    project_path: &str,
+    rel_path: &str,
+    line: u64,
+    character: u64,
+) -> Result<Option<LspPrepareRename>, String> {
+    let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
+        return Ok(None);
+    };
+    let sessions = manager.sessions.lock().unwrap();
+    let session = sessions
+        .get(&key)
+        .ok_or_else(|| "Language server session disappeared".to_string())?;
+    if !session.capabilities.rename_provider {
+        return Ok(None);
+    }
+    if !session.capabilities.prepare_rename_provider {
+        return Ok(Some(LspPrepareRename {
+            range: LspRange {
+                start: LspPosition { line, character },
+                end: LspPosition { line, character },
+            },
+            placeholder: None,
+        }));
+    }
+    let result = request(
+        manager,
+        session,
+        "textDocument/prepareRename",
+        json!({
+            "textDocument": { "uri": file_uri(&absolute_path(project_path, rel_path)?) },
+            "position": { "line": line, "character": character }
+        }),
+    )?;
+    if result.is_null() {
+        return Ok(None);
+    }
+    let range_value = result.get("range").unwrap_or(&result);
+    Ok(parse_range(range_value).map(|range| LspPrepareRename {
+        placeholder: result
+            .get("placeholder")
+            .and_then(Value::as_str)
+            .map(String::from),
+        range,
+    }))
+}
+
+pub fn rename(
+    manager: &LspManager,
+    project_path: &str,
+    rel_path: &str,
+    line: u64,
+    character: u64,
+    new_name: &str,
+) -> Result<LspWorkspaceEdit, String> {
+    let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
+        return Err("No language server is available for this file".into());
+    };
+    let sessions = manager.sessions.lock().unwrap();
+    let session = sessions
+        .get(&key)
+        .ok_or_else(|| "Language server session disappeared".to_string())?;
+    if !session.capabilities.rename_provider {
+        return Err("The language server does not support rename".into());
+    }
+    let result = request(
+        manager,
+        session,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": file_uri(&absolute_path(project_path, rel_path)?) },
+            "position": { "line": line, "character": character },
+            "newName": new_name
+        }),
+    )?;
+    parse_workspace_edit(project_path, &result)
+}
+
+pub fn format_document(
+    manager: &LspManager,
+    project_path: &str,
+    rel_path: &str,
+    tab_size: u64,
+    insert_spaces: bool,
+) -> Result<LspWorkspaceEdit, String> {
+    let Some(key) = ensure_session_key(manager, project_path, rel_path)? else {
+        return Err("No language server is available for this file".into());
+    };
+    let sessions = manager.sessions.lock().unwrap();
+    let session = sessions
+        .get(&key)
+        .ok_or_else(|| "Language server session disappeared".to_string())?;
+    if !session.capabilities.formatting_provider {
+        return Err("The language server does not support document formatting".into());
+    }
+    let result = request(
+        manager,
+        session,
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": file_uri(&absolute_path(project_path, rel_path)?) },
+            "options": { "tabSize": tab_size, "insertSpaces": insert_spaces }
+        }),
+    )?;
+    let edits = result
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| parse_text_edit(&value))
+        .collect();
+    Ok(LspWorkspaceEdit {
+        files: vec![LspFileEdit {
+            path: rel_path.to_string(),
+            edits,
+        }],
+    })
+}
+
 pub fn diagnostics(
     manager: &LspManager,
     project_path: &str,
@@ -434,6 +725,20 @@ pub fn shutdown_project(manager: &LspManager, project_path: &str) {
         .collect();
     for key in keys {
         if let Some(mut session) = sessions.remove(&key) {
+            let _ = request(manager, &session, "shutdown", json!(null));
+            let _ = notify(&session, "exit", json!(null));
+            let _ = session.child.kill();
+        }
+    }
+}
+
+/// Shut down every LSP session (used on app quit).
+pub fn shutdown_all(manager: &LspManager) {
+    let mut sessions = manager.sessions.lock().unwrap();
+    let keys: Vec<String> = sessions.keys().cloned().collect();
+    for key in keys {
+        if let Some(mut session) = sessions.remove(&key) {
+            let _ = request(manager, &session, "shutdown", json!(null));
             let _ = notify(&session, "exit", json!(null));
             let _ = session.child.kill();
         }
@@ -518,9 +823,10 @@ fn spawn_session(
                     "completion": {
                         "contextSupport": true,
                         "completionItem": {
-                            "snippetSupport": false,
+                            "snippetSupport": true,
+                            "insertReplaceSupport": true,
                             "documentationFormat": ["markdown", "plaintext"],
-                            "resolveSupport": { "properties": ["documentation", "detail"] }
+                            "resolveSupport": { "properties": ["documentation", "detail", "textEdit", "additionalTextEdits", "insertTextFormat", "command"] }
                         }
                     },
                     "hover": { "contentFormat": ["markdown", "plaintext"] },
@@ -528,8 +834,16 @@ fn spawn_session(
                         "signatureInformation": { "documentationFormat": ["markdown", "plaintext"] }
                     },
                     "definition": {},
-                    "references": {}
-                }
+                    "references": {},
+                    "codeAction": {
+                        "dynamicRegistration": false,
+                        "resolveSupport": { "properties": ["edit"] },
+                        "codeActionLiteralSupport": { "codeActionKind": { "valueSet": ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports"] } }
+                    },
+                    "rename": { "prepareSupport": true },
+                    "formatting": { "dynamicRegistration": false }
+                },
+                "workspace": { "applyEdit": false, "workspaceEdit": { "documentChanges": false } }
             }
         }),
     );
@@ -556,7 +870,12 @@ fn start_reader(
             if let Some(id) = message.get("id").and_then(|v| v.as_u64()) {
                 let tx = pending.lock().unwrap().remove(&id);
                 if let Some(tx) = tx {
-                    let _ = tx.send(message.get("result").cloned().unwrap_or(Value::Null));
+                    let response = if let Some(error) = message.get("error") {
+                        json!({ "__lsp_error": error })
+                    } else {
+                        message.get("result").cloned().unwrap_or(Value::Null)
+                    };
+                    let _ = tx.send(response);
                 }
                 continue;
             }
@@ -631,8 +950,17 @@ fn request(
         session.pending.lock().unwrap().remove(&id);
         return Err(e);
     }
-    rx.recv_timeout(Duration::from_secs(4))
-        .map_err(|_| format!("Timed out waiting for {method}"))
+    let result = rx
+        .recv_timeout(Duration::from_secs(4))
+        .map_err(|_| format!("Timed out waiting for {method}"))?;
+    if let Some(error) = result.get("__lsp_error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Language server request failed");
+        return Err(format!("{method}: {message}"));
+    }
+    Ok(result)
 }
 
 fn notify(session: &LspSession, method: &str, params: Value) -> Result<(), String> {
@@ -831,40 +1159,7 @@ fn parse_completions(result: Value) -> Vec<LspCompletion> {
     };
     let mut completions: Vec<LspCompletion> = items
         .into_iter()
-        .filter_map(|item| {
-            let label = item.get("label")?.as_str()?.to_string();
-            let insert_text = item
-                .get("insertText")
-                .and_then(|v| v.as_str())
-                .or_else(|| {
-                    item.get("textEdit")
-                        .and_then(|v| v.get("newText"))
-                        .and_then(|v| v.as_str())
-                })
-                .unwrap_or(&label)
-                .to_string();
-            let replace_start = item
-                .get("textEdit")
-                .and_then(|v| v.get("range").or_else(|| v.get("insert")))
-                .and_then(|r| r.get("start"))
-                .and_then(parse_position);
-            let sort_text = item.get("sortText").and_then(|v| v.as_str()).map(String::from);
-            let filter_text = item.get("filterText").and_then(|v| v.as_str()).map(String::from);
-            let documentation = parse_documentation(&item);
-            let detail = item.get("detail").and_then(|v| v.as_str()).map(String::from);
-            let kind = item.get("kind").and_then(|v| v.as_u64());
-            Some(LspCompletion {
-                label,
-                detail,
-                kind,
-                insert_text,
-                sort_text,
-                filter_text,
-                documentation,
-                replace_start,
-                raw: item,
-            })
-        })
+        .filter_map(parse_completion_item)
         .collect();
     completions.sort_by(|a, b| {
         let key_a = a.sort_text.as_deref().unwrap_or(&a.label);
@@ -873,6 +1168,58 @@ fn parse_completions(result: Value) -> Vec<LspCompletion> {
     });
     completions.truncate(150);
     completions
+}
+
+fn parse_completion_item(item: Value) -> Option<LspCompletion> {
+    let label = item.get("label")?.as_str()?.to_string();
+    let text_edit = item.get("textEdit");
+    let insert_text = item
+        .get("insertText")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            text_edit
+                .and_then(|v| v.get("newText"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or(&label)
+        .to_string();
+    let replace_range = text_edit
+        .and_then(|v| {
+            v.get("range")
+                .or_else(|| v.get("replace"))
+                .or_else(|| v.get("insert"))
+        })
+        .and_then(parse_range);
+    let replace_start = replace_range.as_ref().map(|range| range.start.clone());
+    let additional_text_edits = item
+        .get("additionalTextEdits")
+        .and_then(Value::as_array)
+        .map(|edits| edits.iter().filter_map(parse_text_edit).collect())
+        .unwrap_or_default();
+    Some(LspCompletion {
+        label,
+        detail: item.get("detail").and_then(Value::as_str).map(String::from),
+        kind: item.get("kind").and_then(Value::as_u64),
+        insert_text,
+        sort_text: item
+            .get("sortText")
+            .and_then(Value::as_str)
+            .map(String::from),
+        filter_text: item
+            .get("filterText")
+            .and_then(Value::as_str)
+            .map(String::from),
+        documentation: parse_documentation(&item),
+        replace_start,
+        replace_range,
+        insert_text_format: item
+            .get("insertTextFormat")
+            .and_then(Value::as_u64)
+            .unwrap_or(1),
+        additional_text_edits,
+        command: item.get("command").cloned(),
+        raw: item,
+    })
 }
 
 fn parse_documentation(value: &Value) -> Option<String> {
@@ -889,7 +1236,11 @@ fn parse_capabilities(init_result: &Value) -> LspCapabilities {
         .and_then(|c| c.get("completionProvider"))
         .and_then(|c| c.get("triggerCharacters"))
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let resolve_provider = caps
         .and_then(|c| c.get("completionProvider"))
@@ -900,13 +1251,114 @@ fn parse_capabilities(init_result: &Value) -> LspCapabilities {
         .and_then(|c| c.get("signatureHelpProvider"))
         .and_then(|c| c.get("triggerCharacters"))
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
+    let code_action = caps.and_then(|c| c.get("codeActionProvider"));
+    let code_action_provider = code_action
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| code_action.is_some_and(|value| value.is_object()));
+    let code_action_resolve_provider = code_action
+        .and_then(|v| v.get("resolveProvider"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let rename = caps.and_then(|c| c.get("renameProvider"));
+    let rename_provider = rename
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| rename.is_some_and(|value| value.is_object()));
+    let prepare_rename_provider = rename
+        .and_then(|v| v.get("prepareProvider"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let formatting_provider = caps
+        .and_then(|c| c.get("documentFormattingProvider"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     LspCapabilities {
         completion_trigger_characters,
         signature_trigger_characters,
         resolve_provider,
+        code_action_provider,
+        code_action_resolve_provider,
+        rename_provider,
+        prepare_rename_provider,
+        formatting_provider,
     }
+}
+
+fn parse_code_action(value: Value) -> Option<LspCodeAction> {
+    let title = value.get("title")?.as_str()?.to_string();
+    Some(LspCodeAction {
+        title,
+        kind: value.get("kind").and_then(Value::as_str).map(String::from),
+        is_preferred: value
+            .get("isPreferred")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        disabled_reason: value
+            .get("disabled")
+            .and_then(|v| v.get("reason"))
+            .and_then(Value::as_str)
+            .map(String::from),
+        raw: value,
+    })
+}
+
+fn parse_text_edit(value: &Value) -> Option<LspTextEdit> {
+    Some(LspTextEdit {
+        range: parse_range(value.get("range")?)?,
+        new_text: value.get("newText")?.as_str()?.to_string(),
+    })
+}
+
+fn parse_workspace_edit(project_path: &str, value: &Value) -> Result<LspWorkspaceEdit, String> {
+    let mut by_path: HashMap<String, Vec<LspTextEdit>> = HashMap::new();
+    if let Some(changes) = value.get("changes").and_then(Value::as_object) {
+        for (uri, edits) in changes {
+            let path = uri_to_rel_path(project_path, uri).ok_or_else(|| {
+                format!("Workspace edit targets a file outside the project: {uri}")
+            })?;
+            let parsed = edits
+                .as_array()
+                .ok_or_else(|| "Malformed workspace edit".to_string())?
+                .iter()
+                .map(|edit| parse_text_edit(edit).ok_or_else(|| "Malformed text edit".to_string()))
+                .collect::<Result<Vec<_>, _>>()?;
+            by_path.entry(path).or_default().extend(parsed);
+        }
+    }
+    if let Some(changes) = value.get("documentChanges").and_then(Value::as_array) {
+        for change in changes {
+            if change.get("kind").is_some() {
+                return Err("This action creates, deletes, or renames files; resource operations are not supported".into());
+            }
+            let uri = change
+                .get("textDocument")
+                .and_then(|v| v.get("uri"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Malformed document edit".to_string())?;
+            let path = uri_to_rel_path(project_path, uri).ok_or_else(|| {
+                format!("Workspace edit targets a file outside the project: {uri}")
+            })?;
+            let parsed = change
+                .get("edits")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "Malformed document edits".to_string())?
+                .iter()
+                .map(|edit| parse_text_edit(edit).ok_or_else(|| "Malformed text edit".to_string()))
+                .collect::<Result<Vec<_>, _>>()?;
+            by_path.entry(path).or_default().extend(parsed);
+        }
+    }
+    let mut files: Vec<LspFileEdit> = by_path
+        .into_iter()
+        .map(|(path, edits)| LspFileEdit { path, edits })
+        .collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(LspWorkspaceEdit { files })
 }
 
 fn parse_signature_help(result: Value) -> Option<LspSignatureHelp> {
@@ -917,7 +1369,11 @@ fn parse_signature_help(result: Value) -> Option<LspSignatureHelp> {
     let signatures = signatures_value
         .iter()
         .map(|sig| {
-            let label = sig.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let label = sig
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let documentation = parse_documentation(sig);
             let parameters = sig
                 .get("parameters")
@@ -950,8 +1406,14 @@ fn parse_signature_help(result: Value) -> Option<LspSignatureHelp> {
             }
         })
         .collect();
-    let active_signature = result.get("activeSignature").and_then(|v| v.as_u64()).unwrap_or(0);
-    let active_parameter = result.get("activeParameter").and_then(|v| v.as_u64()).unwrap_or(0);
+    let active_signature = result
+        .get("activeSignature")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let active_parameter = result
+        .get("activeParameter")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     Some(LspSignatureHelp {
         signatures,
         active_signature,
@@ -1061,4 +1523,69 @@ fn uri_to_rel_path(project_path: &str, uri: &str) -> Option<String> {
     abs.strip_prefix(root)
         .ok()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(line: u64, start: u64, end: u64) -> Value {
+        json!({
+            "start": { "line": line, "character": start },
+            "end": { "line": line, "character": end }
+        })
+    }
+
+    #[test]
+    fn parses_snippet_completion_and_additional_edits() {
+        let item = json!({
+            "label": "log",
+            "filterText": "console.log",
+            "insertTextFormat": 2,
+            "textEdit": { "range": range(2, 4, 7), "newText": "console.log(${1:value})$0" },
+            "additionalTextEdits": [{ "range": range(0, 0, 0), "newText": "import console\n" }]
+        });
+        let completion = parse_completion_item(item).unwrap();
+        assert_eq!(completion.insert_text_format, 2);
+        assert_eq!(completion.filter_text.as_deref(), Some("console.log"));
+        assert_eq!(completion.replace_range.unwrap().start.line, 2);
+        assert_eq!(completion.additional_text_edits.len(), 1);
+    }
+
+    #[test]
+    fn parses_editing_capabilities() {
+        let capabilities = parse_capabilities(&json!({
+            "capabilities": {
+                "completionProvider": { "resolveProvider": true, "triggerCharacters": ["."] },
+                "codeActionProvider": { "resolveProvider": true },
+                "renameProvider": { "prepareProvider": true },
+                "documentFormattingProvider": true
+            }
+        }));
+        assert!(capabilities.resolve_provider);
+        assert!(capabilities.code_action_provider && capabilities.code_action_resolve_provider);
+        assert!(capabilities.rename_provider && capabilities.prepare_rename_provider);
+        assert!(capabilities.formatting_provider);
+        assert_eq!(capabilities.completion_trigger_characters, vec!["."]);
+    }
+
+    #[test]
+    fn parses_workspace_changes_and_rejects_resource_operations() {
+        let root = std::env::temp_dir().join("flipflopper-lsp-edit-test");
+        let target = root.join("src").join("main.ts");
+        let uri = file_uri(&target);
+        let edit = json!({
+            "changes": {
+                (uri): [{ "range": range(0, 0, 3), "newText": "const" }]
+            }
+        });
+        let parsed = parse_workspace_edit(root.to_str().unwrap(), &edit).unwrap();
+        assert_eq!(parsed.files.len(), 1);
+        assert_eq!(parsed.files[0].path, "src/main.ts");
+
+        let resource = json!({
+            "documentChanges": [{ "kind": "create", "uri": file_uri(&root.join("new.ts")) }]
+        });
+        assert!(parse_workspace_edit(root.to_str().unwrap(), &resource).is_err());
+    }
 }

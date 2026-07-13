@@ -21,15 +21,27 @@ function relativeTime(timeStr: string): string {
 }
 
 const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
-  const [commits, { refetch }] = createResource(
+  // Tagged with the fetched-for path so a project switch shows the spinner
+  // instead of the previous project's log (Solid keeps the stale value while
+  // refetching); same pattern as GitPanel's status/sync resources.
+  const [commitsRaw, { refetch }] = createResource(
     () => ({
       path: store.currentProject?.path,
       filter: store.historyFilterPath,
       _tick: props.tick(),
       _v: store.gitStatusVersion,
     }),
-    ({ path, filter }) => (path ? getGitLog(path, 50, filter ?? undefined) : Promise.resolve([]))
+    async ({ path, filter }) =>
+      path ? { path, value: await getGitLog(path, 50, filter ?? undefined) } : null
   );
+
+  /** `undefined` while data for the current project hasn't landed yet. */
+  const commits = () => {
+    const r = commitsRaw();
+    const path = store.currentProject?.path;
+    if (!path) return [];
+    return r && r.path === path ? r.value : undefined;
+  };
 
   const [renamingSha, setRenamingSha] = createSignal<string | null>(null);
   const [renameValue, setRenameValue] = createSignal("");
@@ -129,22 +141,22 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
       </Show>
 
       <div style={{ flex: "1", overflow: "auto", padding: "6px 0" }}>
-        <Show when={commits.loading && !commits()}>
+        <Show when={(commitsRaw.loading || commits() === undefined) && !commits()}>
           <div style={{ padding: "24px 0", display: "flex", "justify-content": "center" }}>
             <Spinner />
           </div>
         </Show>
 
-        <Show when={commits.error}>
+        <Show when={commitsRaw.error}>
           <div style={{ padding: "16px", "text-align": "center" }}>
             <div style={{ color: "var(--status-del)", "font-size": "12px", "margin-bottom": "8px" }}>
-              {String(commits.error)}
+              {String(commitsRaw.error)}
             </div>
             <Button size="sm" onClick={() => refetch()}>Retry</Button>
           </div>
         </Show>
 
-        <Show when={!commits.loading && !commits.error && (commits() ?? []).length === 0}>
+        <Show when={!commitsRaw.loading && !commitsRaw.error && commits()?.length === 0}>
           <div style={{
             padding: "24px 16px",
             color: "var(--fg-subtle)", "font-size": "12px", "text-align": "center",

@@ -157,39 +157,64 @@ pub struct SyncStatus {
 /// degrade gracefully (empty repo, detached HEAD, no upstream, no remote)
 /// rather than failing the whole call.
 pub fn get_sync_status(project_path: &str) -> Result<SyncStatus, String> {
-    let branch = git(project_path, &["branch", "--show-current"]).unwrap_or_default();
-    let head_short_sha = git(project_path, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    // The probes are independent, so run them concurrently (same shape as
+    // agents::list_agents) — this poll fires every 30s per window and would
+    // otherwise cost six sequential subprocess round-trips. The ahead/behind
+    // count is launched unconditionally: without an upstream it just errors
+    // and the 0/0 default stands, matching the old sequential behavior.
+    let (branch, head_short_sha, upstream, counts, remotes, stash) = std::thread::scope(|s| {
+        let branch = s.spawn(|| git(project_path, &["branch", "--show-current"]));
+        let head = s.spawn(|| git(project_path, &["rev-parse", "--short", "HEAD"]));
+        let upstream = s.spawn(|| {
+            git(
+                project_path,
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
+            )
+        });
+        let counts = s.spawn(|| {
+            git(
+                project_path,
+                &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+            )
+        });
+        let remotes = s.spawn(|| git(project_path, &["remote"]));
+        let stash = s.spawn(|| git(project_path, &["stash", "list"]));
+        (
+            branch.join(),
+            head.join(),
+            upstream.join(),
+            counts.join(),
+            remotes.join(),
+            stash.join(),
+        )
+    });
+    let flat = |probe: std::thread::Result<Result<String, String>>| {
+        probe.unwrap_or_else(|_| Err("sync probe panicked".to_string()))
+    };
+
+    let branch = flat(branch).unwrap_or_default();
+    let head_short_sha = flat(head_short_sha).unwrap_or_default();
     let detached = branch.is_empty() && !head_short_sha.is_empty();
 
-    let upstream = git(
-        project_path,
-        &[
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{upstream}",
-        ],
-    )
-    .ok()
-    .filter(|s| !s.is_empty());
+    let upstream = flat(upstream).ok().filter(|s| !s.is_empty());
 
     let (mut ahead, mut behind) = (0u32, 0u32);
     if upstream.is_some() {
-        if let Ok(out) = git(
-            project_path,
-            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
-        ) {
+        if let Ok(out) = flat(counts) {
             let mut parts = out.split_whitespace();
             behind = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
             ahead = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         }
     }
 
-    let has_remote = !git(project_path, &["remote"])
-        .unwrap_or_default()
-        .is_empty();
+    let has_remote = !flat(remotes).unwrap_or_default().is_empty();
 
-    let stash_count = git(project_path, &["stash", "list"])
+    let stash_count = flat(stash)
         .unwrap_or_default()
         .lines()
         .filter(|l| !l.is_empty())

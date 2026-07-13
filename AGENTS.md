@@ -48,6 +48,10 @@ Currently implemented:
   or a `screenshots/` folder), a "Preview" toggle appears in the editor header
   and opens a side panel with a live iframe (Flutter widget previewer, web dev
   server, Storybook), a snapshot image grid, or a "record snapshots" action.
+- Capability-driven editor IntelliSense for the configured language servers:
+  snippets and auto-import completion edits, hover/signature help, diagnostics,
+  definition/references, quick fixes, multi-file symbol rename, manual document
+  formatting, and opt-in format-on-save.
 
 Known gaps / current quirks:
 
@@ -106,7 +110,9 @@ src/
   App.css                    global UI styles
   index.tsx                  Solid entry point
   lib/ipc.ts                 typed Tauri invoke/listen wrappers
-  lib/store.ts               Solid store, tab/session helpers, review state
+  lib/store.ts               Solid store, tab/session helpers, review state,
+                             single-window project-tab snapshot/restore
+                             (beginProjectTab / switchToProject / closeProjectTab)
   lib/agentMeta.tsx          agent visual identity (colors, letters, AgentLogo)
                              and per-agent mode-cycle support map
   lib/constants.ts           PROTECTED_BRANCHES / isProtectedBranch, WORK_BRANCH
@@ -114,9 +120,15 @@ src/
   lib/usages.ts              find-usages result model shared by EditorPane/OmniSearch
   lib/shortcuts.ts           global keyboard shortcut registry, capture-phase
                              before xterm/CodeMirror
+  lib/terminalCache.ts       module-level cache of live xterm instances keyed
+                             by PTY session id; terminals survive project-tab
+                             switches (scrollback + output intact); disposed on
+                             the tab/project close paths in store.ts
   components/
     AgentBar.tsx             terminal tab strip and new-tab behavior
-    TerminalPane.tsx         xterm.js instance wired to PTY events
+    TerminalPane.tsx         hosts a cached xterm instance (lib/terminalCache.ts)
+                             wired to PTY events; per-mount it owns only the
+                             resize observer and focus handling
     TerminalPanel.tsx        bottom panel hosting run/validate/install TerminalPanes
     FileTree.tsx             lazy explorer, git status badges, review entry
     PromptComposer.tsx       bottom prompt input, PTY send / auto-commit path
@@ -128,6 +140,9 @@ src/
     ValidationButton.tsx     detect and launch project validation/test targets
     BranchIndicator.tsx      recent branches, switch, create work branch,
                              protected-branch guard (extracted from App.tsx)
+    ProjectTabStrip.tsx      single-window project-tab strip rendered below the
+                             title bar (only when >1 project open); switch/close
+                             tabs; dormant tabs spawn agents on first switch
     YoloButton.tsx           autonomous-mode toggle and confirm/kill flow
                              (extracted from App.tsx)
     AgentWorkspace.tsx       active agent pane plus "Continue on..." handoff menu
@@ -146,7 +161,7 @@ src-tauri/src/
   main.rs                    native entry point
   pty.rs                     portable-pty session lifecycle and shell commands
   lsp.rs                     LSP session manager: completions, diagnostics,
-                             go-to-definition
+                             navigation, code actions, rename, formatting
   agents.rs                  static agent registry and PATH/version detection
   project.rs                 AGENTS.md/.agents scaffolding, recents, file tree
   git.rs                     shell-based status, commit, log, rename, rollback
@@ -156,6 +171,11 @@ src-tauri/src/
   editor.rs                  file read/write with in-project path safety
   tools.rs                   tool catalog, package manager detection, installs
   handoff.rs                 in-house session parser and handoff launcher
+  session.rs                 single-window project-tab session (~/.config/flipflopper/session.json):
+                             open-project persistence, restore-on-launch, and
+                             legacy windows.json one-time migration. PTY/LSP
+                             cleanup for a closed project tab happens via the
+                             close_project_tab command; app quit kills all.
 
 public/
   agents/                    bundled agent logo assets
@@ -197,8 +217,13 @@ requires generated output.
   store helpers, and mostly inline styles with shared global CSS in `App.css`.
 - `store.review` controls the diff overlay. Use `openReview()` and
   `closeReview()` rather than local duplicate state.
-- `TerminalPane` owns xterm lifecycle, PTY listeners, resize observer, and
-  input forwarding. Clean up listeners on unmount.
+- Terminal lifecycle is split: `lib/terminalCache.ts` owns the xterm
+  `Terminal`, its DOM container, and the PTY output/exit listeners per session
+  id so they survive the keyed workspace remount on project switch (no dropped
+  output, scrollback intact). `TerminalPane` re-appends the cached container
+  and owns only the per-mount resize observer and focus handling. Never
+  dispose the terminal on unmount; disposal belongs to the tab/project close
+  paths in `store.ts` (`disposeCachedTerminal`).
 - `FileTree` fetches one directory level at a time via `get_file_tree`; keep it
   lazy for large repositories.
 - `components/git/*` and `FileTree` should open native review diffs, not spawn

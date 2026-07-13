@@ -9,8 +9,8 @@ mod project;
 mod pty;
 mod review;
 mod runner;
+mod session;
 mod tools;
-mod windows;
 
 use std::process::Command;
 
@@ -22,8 +22,8 @@ use agents::AgentInfo;
 use editor::FileContent;
 use git::{CommitEntry, CommitResult, FileStatus, PullOutcome, StatusEntry, SyncStatus};
 use lsp::{
-    LspCompletion, LspCompletionDetail, LspDefinition, LspDiagnostic, LspManager,
-    LspSignatureHelp, LspStatus,
+    LspCodeAction, LspCompletion, LspCompletionDetail, LspDefinition, LspDiagnostic, LspManager,
+    LspPrepareRename, LspRange, LspSignatureHelp, LspStatus, LspWorkspaceEdit,
 };
 use project::{FileEntry, ProjectInfo, SkillEntry, TextMatch};
 use pty::{PtyEvent, PtyManager, SessionInfo};
@@ -32,7 +32,8 @@ use runner::{AndroidEnvironment, IosEnvironment, RunTarget, ValidationTarget};
 use tools::ToolInfo;
 
 const MENU_OPEN_PROJECT: &str = "menu-open-project";
-const MENU_NEW_WINDOW: &str = "menu-new-window";
+const MENU_NEW_PROJECT: &str = "menu-new-project";
+
 const MENU_REVEAL_PROJECT: &str = "menu-reveal-project";
 const MENU_CLOSE_PROJECT: &str = "menu-close-project";
 const MENU_NEW_AGENT: &str = "menu-new-agent";
@@ -102,18 +103,6 @@ struct PendingBridge {
 
 #[derive(Default)]
 struct PendingBridges(std::sync::Mutex<std::collections::HashMap<String, PendingBridge>>);
-
-/// Label of the window that most recently gained focus. Used to target
-/// `native-menu-command` at the right window instead of broadcasting a
-/// single click/shortcut to every open window.
-#[derive(Default)]
-struct FocusedWindow(std::sync::Mutex<Option<String>>);
-
-/// Set once `RunEvent::ExitRequested` fires (before windows are destroyed).
-/// While set, window-close cleanup skips rewriting `windows.json` so the file
-/// keeps the full multi-window session for the next launch to restore.
-#[derive(Default)]
-struct Quitting(std::sync::atomic::AtomicBool);
 
 /// Grace period after which a parked session that nobody ever attached is
 /// reclaimed. This **never** auto-starts the event bridge: emitting before the
@@ -188,9 +177,7 @@ fn attach_bridge(app: &tauri::AppHandle, session_id: &str, window_label: &str) {
 }
 
 // Bridge a PtyEvent receiver to Tauri events on the given session_id, scoped
-// to the window that attached (`emit_to`, not a global broadcast) — with
-// multiple windows open, every terminal byte would otherwise be serialized
-// into every webview instead of just the one displaying it.
+// to the window label captured at `pty_attach` time (the single main window).
 fn bridge_pty_with_url(
     app: tauri::AppHandle,
     session_id: String,
@@ -333,16 +320,17 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
         &[
             &menu_item(
                 handle,
+                MENU_NEW_PROJECT,
+                "New Project...",
+                Some("CmdOrCtrl+N"),
+            )?,
+            &menu_item(
+                handle,
                 MENU_OPEN_PROJECT,
                 "Open Project...",
                 Some("CmdOrCtrl+O"),
             )?,
-            &menu_item(
-                handle,
-                MENU_NEW_WINDOW,
-                "New Window",
-                Some("CmdOrCtrl+Shift+N"),
-            )?,
+            &separator(handle)?,
             &menu_item(
                 handle,
                 MENU_REVEAL_PROJECT,
@@ -751,21 +739,41 @@ mod tests {
     }
 }
 
+/// Run blocking I/O off the main thread. Sync `#[tauri::command] fn`s execute
+/// on the main/UI thread, so any command that shells out, forks, or touches
+/// the filesystem routes its body through here instead. Commands that need
+/// managed state inside the closure clone the `AppHandle` in and call
+/// `app.state::<T>()` there (a `State<'_, T>` guard can't move into the
+/// `'static` closure).
+async fn run_blocking<T: Send + 'static>(
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("Background task failed: {error}"))
+}
+
 // ════════════════════════════════════════════════
 // PTY commands
 // ════════════════════════════════════════════════
 
+// Async + spawn_blocking so the PTY fork/exec runs off the main thread and
+// concurrent spawns (workspace restore) actually overlap.
 #[tauri::command]
-fn spawn_agent(
+async fn spawn_agent(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     agent_id: String,
     project_path: String,
     yolo: bool,
     extra_args: Option<Vec<String>>,
 ) -> Result<String, String> {
     let extra_args = extra_args.unwrap_or_default();
-    let (session_id, rx) = pty::spawn_session(&state, &agent_id, &project_path, yolo, &extra_args)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_session(&manager, &agent_id, &project_path, yolo, &extra_args)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
@@ -813,13 +821,17 @@ fn list_sessions(state: State<'_, PtyManager>) -> Vec<SessionInfo> {
 }
 
 #[tauri::command]
-fn open_terminal(
+async fn open_terminal(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     cwd: Option<String>,
 ) -> Result<String, String> {
-    let (session_id, rx) = pty::spawn_interactive_shell(&state, &project_path, cwd.as_deref())?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_interactive_shell(&manager, &project_path, cwd.as_deref())
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
@@ -828,60 +840,85 @@ fn open_terminal(
 // Agent registry commands
 // ════════════════════════════════════════════════
 
+// Async + spawn_blocking: the `--version` fan-out spawns one subprocess per
+// installed agent and must not stall the main thread.
 #[tauri::command]
-fn get_agents(include_versions: Option<bool>) -> Vec<AgentInfo> {
-    agents::list_agents(include_versions.unwrap_or(true))
+async fn get_agents(include_versions: Option<bool>) -> Vec<AgentInfo> {
+    run_blocking(move || agents::list_agents(include_versions.unwrap_or(true)))
+        .await
+        .unwrap_or_default()
 }
 
 // ════════════════════════════════════════════════
 // Project commands
 // ════════════════════════════════════════════════
 
+// Async + spawn_blocking: scaffolding shells out to git and writes files.
 #[tauri::command]
-fn open_project(path: String) -> Result<ProjectInfo, String> {
-    let info = project::scaffold(&path)?;
-    project::add_recent_project(&info);
-    Ok(info)
+async fn open_project(path: String) -> Result<ProjectInfo, String> {
+    run_blocking(move || {
+        let info = project::scaffold(&path)?;
+        project::add_recent_project(&info);
+        Ok(info)
+    })
+    .await?
 }
 
 #[tauri::command]
-fn get_recent_projects() -> Vec<ProjectInfo> {
-    project::get_recent_projects()
+async fn create_project(parent_path: String, name: String) -> Result<ProjectInfo, String> {
+    run_blocking(move || {
+        let info = project::create_project(&parent_path, &name)?;
+        project::add_recent_project(&info);
+        Ok(info)
+    })
+    .await?
 }
 
 #[tauri::command]
-fn remove_recent_project(project_path: String) {
-    project::remove_recent_project(&project_path)
+async fn get_recent_projects() -> Vec<ProjectInfo> {
+    run_blocking(project::get_recent_projects)
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-fn get_file_tree(path: String) -> Result<Vec<FileEntry>, String> {
-    project::list_dir(&path)
+async fn remove_recent_project(project_path: String) {
+    let _ = run_blocking(move || project::remove_recent_project(&project_path)).await;
 }
 
 #[tauri::command]
-fn search_prompt_files(
+async fn get_file_tree(path: String) -> Result<Vec<FileEntry>, String> {
+    run_blocking(move || project::list_dir(&path)).await?
+}
+
+#[tauri::command]
+async fn search_prompt_files(
     project_path: String,
     query: String,
     limit: usize,
 ) -> Result<Vec<FileEntry>, String> {
-    project::search_files(&project_path, &query, limit)
+    run_blocking(move || project::search_files(&project_path, &query, limit)).await?
 }
 
 #[tauri::command]
-fn search_project_text(
+async fn search_project_text(
     project_path: String,
     query: String,
     use_regex: bool,
     case_sensitive: bool,
     limit: usize,
 ) -> Result<Vec<TextMatch>, String> {
-    project::search_text(&project_path, &query, use_regex, case_sensitive, limit)
+    run_blocking(move || {
+        project::search_text(&project_path, &query, use_regex, case_sensitive, limit)
+    })
+    .await?
 }
 
 #[tauri::command]
-fn list_prompt_skills(project_path: Option<String>) -> Vec<SkillEntry> {
-    project::list_skills(project_path.as_deref())
+async fn list_prompt_skills(project_path: Option<String>) -> Vec<SkillEntry> {
+    run_blocking(move || project::list_skills(project_path.as_deref()))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -894,33 +931,33 @@ fn inject_file_refs(
 }
 
 #[tauri::command]
-fn create_entry(parent_path: String, name: String, is_dir: bool) -> Result<FileEntry, String> {
-    project::create_entry(&parent_path, &name, is_dir)
+async fn create_entry(parent_path: String, name: String, is_dir: bool) -> Result<FileEntry, String> {
+    run_blocking(move || project::create_entry(&parent_path, &name, is_dir)).await?
 }
 
 #[tauri::command]
-fn rename_entry(path: String, new_name: String) -> Result<FileEntry, String> {
-    project::rename_entry(&path, &new_name)
+async fn rename_entry(path: String, new_name: String) -> Result<FileEntry, String> {
+    run_blocking(move || project::rename_entry(&path, &new_name)).await?
 }
 
 #[tauri::command]
-fn delete_entry(path: String) -> Result<(), String> {
-    project::delete_entry(&path)
+async fn delete_entry(path: String) -> Result<(), String> {
+    run_blocking(move || project::delete_entry(&path)).await?
 }
 
 #[tauri::command]
-fn duplicate_entry(path: String) -> Result<FileEntry, String> {
-    project::duplicate_entry(&path)
+async fn duplicate_entry(path: String) -> Result<FileEntry, String> {
+    run_blocking(move || project::duplicate_entry(&path)).await?
 }
 
 #[tauri::command]
-fn copy_entry(src_path: String, dest_dir: String) -> Result<FileEntry, String> {
-    project::copy_entry_into(&src_path, &dest_dir)
+async fn copy_entry(src_path: String, dest_dir: String) -> Result<FileEntry, String> {
+    run_blocking(move || project::copy_entry_into(&src_path, &dest_dir)).await?
 }
 
 #[tauri::command]
-fn move_entry(src_path: String, dest_dir: String) -> Result<FileEntry, String> {
-    project::move_entry_into(&src_path, &dest_dir)
+async fn move_entry(src_path: String, dest_dir: String) -> Result<FileEntry, String> {
+    run_blocking(move || project::move_entry_into(&src_path, &dest_dir)).await?
 }
 
 // ════════════════════════════════════════════════
@@ -928,13 +965,17 @@ fn move_entry(src_path: String, dest_dir: String) -> Result<FileEntry, String> {
 // ════════════════════════════════════════════════
 
 #[tauri::command]
-fn read_file_text(project_path: String, rel_path: String) -> Result<FileContent, String> {
-    editor::read_file_text(&project_path, &rel_path)
+async fn read_file_text(project_path: String, rel_path: String) -> Result<FileContent, String> {
+    run_blocking(move || editor::read_file_text(&project_path, &rel_path)).await?
 }
 
 #[tauri::command]
-fn write_file_text(project_path: String, rel_path: String, content: String) -> Result<u64, String> {
-    editor::write_file_text(&project_path, &rel_path, &content)
+async fn write_file_text(
+    project_path: String,
+    rel_path: String,
+    content: String,
+) -> Result<u64, String> {
+    run_blocking(move || editor::write_file_text(&project_path, &rel_path, &content)).await?
 }
 
 #[tauri::command]
@@ -965,6 +1006,15 @@ async fn lsp_change_document(
     content: String,
 ) -> Result<LspStatus, String> {
     lsp::change_document(&state, &project_path, &rel_path, &content)
+}
+
+#[tauri::command]
+async fn lsp_close_document(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+) -> Result<(), String> {
+    lsp::close_document(&state, &project_path, &rel_path)
 }
 
 #[tauri::command]
@@ -1034,6 +1084,61 @@ async fn lsp_references(
 }
 
 #[tauri::command]
+async fn lsp_code_actions(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    range: LspRange,
+    diagnostics: Vec<LspDiagnostic>,
+) -> Result<Vec<LspCodeAction>, String> {
+    lsp::code_actions(&state, &project_path, &rel_path, range, diagnostics)
+}
+
+#[tauri::command]
+async fn lsp_resolve_code_action(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    action: serde_json::Value,
+) -> Result<LspWorkspaceEdit, String> {
+    lsp::resolve_code_action(&state, &project_path, &rel_path, action)
+}
+
+#[tauri::command]
+async fn lsp_prepare_rename(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    line: u64,
+    character: u64,
+) -> Result<Option<LspPrepareRename>, String> {
+    lsp::prepare_rename(&state, &project_path, &rel_path, line, character)
+}
+
+#[tauri::command]
+async fn lsp_rename(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    line: u64,
+    character: u64,
+    new_name: String,
+) -> Result<LspWorkspaceEdit, String> {
+    lsp::rename(&state, &project_path, &rel_path, line, character, &new_name)
+}
+
+#[tauri::command]
+async fn lsp_format_document(
+    state: State<'_, LspManager>,
+    project_path: String,
+    rel_path: String,
+    tab_size: u64,
+    insert_spaces: bool,
+) -> Result<LspWorkspaceEdit, String> {
+    lsp::format_document(&state, &project_path, &rel_path, tab_size, insert_spaces)
+}
+
+#[tauri::command]
 async fn lsp_diagnostics(
     state: State<'_, LspManager>,
     project_path: String,
@@ -1052,138 +1157,139 @@ async fn lsp_shutdown_project(state: State<'_, LspManager>, project_path: String
 // Git commands
 // ════════════════════════════════════════════════
 
+// All git commands shell out to a `git` subprocess (network-bound for
+// fetch/pull/push), so every one runs through run_blocking.
 #[tauri::command]
-fn get_git_status(project_path: String) -> Result<Vec<FileStatus>, String> {
-    git::get_status(&project_path)
+async fn get_git_status(project_path: String) -> Result<Vec<FileStatus>, String> {
+    run_blocking(move || git::get_status(&project_path)).await?
 }
 
 #[tauri::command]
-fn get_git_status_v2(project_path: String) -> Result<Vec<StatusEntry>, String> {
-    git::get_status_v2(&project_path)
+async fn get_git_status_v2(project_path: String) -> Result<Vec<StatusEntry>, String> {
+    run_blocking(move || git::get_status_v2(&project_path)).await?
 }
 
 #[tauri::command]
-fn get_sync_status(project_path: String) -> Result<SyncStatus, String> {
-    git::get_sync_status(&project_path)
+async fn get_sync_status(project_path: String) -> Result<SyncStatus, String> {
+    run_blocking(move || git::get_sync_status(&project_path)).await?
 }
 
 #[tauri::command]
-fn auto_commit(project_path: String, message: String) -> Result<CommitResult, String> {
-    git::auto_commit(&project_path, &message)
+async fn auto_commit(project_path: String, message: String) -> Result<CommitResult, String> {
+    run_blocking(move || git::auto_commit(&project_path, &message)).await?
 }
 
 #[tauri::command]
-fn ensure_work_branch(project_path: String, branch: String) -> Result<String, String> {
-    git::ensure_work_branch(&project_path, &branch)
+async fn ensure_work_branch(project_path: String, branch: String) -> Result<String, String> {
+    run_blocking(move || git::ensure_work_branch(&project_path, &branch)).await?
 }
 
 #[tauri::command]
-fn get_current_branch(project_path: String) -> Result<String, String> {
-    git::get_current_branch(&project_path)
+async fn get_current_branch(project_path: String) -> Result<String, String> {
+    run_blocking(move || git::get_current_branch(&project_path)).await?
 }
 
 #[tauri::command]
-fn get_recent_branches(project_path: String, limit: usize) -> Result<Vec<String>, String> {
-    git::get_recent_branches(&project_path, limit)
+async fn get_recent_branches(project_path: String, limit: usize) -> Result<Vec<String>, String> {
+    run_blocking(move || git::get_recent_branches(&project_path, limit)).await?
 }
 
 #[tauri::command]
-fn git_switch_branch(project_path: String, branch_name: String) -> Result<(), String> {
-    git::switch_branch(&project_path, &branch_name)
+async fn git_switch_branch(project_path: String, branch_name: String) -> Result<(), String> {
+    run_blocking(move || git::switch_branch(&project_path, &branch_name)).await?
 }
 
-
 #[tauri::command]
-fn get_git_log(
+async fn get_git_log(
     project_path: String,
     limit: u32,
     path: Option<String>,
 ) -> Result<Vec<CommitEntry>, String> {
-    git::get_log(&project_path, limit, path.as_deref())
+    run_blocking(move || git::get_log(&project_path, limit, path.as_deref())).await?
 }
 
 #[tauri::command]
-fn git_rollback(project_path: String, sha: String) -> Result<(), String> {
-    git::rollback(&project_path, &sha)
+async fn git_rollback(project_path: String, sha: String) -> Result<(), String> {
+    run_blocking(move || git::rollback(&project_path, &sha)).await?
 }
 
 #[tauri::command]
-fn rename_commit(project_path: String, sha: String, message: String) -> Result<(), String> {
-    git::rename_commit(&project_path, &sha, &message)
+async fn rename_commit(project_path: String, sha: String, message: String) -> Result<(), String> {
+    run_blocking(move || git::rename_commit(&project_path, &sha, &message)).await?
 }
 
 #[tauri::command]
-fn git_stage(project_path: String, paths: Vec<String>) -> Result<(), String> {
-    git::stage_paths(&project_path, &paths)
+async fn git_stage(project_path: String, paths: Vec<String>) -> Result<(), String> {
+    run_blocking(move || git::stage_paths(&project_path, &paths)).await?
 }
 
 #[tauri::command]
-fn git_unstage(project_path: String, paths: Vec<String>) -> Result<(), String> {
-    git::unstage_paths(&project_path, &paths)
+async fn git_unstage(project_path: String, paths: Vec<String>) -> Result<(), String> {
+    run_blocking(move || git::unstage_paths(&project_path, &paths)).await?
 }
 
 #[tauri::command]
-fn git_discard(
+async fn git_discard(
     project_path: String,
     tracked: Vec<String>,
     untracked: Vec<String>,
 ) -> Result<(), String> {
-    git::discard_paths(&project_path, &tracked, &untracked)
+    run_blocking(move || git::discard_paths(&project_path, &tracked, &untracked)).await?
 }
 
 #[tauri::command]
-fn git_commit(
+async fn git_commit(
     project_path: String,
     message: String,
     all: bool,
     amend: bool,
 ) -> Result<CommitResult, String> {
-    git::commit(&project_path, &message, all, amend)
+    run_blocking(move || git::commit(&project_path, &message, all, amend)).await?
 }
 
 #[tauri::command]
-fn git_stash_push(project_path: String, message: Option<String>) -> Result<(), String> {
-    git::stash_push(&project_path, message.as_deref())
+async fn git_stash_push(project_path: String, message: Option<String>) -> Result<(), String> {
+    run_blocking(move || git::stash_push(&project_path, message.as_deref())).await?
 }
 
 #[tauri::command]
-fn git_stash_pop(project_path: String) -> Result<(), String> {
-    git::stash_pop(&project_path)
+async fn git_stash_pop(project_path: String) -> Result<(), String> {
+    run_blocking(move || git::stash_pop(&project_path)).await?
 }
 
 #[tauri::command]
-fn git_fetch(project_path: String) -> Result<(), String> {
-    git::fetch(&project_path)
+async fn git_fetch(project_path: String) -> Result<(), String> {
+    run_blocking(move || git::fetch(&project_path)).await?
 }
 
 #[tauri::command]
-fn git_pull(project_path: String) -> Result<PullOutcome, String> {
-    git::pull(&project_path)
+async fn git_pull(project_path: String) -> Result<PullOutcome, String> {
+    run_blocking(move || git::pull(&project_path)).await?
 }
 
 #[tauri::command]
-fn git_push(project_path: String) -> Result<String, String> {
-    git::push(&project_path)
+async fn git_push(project_path: String) -> Result<String, String> {
+    run_blocking(move || git::push(&project_path)).await?
 }
 
 #[tauri::command]
-fn git_checkout_commit(project_path: String, sha: String) -> Result<(), String> {
-    git::checkout_commit(&project_path, &sha)
+async fn git_checkout_commit(project_path: String, sha: String) -> Result<(), String> {
+    run_blocking(move || git::checkout_commit(&project_path, &sha)).await?
 }
 
 #[tauri::command]
-fn git_checkout_previous(project_path: String) -> Result<(), String> {
-    git::checkout_previous(&project_path)
+async fn git_checkout_previous(project_path: String) -> Result<(), String> {
+    run_blocking(move || git::checkout_previous(&project_path)).await?
 }
 
 #[tauri::command]
-fn commits_ahead_of_remote(project_path: String) -> Result<Vec<CommitEntry>, String> {
-    git::commits_ahead_of_remote(&project_path)
+async fn commits_ahead_of_remote(project_path: String) -> Result<Vec<CommitEntry>, String> {
+    run_blocking(move || git::commits_ahead_of_remote(&project_path)).await?
 }
 
 #[tauri::command]
-fn squash_unpushed(project_path: String, message: String) -> Result<(), String> {
-    git::squash_unpushed(&project_path, &message)
+async fn squash_unpushed(project_path: String, message: String) -> Result<(), String> {
+    run_blocking(move || git::squash_unpushed(&project_path, &message)).await?
 }
 
 /// Ask an installed agent with a headless print mode to summarize the
@@ -1226,16 +1332,20 @@ fn get_tool_catalog() -> Vec<ToolInfo> {
 }
 
 #[tauri::command]
-fn install_tool(
+async fn install_tool(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     tool_id: String,
     project_path: String,
 ) -> Result<String, String> {
     let cmd = tools::install_command(&tool_id)
         .ok_or_else(|| format!("No install command found for tool: {tool_id}"))?;
     let label = format!("install:{tool_id}");
-    let (session_id, rx) = pty::spawn_shell_command(&state, &label, &cmd, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, &label, &cmd, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
@@ -1245,157 +1355,188 @@ fn install_tool(
 // ════════════════════════════════════════════════
 
 #[tauri::command]
-fn detect_run_targets(project_path: String) -> Result<Vec<RunTarget>, String> {
-    runner::detect_run_targets(&project_path)
+async fn detect_run_targets(project_path: String) -> Result<Vec<RunTarget>, String> {
+    run_blocking(move || runner::detect_run_targets(&project_path)).await?
 }
 
 #[tauri::command]
-fn detect_android_environment(project_path: String) -> Result<AndroidEnvironment, String> {
-    runner::detect_android_environment(&project_path)
+async fn detect_android_environment(project_path: String) -> Result<AndroidEnvironment, String> {
+    run_blocking(move || runner::detect_android_environment(&project_path)).await?
 }
 
 #[tauri::command]
-fn detect_ios_environment(project_path: String) -> Result<IosEnvironment, String> {
-    runner::detect_ios_environment(&project_path)
+async fn detect_ios_environment(project_path: String) -> Result<IosEnvironment, String> {
+    run_blocking(move || runner::detect_ios_environment(&project_path)).await?
 }
 
 #[tauri::command]
-fn run_project(
+async fn run_project(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     target_id: Option<String>,
     android_serial: Option<String>,
     android_avd: Option<String>,
 ) -> Result<String, String> {
-    let target = runner::resolve_run_command(
-        &project_path,
-        target_id.as_deref(),
-        android_serial.as_deref(),
-        android_avd.as_deref(),
-    )?;
-    let url_action = if runner::should_auto_open_browser(&target) {
-        UrlAction::CaptureAndOpen
-    } else {
-        UrlAction::Capture
-    };
-    let label = format!("run:{}", target.kind);
-    let (session_id, rx) =
-        pty::spawn_shell_command(&state, &label, &target.command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx, url_action) = run_blocking(move || {
+        let target = runner::resolve_run_command(
+            &project_path,
+            target_id.as_deref(),
+            android_serial.as_deref(),
+            android_avd.as_deref(),
+        )?;
+        let url_action = if runner::should_auto_open_browser(&target) {
+            UrlAction::CaptureAndOpen
+        } else {
+            UrlAction::Capture
+        };
+        let label = format!("run:{}", target.kind);
+        let manager = spawn_app.state::<PtyManager>();
+        let (session_id, rx) =
+            pty::spawn_shell_command(&manager, &label, &target.command, &project_path)?;
+        Ok::<_, String>((session_id, rx, url_action))
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, url_action);
     Ok(session_id)
 }
 
 #[tauri::command]
-fn detect_validation_targets(project_path: String) -> Result<Vec<ValidationTarget>, String> {
-    runner::detect_validation_targets(&project_path)
+async fn detect_validation_targets(project_path: String) -> Result<Vec<ValidationTarget>, String> {
+    run_blocking(move || runner::detect_validation_targets(&project_path)).await?
 }
 
 #[tauri::command]
-fn validate_project(
+async fn validate_project(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     target_id: Option<String>,
 ) -> Result<String, String> {
-    let target = runner::resolve_validation_command(&project_path, target_id.as_deref())?;
-    let label = format!("validate:{}", target.kind);
-    let (session_id, rx) =
-        pty::spawn_shell_command(&state, &label, &target.command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let target = runner::resolve_validation_command(&project_path, target_id.as_deref())?;
+        let label = format!("validate:{}", target.kind);
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, &label, &target.command, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
 #[tauri::command]
-fn start_android_scrcpy(
+async fn start_android_scrcpy(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     serial: Option<String>,
 ) -> Result<String, String> {
-    let command = runner::resolve_android_scrcpy_command(&project_path, serial.as_deref())?;
-    let (session_id, rx) =
-        pty::spawn_shell_command(&state, "android:scrcpy", &command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let command = runner::resolve_android_scrcpy_command(&project_path, serial.as_deref())?;
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, "android:scrcpy", &command, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
 #[tauri::command]
-fn start_android_logcat(
+async fn start_android_logcat(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     serial: Option<String>,
 ) -> Result<String, String> {
-    let command = runner::resolve_android_logcat_command(&project_path, serial.as_deref())?;
-    let (session_id, rx) =
-        pty::spawn_shell_command(&state, "android:logcat", &command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let command = runner::resolve_android_logcat_command(&project_path, serial.as_deref())?;
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, "android:logcat", &command, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
 #[tauri::command]
-fn boot_android_emulator(
+async fn boot_android_emulator(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     avd: String,
     cold: Option<bool>,
     wipe: Option<bool>,
 ) -> Result<String, String> {
-    let command = runner::resolve_android_boot_avd_command(
-        &project_path,
-        &avd,
-        cold.unwrap_or(false),
-        wipe.unwrap_or(false),
-    )?;
-    let (session_id, rx) =
-        pty::spawn_shell_command(&state, "android:emulator", &command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let command = runner::resolve_android_boot_avd_command(
+            &project_path,
+            &avd,
+            cold.unwrap_or(false),
+            wipe.unwrap_or(false),
+        )?;
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, "android:emulator", &command, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
 #[tauri::command]
-fn run_android_device_action(
+async fn run_android_device_action(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     action: String,
     serial: Option<String>,
 ) -> Result<String, String> {
-    let command =
-        runner::resolve_android_device_action_command(&project_path, serial.as_deref(), &action)?;
-    let label = format!("android:{action}");
-    let (session_id, rx) = pty::spawn_shell_command(&state, &label, &command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let command = runner::resolve_android_device_action_command(
+            &project_path,
+            serial.as_deref(),
+            &action,
+        )?;
+        let label = format!("android:{action}");
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, &label, &command, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
 #[tauri::command]
-fn send_android_deeplink(
+async fn send_android_deeplink(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     uri: String,
     serial: Option<String>,
 ) -> Result<String, String> {
-    let command = runner::resolve_android_deeplink_command(&project_path, serial.as_deref(), &uri)?;
-    let (session_id, rx) =
-        pty::spawn_shell_command(&state, "android:deeplink", &command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let command =
+            runner::resolve_android_deeplink_command(&project_path, serial.as_deref(), &uri)?;
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, "android:deeplink", &command, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
 
 #[tauri::command]
-fn open_ios_simulator(
+async fn open_ios_simulator(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     udid: Option<String>,
 ) -> Result<String, String> {
-    let command = runner::resolve_ios_simulator_command(&project_path, udid.as_deref())?;
-    let (session_id, rx) =
-        pty::spawn_shell_command(&state, "ios:simulator", &command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let command = runner::resolve_ios_simulator_command(&project_path, udid.as_deref())?;
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, "ios:simulator", &command, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
@@ -1407,29 +1548,36 @@ fn open_ios_simulator(
 /// Detect available UI previews for the file open in the editor: native
 /// annotations, matching snapshot images, live tooling, and record actions.
 #[tauri::command]
-fn detect_preview(project_path: String, rel_path: String) -> Result<preview::PreviewInfo, String> {
-    preview::detect_preview(&project_path, &rel_path)
+async fn detect_preview(
+    project_path: String,
+    rel_path: String,
+) -> Result<preview::PreviewInfo, String> {
+    run_blocking(move || preview::detect_preview(&project_path, &rel_path)).await?
 }
 
 /// Read a snapshot/screenshot image as a `data:` URL for `<img>` display.
 #[tauri::command]
-fn read_preview_image(project_path: String, rel_path: String) -> Result<String, String> {
-    preview::read_preview_image(&project_path, &rel_path)
+async fn read_preview_image(project_path: String, rel_path: String) -> Result<String, String> {
+    run_blocking(move || preview::read_preview_image(&project_path, &rel_path)).await?
 }
 
 /// Start a live preview or snapshot-record process (flutter widget preview,
 /// Storybook, gradle record task, …) in a PTY session; returns the session id.
 #[tauri::command]
-fn start_preview_session(
+async fn start_preview_session(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     rel_path: String,
     preview_id: String,
 ) -> Result<String, String> {
-    let (label, command) = preview::resolve_preview_command(&project_path, &rel_path, &preview_id)?;
-    let (session_id, rx) =
-        pty::spawn_shell_command(&state, &format!("preview:{label}"), &command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let (label, command) =
+            preview::resolve_preview_command(&project_path, &rel_path, &preview_id)?;
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, &format!("preview:{label}"), &command, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Capture);
     Ok(session_id)
 }
@@ -1448,31 +1596,36 @@ fn get_session_url(state: State<'_, SessionUrls>, session_id: String) -> Option<
 /// `rev=None` → working-tree vs HEAD; `rev=Some("sha~1..sha")` → commit diff.
 /// `path` optionally scopes to a single file (relative to project root).
 #[tauri::command]
-fn get_review_diff(
+async fn get_review_diff(
     project_path: String,
     rev: Option<String>,
     path: Option<String>,
     mode: Option<String>,
 ) -> Result<Vec<FileDiff>, String> {
-    review::get_review_diff(&project_path, rev, path, mode)
+    run_blocking(move || review::get_review_diff(&project_path, rev, path, mode)).await?
 }
 
 // ════════════════════════════════════════════════
 // Handoff commands
 // ════════════════════════════════════════════════
 
+// The handoff parses session stores, shells out to git, writes handoff files,
+// and forks a PTY — all blocking work that must stay off the main thread.
 #[tauri::command]
-fn continue_agent(
+async fn continue_agent(
     app: tauri::AppHandle,
-    state: State<'_, PtyManager>,
     project_path: String,
     from_agent: String,
     to_agent: String,
     yolo: bool,
 ) -> Result<String, String> {
-    let launch = handoff::continue_launch(&project_path, &from_agent, &to_agent, yolo)?;
-    let (session_id, rx) =
-        pty::spawn_shell_command(&state, &launch.label, &launch.command, &project_path)?;
+    let spawn_app = app.clone();
+    let (session_id, rx) = run_blocking(move || {
+        let launch = handoff::continue_launch(&project_path, &from_agent, &to_agent, yolo)?;
+        let manager = spawn_app.state::<PtyManager>();
+        pty::spawn_shell_command(&manager, &launch.label, &launch.command, &project_path)
+    })
+    .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
 }
@@ -1484,136 +1637,51 @@ fn sync_native_menu_state(app: tauri::AppHandle, state: NativeMenuState) -> Resu
 }
 
 // ════════════════════════════════════════════════
-// Window management
+// Project tabs (single-window session)
 // ════════════════════════════════════════════════
 
-#[derive(Clone, Serialize)]
-struct OpenWindowOutcome {
-    focused_existing: bool,
-    label: String,
-}
-
-fn focus_window(win: &tauri::WebviewWindow) {
-    let _ = win.unminimize();
-    let _ = win.show();
-    let _ = win.set_focus();
-}
-
+/// Load the persisted single-window session (every open project tab plus the
+/// active id). `None` on a true first run (no `session.json` and no migratable
+/// legacy `windows.json`); the frontend then falls back to the legacy
+/// single-slot localStorage workspace.
 #[tauri::command]
-fn get_window_init_state(
-    window: tauri::WebviewWindow,
-    registry: State<'_, windows::WindowRegistry>,
-) -> Option<windows::WindowEntry> {
-    registry.0.lock().unwrap().get(window.label()).cloned()
+fn get_session_tabs() -> Option<session::SessionState> {
+    session::load_session()
 }
 
+/// Persist the full session (every project tab + active id). Always writes:
+/// the frontend debounces these calls and flushes the final state from
+/// `beforeunload`, so a quit-time write must land, not be skipped.
 #[tauri::command]
-fn update_window_workspace(
-    window: tauri::WebviewWindow,
-    registry: State<'_, windows::WindowRegistry>,
-    quitting: State<'_, Quitting>,
-    project_path: Option<String>,
-    tabs: Vec<windows::PersistedTab>,
-    active_index: usize,
+fn update_session_tabs(
+    registry: State<'_, session::SessionRegistry>,
+    state: session::SessionState,
 ) -> Result<(), String> {
-    let label = window.label().to_string();
-    {
-        let mut map = registry.0.lock().unwrap();
-        map.insert(
-            label.clone(),
-            windows::WindowEntry {
-                label,
-                project_path,
-                tabs,
-                active_index,
-            },
-        );
-    }
-    if !quitting.0.load(std::sync::atomic::Ordering::SeqCst) {
-        windows::persist(&registry);
-    }
+    let mut guard = registry.0.lock().unwrap();
+    *guard = state;
+    session::persist_session(&guard);
     Ok(())
 }
 
-/// Open `path` in a dedicated window. If it's already open elsewhere, that
-/// window is focused instead of creating a duplicate.
+/// Tear down a project tab: kill its PTY sessions and shut down its language
+/// servers. Called by the frontend when a project tab is closed.
 #[tauri::command]
-async fn open_project_window(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<OpenWindowOutcome, String> {
-    let registry = app.state::<windows::WindowRegistry>();
-    if let Some(existing_label) = windows::window_for_project(&registry, &path, None) {
-        if let Some(win) = app.get_webview_window(&existing_label) {
-            focus_window(&win);
-            return Ok(OpenWindowOutcome {
-                focused_existing: true,
-                label: existing_label,
-            });
+fn close_project_tab(app: tauri::AppHandle, project_path: String) -> Result<(), String> {
+    let pty = app.state::<PtyManager>();
+    let killed = pty::kill_sessions_for_project(&pty, &project_path);
+    if !killed.is_empty() {
+        let urls_state = app.state::<SessionUrls>();
+        let pending_state = app.state::<PendingBridges>();
+        let mut urls = urls_state.0.lock().unwrap();
+        let mut pending = pending_state.0.lock().unwrap();
+        for id in &killed {
+            urls.remove(id);
+            pending.remove(id);
         }
     }
-
-    let label = windows::new_window_label();
-    {
-        let mut map = registry.0.lock().unwrap();
-        map.insert(
-            label.clone(),
-            windows::WindowEntry {
-                label: label.clone(),
-                project_path: Some(path),
-                tabs: vec![],
-                active_index: 0,
-            },
-        );
-    }
-    windows::persist(&registry);
-    windows::create_project_window(&app, &label).map_err(|e| e.to_string())?;
-    Ok(OpenWindowOutcome {
-        focused_existing: false,
-        label,
-    })
-}
-
-/// Open a fresh, project-less window (shows the project picker).
-#[tauri::command]
-async fn open_new_window(app: tauri::AppHandle) -> Result<String, String> {
-    let registry = app.state::<windows::WindowRegistry>();
-    let label = windows::new_window_label();
-    {
-        let mut map = registry.0.lock().unwrap();
-        map.insert(
-            label.clone(),
-            windows::WindowEntry {
-                label: label.clone(),
-                project_path: None,
-                tabs: vec![],
-                active_index: 0,
-            },
-        );
-    }
-    windows::persist(&registry);
-    windows::create_project_window(&app, &label).map_err(|e| e.to_string())?;
-    Ok(label)
-}
-
-/// If `path` is already open in another window, focus it and return true.
-/// Backs the dedup guard on in-window "open project" flows (picker, recents,
-/// folder pick, menu) so a project never ends up open twice.
-#[tauri::command]
-fn focus_project_window(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    registry: State<'_, windows::WindowRegistry>,
-    path: String,
-) -> bool {
-    let Some(label) = windows::window_for_project(&registry, &path, Some(window.label())) else {
-        return false;
-    };
-    let Some(win) = app.get_webview_window(&label) else {
-        return false;
-    };
-    focus_window(&win);
-    true
+    let lsp = app.state::<LspManager>();
+    lsp::shutdown_project(&lsp, &project_path);
+    Ok(())
 }
 
 // ════════════════════════════════════════════════
@@ -1983,98 +2051,52 @@ pub fn run() {
         .manage(LspManager::new())
         .manage(SessionUrls::default())
         .manage(PendingBridges::default())
-        .manage(windows::WindowRegistry::new())
-        .manage(FocusedWindow::default())
-        .manage(Quitting::default())
+        .manage(session::SessionRegistry::new())
         .setup(|app| {
             let handle = app.handle();
             if let Ok(menu) = build_app_menu(handle) {
                 let _ = app.set_menu(menu);
             }
 
-            // Restore every window that was open at last quit (see
-            // `windows.rs`). If `windows.json` never existed, leave the
-            // registry empty for "main" — its `get_window_init_state` pull
-            // then returns `None`, signalling the frontend's one-time
-            // legacy-localStorage migration path.
-            if let Some(entries) = windows::load_entries() {
-                if !entries.is_empty() {
-                    let registry = app.state::<windows::WindowRegistry>();
-                    let mut iter = entries.into_iter();
-                    if let Some(mut first) = iter.next() {
-                        first.label = "main".to_string();
-                        registry.0.lock().unwrap().insert(first.label.clone(), first);
-                    }
-                    for mut entry in iter {
-                        entry.label = windows::new_window_label();
-                        registry.0.lock().unwrap().insert(entry.label.clone(), entry.clone());
-                        if let Err(e) = windows::create_project_window(handle, &entry.label) {
-                            eprintln!("windows: failed to recreate window {}: {e}", entry.label);
-                        }
-                    }
-                }
-            }
-
+            // Session restore is driven by the frontend, which calls
+            // `get_session_tabs` on mount and rehydrates every open project
+            // tab into the single window. Here we just arm the main-window
+            // show fallback (the frontend's own `win.show()` is the fast path).
             if let Some(win) = app.get_webview_window("main") {
+                let w = win.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(3));
-                    let _ = win.show();
+                    let _ = w.show();
                 });
             }
             Ok(())
         })
         .on_window_event(|window, event| match event {
-            tauri::WindowEvent::Focused(true) => {
-                let app = window.app_handle();
-                *app.state::<FocusedWindow>().0.lock().unwrap() = Some(window.label().to_string());
-            }
             tauri::WindowEvent::Destroyed => {
+                // The single window is going away — the app is quitting. Kill
+                // every live PTY and shut down every LSP so no orphans survive.
                 let app = window.app_handle();
-                let label = window.label().to_string();
-                let quitting = app
-                    .state::<Quitting>()
-                    .0
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                let registry = app.state::<windows::WindowRegistry>();
-                let (removed, remaining) = {
-                    let mut map = registry.0.lock().unwrap();
-                    let removed = map.remove(&label);
-                    (removed, map.len())
-                };
-                if !quitting && remaining > 0 {
-                    windows::persist(&registry);
-                }
-                if let Some(project_path) = removed.and_then(|e| e.project_path) {
-                    let pty = app.state::<PtyManager>();
-                    let killed = pty::kill_sessions_for_project(&pty, &project_path);
-                    if !killed.is_empty() {
-                        let urls_state = app.state::<SessionUrls>();
-                        let pending_state = app.state::<PendingBridges>();
-                        let mut urls = urls_state.0.lock().unwrap();
-                        let mut pending = pending_state.0.lock().unwrap();
-                        for id in &killed {
-                            urls.remove(id);
-                            pending.remove(id);
-                        }
+                let pty = app.state::<PtyManager>();
+                let killed = pty::kill_all_sessions(&pty);
+                if !killed.is_empty() {
+                    let urls_state = app.state::<SessionUrls>();
+                    let pending_state = app.state::<PendingBridges>();
+                    let mut urls = urls_state.0.lock().unwrap();
+                    let mut pending = pending_state.0.lock().unwrap();
+                    for id in &killed {
+                        urls.remove(id);
+                        pending.remove(id);
                     }
-                    let lsp = app.state::<LspManager>();
-                    lsp::shutdown_project(&lsp, &project_path);
                 }
+                let lsp = app.state::<LspManager>();
+                lsp::shutdown_all(&lsp);
             }
             _ => {}
         })
         .on_menu_event(|app, event| {
             let id = event.id.as_ref();
             if id.starts_with("menu-") {
-                let focused_label = app.state::<FocusedWindow>().0.lock().unwrap().clone();
-                match focused_label {
-                    Some(label) => {
-                        let _ = app.emit_to(&label, "native-menu-command", id.to_string());
-                    }
-                    None => {
-                        let _ = app.emit("native-menu-command", id.to_string());
-                    }
-                }
+                let _ = app.emit("native-menu-command", id.to_string());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -2110,12 +2132,18 @@ pub fn run() {
             lsp_status,
             lsp_open_document,
             lsp_change_document,
+            lsp_close_document,
             lsp_completion,
             lsp_completion_resolve,
             lsp_signature_help,
             lsp_hover,
             lsp_definition,
             lsp_references,
+            lsp_code_actions,
+            lsp_resolve_code_action,
+            lsp_prepare_rename,
+            lsp_rename,
+            lsp_format_document,
             lsp_diagnostics,
             lsp_shutdown_project,
             // Git
@@ -2170,31 +2198,18 @@ pub fn run() {
             // Handoff
             continue_agent,
             // Dialog
+            create_project,
             pick_project_folder,
             pick_prompt_file,
             trigger_haptic,
             // Menu
             sync_native_menu_state,
-            // Windows
-            get_window_init_state,
-            update_window_workspace,
-            open_project_window,
-            open_new_window,
-            focus_project_window,
+            // Project tabs (single-window session)
+            get_session_tabs,
+            update_session_tabs,
+            close_project_tab,
         ])
         .build(tauri::generate_context!())
         .expect("error while building FlipFlopper")
-        .run(|app_handle, event| {
-            // Fires before windows are destroyed, so the Destroyed handler's
-            // "skip rewrite when quitting" check always sees this in time —
-            // it's what lets `windows.json` retain every open window across
-            // a Cmd+Q relaunch instead of being trimmed down as each window
-            // closes.
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                app_handle
-                    .state::<Quitting>()
-                    .0
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        });
+        .run(|_, _| {});
 }

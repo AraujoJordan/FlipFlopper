@@ -1,4 +1,4 @@
-import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
+import { Component, For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import {
   bootAndroidEmulator,
   detectAndroidEnvironment,
@@ -107,6 +107,11 @@ const RunButton: Component = () => {
   const projectPath = () => store.currentProject?.path ?? "";
   const running = () => store.runSessionId !== null;
   const busy = () => detecting() || starting();
+  // Memoize platform presence so a target refresh with the same platforms does
+  // not launch duplicate adb/xcrun probes. Android and iOS still load in
+  // parallel and update their sections independently.
+  const hasAndroidTargets = createMemo(() => targets().some(isAndroidTarget));
+  const hasIosTargets = createMemo(() => targets().some(isIosTarget));
 
   const preferredTarget = () => {
     const list = targets();
@@ -172,25 +177,20 @@ const RunButton: Component = () => {
 
   createEffect(() => {
     const path = projectPath();
-    if (path && menuOpen()) void loadTargets(path);
-  });
-
-  createEffect(() => {
-    const path = projectPath();
-    const hasIosTargets = targets().some(isIosTarget);
-    if (path && menuOpen() && hasIosTargets) {
+    const hasIos = hasIosTargets();
+    if (path && menuOpen() && hasIos) {
       void loadIosEnvironment(path);
-    } else if (!path || !hasIosTargets) {
+    } else if (!path || !hasIos) {
       setIosEnv(null);
     }
   });
 
   createEffect(() => {
     const path = projectPath();
-    const hasAndroidTargets = targets().some(isAndroidTarget);
-    if (path && menuOpen() && hasAndroidTargets) {
+    const hasAndroid = hasAndroidTargets();
+    if (path && menuOpen() && hasAndroid) {
       void loadAndroidEnvironment(path);
-    } else if (!path || !hasAndroidTargets) {
+    } else if (!path || !hasAndroid) {
       setAndroidEnv(null);
     }
   });
@@ -488,9 +488,16 @@ const RunButton: Component = () => {
           class="hover-tint press"
           onclick={(e) => {
             e.stopPropagation();
-            if (projectPath() && targets().length > 0 && !running()) setMenuOpen((open) => !open);
+            const path = projectPath();
+            if (!path || running()) return;
+            const open = !menuOpen();
+            setMenuOpen(open);
+            // Refresh on open, unless project discovery is already in flight.
+            // Device sections begin loading from the current target set and do
+            // not wait for this refresh to finish.
+            if (open && !detecting()) void loadTargets(path);
           }}
-          disabled={!projectPath() || targets().length === 0 || running() || starting()}
+          disabled={!projectPath() || running() || starting()}
           title="Run target"
           aria-label="Choose run target"
           style={{
@@ -499,10 +506,10 @@ const RunButton: Component = () => {
             display: "flex",
             "align-items": "center",
             "justify-content": "center",
-            color: targets().length > 0 && !running() ? "var(--fg-subtle)" : "var(--fg-faint)",
+            color: projectPath() && !running() ? "var(--fg-subtle)" : "var(--fg-faint)",
             border: "0",
             "border-left": "1px solid var(--border-muted)",
-            cursor: projectPath() && targets().length > 0 && !running() ? "pointer" : "default",
+            cursor: projectPath() && !running() && !starting() ? "pointer" : "default",
           }}
         >
           <ChevronIcon open={menuOpen()} />
@@ -511,7 +518,7 @@ const RunButton: Component = () => {
 
       <Menu open={menuOpen()} onClose={() => setMenuOpen(false)} anchorRef={toggleRef} align="right" width={360}>
         <MenuLabel>Run project</MenuLabel>
-        <Show when={targets().some(isAndroidTarget) && androidStatus()}>
+        <Show when={hasAndroidTargets() && androidStatus()}>
           {(status) => (
             <>
               <div style={{
@@ -523,18 +530,23 @@ const RunButton: Component = () => {
                   ? "none"
                   : "1px solid var(--border-muted)",
               }}>
-                <span style={{
-                  width: "7px",
-                  height: "7px",
-                  "border-radius": "50%",
-                  "margin-top": "5px",
-                  background: status().tone === "ready"
-                    ? "var(--status-add)"
-                    : status().tone === "error"
-                      ? "var(--status-del)"
-                      : "var(--fg-faint)",
-                  flex: "0 0 auto",
-                }} />
+                <Show
+                  when={!androidEnvLoading()}
+                  fallback={<Spinner size={11} color="var(--fg-subtle)" />}
+                >
+                  <span style={{
+                    width: "7px",
+                    height: "7px",
+                    "border-radius": "50%",
+                    "margin-top": "5px",
+                    background: status().tone === "ready"
+                      ? "var(--status-add)"
+                      : status().tone === "error"
+                        ? "var(--status-del)"
+                        : "var(--fg-faint)",
+                    flex: "0 0 auto",
+                  }} />
+                </Show>
                 <div style={{ "min-width": 0, flex: "1" }}>
                   <div style={{ "font-size": "11.5px", color: "var(--fg-default)", "font-weight": "500" }}>
                     {status().title}
@@ -669,7 +681,7 @@ const RunButton: Component = () => {
             </>
           )}
         </Show>
-        <Show when={targets().some(isIosTarget) && iosStatus()}>
+        <Show when={hasIosTargets() && iosStatus()}>
           {(status) => (
             <div style={{
               display: "flex",
@@ -678,18 +690,23 @@ const RunButton: Component = () => {
               padding: "8px 10px",
               "border-bottom": "1px solid var(--border-muted)",
             }}>
-              <span style={{
-                width: "7px",
-                height: "7px",
-                "border-radius": "50%",
-                "margin-top": "5px",
-                background: status().tone === "ready"
-                  ? "var(--status-add)"
-                  : status().tone === "error"
-                    ? "var(--status-del)"
-                    : "var(--fg-faint)",
-                flex: "0 0 auto",
-              }} />
+              <Show
+                when={!iosEnvLoading()}
+                fallback={<Spinner size={11} color="var(--fg-subtle)" />}
+              >
+                <span style={{
+                  width: "7px",
+                  height: "7px",
+                  "border-radius": "50%",
+                  "margin-top": "5px",
+                  background: status().tone === "ready"
+                    ? "var(--status-add)"
+                    : status().tone === "error"
+                      ? "var(--status-del)"
+                      : "var(--fg-faint)",
+                  flex: "0 0 auto",
+                }} />
+              </Show>
               <div style={{ "min-width": 0, flex: "1" }}>
                 <div style={{ "font-size": "11.5px", color: "var(--fg-default)", "font-weight": "500" }}>
                   {status().title}
@@ -795,7 +812,7 @@ const RunButton: Component = () => {
             "font-size": "11px",
           }}>
             <Spinner size={12} />
-            Detecting
+            {targets().length > 0 ? "Refreshing run targets…" : "Discovering run targets…"}
           </div>
         </Show>
       </Menu>

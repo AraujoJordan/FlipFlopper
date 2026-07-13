@@ -231,11 +231,11 @@ pub fn kill_session(manager: &PtyManager, session_id: &str) -> Result<(), String
     Ok(())
 }
 
-/// Kill every live session belonging to `project_path` (used when the window
-/// hosting that project closes). Same direct `child.kill()` semantics as
-/// `kill_session` — dropping the master FD alone is not enough. Returns the
-/// ids of the sessions that were killed, so callers can purge them from other
-/// session-keyed maps (`SessionUrls`, `PendingBridges`).
+/// Kill every live session belonging to `project_path` (used when a project
+/// tab closes). Same direct `child.kill()` semantics as `kill_session` —
+/// dropping the master FD alone is not enough. Returns the ids of the sessions
+/// that were killed, so callers can purge them from other session-keyed maps
+/// (`SessionUrls`, `PendingBridges`).
 pub fn kill_sessions_for_project(manager: &PtyManager, project_path: &str) -> Vec<String> {
     let mut sessions = manager.sessions.lock().unwrap();
     let ids: Vec<String> = sessions
@@ -243,6 +243,19 @@ pub fn kill_sessions_for_project(manager: &PtyManager, project_path: &str) -> Ve
         .filter(|(_, s)| s.project_path == project_path)
         .map(|(id, _)| id.clone())
         .collect();
+    for id in &ids {
+        if let Some(mut session) = sessions.remove(id) {
+            let _ = session.child.kill();
+        }
+    }
+    ids
+}
+
+/// Kill every live PTY session (used on app quit). Returns the ids killed so
+/// callers can purge session-keyed maps.
+pub fn kill_all_sessions(manager: &PtyManager) -> Vec<String> {
+    let mut sessions = manager.sessions.lock().unwrap();
+    let ids: Vec<String> = sessions.keys().cloned().collect();
     for id in &ids {
         if let Some(mut session) = sessions.remove(id) {
             let _ = session.child.kill();

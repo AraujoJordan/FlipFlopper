@@ -1,10 +1,13 @@
-import { Component, Show, createSignal } from "solid-js";
+import { Component, Show, createEffect, createSignal } from "solid-js";
 import { store, toggleAutoToggleSidebars } from "../lib/store";
 import {
   getIdleTimeoutMinutes, setIdleTimeoutMinutes,
   MIN_IDLE_TIMEOUT_MINUTES, MAX_IDLE_TIMEOUT_MINUTES,
 } from "../lib/settings";
 import { Checkbox, Input } from "./ui";
+import { readLegacyBool, readPref, writePref } from "../lib/appPrefs";
+
+const FORMAT_ON_SAVE_KEY = "flipflopper:format-on-save";
 
 /** Settings modal. Deliberately scoped to a handful of genuinely user-facing
  *  preferences rather than every localStorage-backed key in store.ts — most
@@ -14,6 +17,23 @@ import { Checkbox, Input } from "./ui";
  *  flow in YoloButton that this panel shouldn't bypass. */
 const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props) => {
   const [idleMinutes, setIdleMinutesLocal] = createSignal(getIdleTimeoutMinutes());
+  const [formatOnSave, setFormatOnSave] = createSignal(false);
+
+  // Defer the pref read to the first open instead of app boot.
+  let formatOnSaveLoaded = false;
+  createEffect(() => {
+    if (!props.open || formatOnSaveLoaded) return;
+    formatOnSaveLoaded = true;
+    void readPref(FORMAT_ON_SAVE_KEY, false, () => readLegacyBool(FORMAT_ON_SAVE_KEY, false))
+      .then(setFormatOnSave);
+  });
+
+  function toggleFormatOnSave() {
+    const enabled = !formatOnSave();
+    setFormatOnSave(enabled);
+    writePref(FORMAT_ON_SAVE_KEY, enabled);
+    window.dispatchEvent(new CustomEvent("flipflopper:format-on-save", { detail: enabled }));
+  }
 
   function commitIdleMinutes(raw: string) {
     const n = Number(raw);
@@ -85,6 +105,17 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
               />
               <div style={{ "font-size": "11px", color: "var(--fg-subtle)", "margin-left": "22px", "margin-top": "3px" }}>
                 Show or hide the explorer and git panel automatically based on the active workspace mode.
+              </div>
+            </div>
+
+            <div>
+              <Checkbox
+                checked={formatOnSave()}
+                onChange={toggleFormatOnSave}
+                label="Format code on save"
+              />
+              <div style={{ "font-size": "11px", color: "var(--fg-subtle)", "margin-left": "22px", "margin-top": "3px" }}>
+                Ask the active language server to format supported files before saving.
               </div>
             </div>
 

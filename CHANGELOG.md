@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.0 - 2026-07-13
+
+### Added
+
+- Added single-window project tabs, replacing multi-window support: opening a project now opens (or switches to) a tab in the same window instead of a new OS window, with a tab strip beneath the title bar once more than one project is open. Every open project's agents, file explorer, editor tabs, terminals, and git view keep running in the background; switching tabs restores that project's full workspace snapshot, and a live xterm instance cache keeps each terminal's scrollback and output intact while its project is backgrounded, so nothing resets or drops output while you're looking elsewhere. `Cmd/Ctrl+Shift+]` and `Cmd/Ctrl+Shift+[` cycle to the next/previous project tab. Projects restored from a previous session spawn their agents lazily on first visit instead of all at launch, and existing `windows.json` multi-window layouts migrate automatically to the new `session.json` format on first launch.
+- Added a guided "New Project" wizard (title-bar "+" button): pick a project category (mobile, web, backend, 2D/3D game, desktop, or CLI, or go custom), a stack, and relevant details, then a name and parent folder. FlipFlopper creates the folder and seeds the prompt composer with a structured project brief for the agent to build from.
+- Added capability-driven editor IntelliSense to the language-server integration: quick fixes and code actions (with resolve), multi-file symbol rename (with prepare-rename validation), and manual "Format document" (Alt+Shift+F), plus an opt-in "Format code on save" setting. Completions now carry additional text edits, snippet insertion, and command metadata from the language server instead of plain text-only completions.
+
+### Changed
+
+- File-tree, editor, and git IPC commands (create/rename/delete/duplicate/copy/move entries, read/write file text, git status/sync/branch/commit operations) now run through a blocking-thread pool instead of the async runtime's own thread, so a large repo or slow git operation no longer stalls other IPC calls.
+- Git sync-status probes (branch, HEAD, upstream, ahead/behind, remotes, stash) now run concurrently instead of sequentially, cutting the 30s background poll from up to six sequential subprocess round-trips down to roughly one.
+- The file Explorer and git panel now show a skeleton shimmer instead of the "no project" empty state while a persisted workspace is still restoring on launch.
+- Large diffs in the review pane now mount in idle-time chunks and use CSS `content-visibility` on off-screen file blocks, keeping the panel responsive instead of jank-scrolling on big diffs.
+- The Run panel's target-selector chevron is now clickable (and triggers target discovery) as soon as a project is open, instead of staying disabled until targets happen to already be loaded; Android/iOS environment detection is now memoized to avoid duplicate probe runs when the target list refreshes with the same platforms.
+- The "Open Folder..." recent-project picker item swapped its "current" pill for "open" and dropped the now-redundant new-window affordance and `Cmd`/`Ctrl`-click hint.
+- Native menu clicks now broadcast to the single main window instead of being routed by a focus-tracking table, a leftover from the multi-window era.
+- Session-tab state now writes to disk on a debounced 500ms timer (flushed on quit) instead of a synchronous write on every tab change.
+
+### Fixed
+
+- Fixed the git Changes/History panels flashing the previous project's stale status, diff, or commit log for a moment after switching project tabs; fetched data is now tagged with the project path it belongs to.
+- Fixed the prompt composer occasionally letting a pending prompt seed for a just-switched-to project get overwritten by that project's own draft before the draft finished loading from disk, and fixed it firing a skills lookup at boot before any project was open.
+
 ## 0.5.0 - 2026-07-10
 
 ### Added

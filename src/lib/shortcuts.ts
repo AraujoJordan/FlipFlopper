@@ -11,7 +11,8 @@ import {
 
 type ShortcutAction =
   | "new-agent-menu" | "focus-prompt" | "omni-search" | "prompt-type-through"
-  | "toggle-terminal-panel" | "shortcut-help" | "new-window";
+  | "toggle-terminal-panel" | "shortcut-help" | "open-project" | "new-project"
+  | "project-tab-next" | "project-tab-prev";
 
 const actionHandlers = new Map<ShortcutAction, (payload?: string) => void>();
 
@@ -65,8 +66,9 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: `${modKey}J`, description: "Toggle terminal panel" },
       { keys: "Ctrl+Tab", description: "Cycle to next tab" },
       { keys: "Ctrl+Shift+Tab", description: "Cycle to previous tab" },
+      { keys: `${modKey}${shiftKey}] / ${modKey}${shiftKey}[`, description: "Next / previous project tab" },
       { keys: `${modKey}${shiftKey}F`, description: "Open search (or double-tap Shift)" },
-      { keys: `${modKey}${shiftKey}N`, description: "New window" },
+      { keys: `${modKey}N`, description: "New project" },
       { keys: "Escape", description: "Close review / dismiss menus" },
       { keys: "?", description: "Show this shortcuts reference" },
     ],
@@ -77,6 +79,16 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: `${modKey}T`, description: "New agent session" },
       { keys: `${modKey}K`, description: "Focus the prompt composer" },
       { keys: `${modKey}W`, description: "Close active tab or file" },
+    ],
+  },
+  {
+    label: "Editor",
+    items: [
+      { keys: "F2", description: "Rename symbol" },
+      { keys: `${modKey}.`, description: "Show quick fixes and code actions" },
+      { keys: "F12", description: "Go to definition" },
+      { keys: "Alt+Shift+F", description: "Format document" },
+      { keys: "Alt+↑ / Alt+↓", description: "Previous / next diagnostic" },
     ],
   },
   {
@@ -128,9 +140,9 @@ export function installGlobalShortcuts(): () => void {
       return;
     }
 
-    if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "n") {
+    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "n") {
       e.preventDefault(); e.stopPropagation();
-      runAction("new-window");
+      runAction("new-project");
       return;
     }
 
@@ -204,6 +216,14 @@ export function installGlobalShortcuts(): () => void {
     if (e.ctrlKey && e.key === "Tab") {
       e.preventDefault(); e.stopPropagation();
       cycleTab(e.shiftKey ? -1 : 1);
+      return;
+    }
+
+    // Shift turns the bracket keys into { / }, so match on the physical key.
+    // e.code names the US-layout position — the same trade-off VS Code makes.
+    if (mod && e.shiftKey && !e.altKey && (e.code === "BracketRight" || e.code === "BracketLeft")) {
+      e.preventDefault(); e.stopPropagation();
+      runAction(e.code === "BracketRight" ? "project-tab-next" : "project-tab-prev");
       return;
     }
 

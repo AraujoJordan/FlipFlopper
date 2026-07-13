@@ -1,5 +1,4 @@
 import { Component, For, Show, createSignal } from "solid-js";
-import type { Resource } from "solid-js";
 import { store, openReview, bumpGitStatus } from "../../lib/store";
 import {
   gitStage, gitUnstage, gitDiscard, gitCommit, gitStashPush, gitStashPop, getGitLog,
@@ -180,8 +179,10 @@ const GroupHeader: Component<{ label: string; count: number; actionLabel: string
 );
 
 const ChangesTab: Component<{
-  status: Resource<StatusEntry[]>;
-  sync: Resource<SyncStatus | null>;
+  /** `undefined` while data for the current project hasn't landed yet. */
+  status: () => StatusEntry[] | undefined;
+  statusLoading: () => boolean;
+  sync: () => SyncStatus | null | undefined;
 }> = (props) => {
   const entries = () => props.status() ?? [];
   const staged = () => entries().filter(isStaged);
@@ -332,13 +333,13 @@ const ChangesTab: Component<{
   return (
     <div style={{ flex: "1", display: "flex", "flex-direction": "column", "min-height": 0 }}>
       <div style={{ flex: "1", overflow: "auto", "padding-bottom": "6px" }}>
-        <Show when={props.status.loading && !props.status()}>
+        <Show when={props.statusLoading() && !props.status()}>
           <div style={{ padding: "24px 0", display: "flex", "justify-content": "center" }}>
             <Spinner />
           </div>
         </Show>
 
-        <Show when={!props.status.loading && entries().length === 0}>
+        <Show when={!props.statusLoading() && entries().length === 0}>
           <div style={{ padding: "24px 16px", color: "var(--fg-subtle)", "font-size": "12px", "text-align": "center" }}>
             {store.currentProject ? "No changes" : "Open a project"}
           </div>

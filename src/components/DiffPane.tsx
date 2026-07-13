@@ -1,5 +1,5 @@
 import {
-  Component, createResource, createSignal, For, Show, createMemo,
+  Component, createEffect, createResource, createSignal, For, Show, createMemo,
 } from "solid-js";
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
@@ -265,6 +265,11 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         "border-radius": "8px",
         overflow: "hidden",
         "margin-bottom": "16px",
+        // Skip layout/paint for blocks scrolled out of view — big diffs stay
+        // smooth. The intrinsic size is a rough average block height so the
+        // scrollbar doesn't jump wildly.
+        "content-visibility": "auto",
+        "contain-intrinsic-size": "auto 480px",
       }}
     >
       {/* File header */}
@@ -427,6 +432,27 @@ const DiffPane: Component = () => {
     )
   );
   const highlightingDisabled = () => totalLines() > MAX_HIGHLIGHT_LINES;
+
+  // Chunked mount: big diffs highlight every line synchronously at mount, so
+  // rendering all file blocks at once stalls the main thread right after the
+  // spinner clears. Mount a few blocks, then grow the slice during idle time.
+  const FILE_CHUNK = 4;
+  const [visibleFiles, setVisibleFiles] = createSignal(FILE_CHUNK);
+  const idle =
+    window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 50));
+  createEffect(() => {
+    const files = diffs() ?? [];
+    setVisibleFiles(Math.min(FILE_CHUNK, files.length));
+    const grow = () => {
+      if ((diffs() ?? []) !== files) return; // a newer diff superseded this one
+      setVisibleFiles((n) => {
+        const next = Math.min(n + FILE_CHUNK, files.length);
+        if (next < files.length) idle(grow);
+        return next;
+      });
+    };
+    if (files.length > FILE_CHUNK) idle(grow);
+  });
 
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   let bodyRef: HTMLDivElement | undefined;
@@ -713,12 +739,17 @@ const DiffPane: Component = () => {
               </Show>
             </div>
 
-            {/* File blocks */}
-            <For each={diffs()!}>
+            {/* File blocks (mounted in idle-time chunks) */}
+            <For each={diffs()!.slice(0, visibleFiles())}>
               {(file, index) => (
                 <FileBlock file={file} mode={mode()} totalLines={totalLines()} index={index()} />
               )}
             </For>
+            <Show when={visibleFiles() < diffs()!.length}>
+              <div style={{ padding: "12px 0", display: "flex", "justify-content": "center" }}>
+                <Spinner size={14} />
+              </div>
+            </Show>
           </Show>
           </div>
         </div>
