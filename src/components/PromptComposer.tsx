@@ -4,6 +4,7 @@ import {
   listPromptSkills,
   pickPromptFile,
   ptyInput,
+  ptySendLine,
   searchPromptFiles,
   spawnAgent,
   type FileEntry,
@@ -674,7 +675,7 @@ const PromptComposer: Component = () => {
       }
 
       markSessionTaskStarted(sessionId);
-      await ptyInput(sessionId, `${text}\r`);
+      await ptySendLine(sessionId, text);
       pushHistory(text);
       const restored = stashedPrompt();
       setStashedPrompt(null);
@@ -808,7 +809,7 @@ const PromptComposer: Component = () => {
     const command = kind === "model" ? t.modelCommand?.(value) : t.effortCommand?.(value);
     if (!command) return;
     void triggerHaptic("generic");
-    ptyInput(tab.sessionId, command + "\r").catch((e) => toast(String(e), "error"));
+    ptySendLine(tab.sessionId, command).catch((e) => toast(String(e), "error"));
   }
 
   return (

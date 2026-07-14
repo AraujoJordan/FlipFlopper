@@ -1,7 +1,7 @@
 import { createEffect, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import { store, addTab, setActiveTab, removeTab, type Tab } from "./store";
-import { onPtyOutput, onPtyExit, ptyInput, spawnAgent, continueAgent } from "./ipc";
+import { onPtyOutput, onPtyExit, ptySendLine, spawnAgent, continueAgent } from "./ipc";
 import { stripAnsi, agentTuning } from "./agentMeta";
 import { readLegacyJson, readPref, writePref } from "./appPrefs";
 import { toast } from "../components/ui";
@@ -700,7 +700,7 @@ async function applyNodeTuning(sessionId: string, node: FlowNode) {
   if (node.model && tuning.modelCommand) commands.push(tuning.modelCommand(node.model));
   if (node.effort && tuning.effortCommand) commands.push(tuning.effortCommand(node.effort));
   for (const command of commands) {
-    await ptyInput(sessionId, command + "\r");
+    await ptySendLine(sessionId, command);
     await new Promise((resolve) => setTimeout(resolve, TUNING_SETTLE_MS));
   }
 }
@@ -812,7 +812,7 @@ async function fireStep(nodeId: string, edgeId: string | null) {
     await readyPromise;
     if (!tunedAtSpawn) await applyNodeTuning(sessionId, node);
     markSessionTaskStarted(sessionId);
-    await ptyInput(sessionId, node.prompt + "\r");
+    await ptySendLine(sessionId, node.prompt);
 
     if (edgeId) {
       setFlow("edges", (e) => e.id === edgeId, "fired", true);

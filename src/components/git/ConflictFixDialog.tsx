@@ -1,6 +1,6 @@
 import { Component, For, Show, createSignal } from "solid-js";
 import { store, addTab, rankContinueCandidates } from "../../lib/store";
-import { spawnAgent, ptyInput, onPtyOutput, type AgentInfo } from "../../lib/ipc";
+import { spawnAgent, ptySendLine, onPtyOutput, type AgentInfo } from "../../lib/ipc";
 import { markSessionTaskStarted } from "../../lib/orchestrator";
 import { AgentLogo } from "../../lib/agentMeta";
 import { Button, Menu, MenuItem, Spinner, toast } from "../ui";
@@ -66,7 +66,7 @@ export const ConflictFixDialogHost: Component = () => {
         if (sent) return;
         sent = true;
         markSessionTaskStarted(sessionId);
-        void ptyInput(sessionId, prompt + "\r");
+        void ptySendLine(sessionId, prompt);
       };
       const unlisten = await onPtyOutput(sessionId, send);
       setTimeout(() => {

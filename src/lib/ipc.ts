@@ -166,6 +166,18 @@ export const spawnAgent = (
 export const ptyInput = (sessionId: string, data: string): Promise<void> =>
   invoke("pty_input", { sessionId, data });
 
+/** Send a line of input to a PTY session as if the user typed the body and
+ *  then pressed Enter. The body and the submit keystroke are written as two
+ *  separate PTY writes (with a brief yield between them) so the `\r` lands in
+ *  its own read: TUI agents such as Claude Code treat a multi-byte chunk
+ *  ending in a newline as a paste and swallow the trailing Enter, leaving the
+ *  prompt unsent. Do not collapse this back into a single `data + "\r"` write. */
+export const ptySendLine = async (sessionId: string, data: string): Promise<void> => {
+  await ptyInput(sessionId, data);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await ptyInput(sessionId, "\r");
+};
+
 export const ptyResize = (sessionId: string, cols: number, rows: number): Promise<void> =>
   invoke("pty_resize", { sessionId, cols, rows });
 
