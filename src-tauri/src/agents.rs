@@ -16,11 +16,19 @@ pub struct AgentDef {
     pub launch_args: &'static [&'static str],
     /// Args appended when FlipFlopper starts this agent in YOLO mode.
     pub yolo_launch_args: &'static [&'static str],
+    /// Environment variables set when FlipFlopper starts this agent in YOLO mode.
+    pub yolo_env: &'static [(&'static str, &'static str)],
     pub icon: &'static str,
     /// Args that run this agent non-interactively: `binary <headless_args...>
     /// <prompt>` should print a single text answer to stdout and exit.
     /// `None` means the agent has no known print/exec mode.
     pub headless_args: Option<&'static [&'static str]>,
+}
+
+impl AgentDef {
+    pub fn yolo_supported(&self) -> bool {
+        !self.yolo_launch_args.is_empty() || !self.yolo_env.is_empty()
+    }
 }
 
 /// Runtime view of an agent (includes whether it's installed)
@@ -50,6 +58,7 @@ pub static AGENTS: &[AgentDef] = &[
         description: "Anthropic's official Claude CLI coding agent",
         launch_args: &[],
         yolo_launch_args: &["--dangerously-skip-permissions"],
+        yolo_env: &[],
         icon: "/agents/claude.png",
         headless_args: Some(&["-p"]),
     },
@@ -61,17 +70,19 @@ pub static AGENTS: &[AgentDef] = &[
         description: "OpenAI Codex CLI agent",
         launch_args: &[],
         yolo_launch_args: &["--yolo"],
+        yolo_env: &[],
         icon: "/agents/codex.png",
         headless_args: Some(&["exec"]),
     },
     AgentDef {
         id: "cursor",
         name: "Cursor CLI",
-        binary: "agent",
-        aliases: &["cursor-agent"],
+        binary: "cursor-agent",
+        aliases: &[],
         description: "Cursor's terminal coding agent",
         launch_args: &[],
-        yolo_launch_args: &[],
+        yolo_launch_args: &["--force"],
+        yolo_env: &[],
         icon: "/agents/cursor.png",
         headless_args: None,
     },
@@ -82,7 +93,8 @@ pub static AGENTS: &[AgentDef] = &[
         aliases: &[],
         description: "Open source AI coding agent for the terminal",
         launch_args: &[],
-        yolo_launch_args: &["--auto"],
+        yolo_launch_args: &[],
+        yolo_env: &[("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)],
         icon: "/agents/opencode.png",
         headless_args: None,
     },
@@ -94,6 +106,7 @@ pub static AGENTS: &[AgentDef] = &[
         description: "AI pair-programming in your terminal",
         launch_args: &[],
         yolo_launch_args: &[],
+        yolo_env: &[],
         icon: "/agents/aider.png",
         headless_args: None,
     },
@@ -105,6 +118,7 @@ pub static AGENTS: &[AgentDef] = &[
         description: "Open source local AI agent with CLI workflows",
         launch_args: &[],
         yolo_launch_args: &[],
+        yolo_env: &[],
         icon: "/agents/goose.png",
         headless_args: None,
     },
@@ -116,6 +130,7 @@ pub static AGENTS: &[AgentDef] = &[
         description: "Google AGY CLI agent",
         launch_args: &[],
         yolo_launch_args: &[],
+        yolo_env: &[],
         icon: "/agents/agy.png",
         headless_args: None,
     },
@@ -127,6 +142,7 @@ pub static AGENTS: &[AgentDef] = &[
         description: "Open coding agent for CLI, IDE, and SDK workflows",
         launch_args: &[],
         yolo_launch_args: &[],
+        yolo_env: &[],
         icon: "/agents/cline.png",
         headless_args: None,
     },
@@ -138,6 +154,7 @@ pub static AGENTS: &[AgentDef] = &[
         description: "Qwen's agentic coding tool for the terminal",
         launch_args: &[],
         yolo_launch_args: &[],
+        yolo_env: &[],
         icon: "/agents/qwen.png",
         headless_args: None,
     },
@@ -149,6 +166,7 @@ pub static AGENTS: &[AgentDef] = &[
         description: "Large-task coding agent",
         launch_args: &[],
         yolo_launch_args: &[],
+        yolo_env: &[],
         icon: "/agents/plandex.png",
         headless_args: None,
     },
@@ -160,6 +178,7 @@ pub static AGENTS: &[AgentDef] = &[
         description: "Factory's agent-native software development CLI",
         launch_args: &[],
         yolo_launch_args: &[],
+        yolo_env: &[],
         icon: "/agents/droid.png",
         headless_args: None,
     },
@@ -171,6 +190,7 @@ pub static AGENTS: &[AgentDef] = &[
         description: "xAI's Grok Build coding agent CLI",
         launch_args: &[],
         yolo_launch_args: &["--always-approve"],
+        yolo_env: &[],
         icon: "/agents/grok.png",
         headless_args: Some(&["-p"]),
     },
@@ -256,7 +276,7 @@ pub fn list_agents(include_versions: bool) -> Vec<AgentInfo> {
                         installed,
                         version,
                         binary_path,
-                        yolo_supported: !def.yolo_launch_args.is_empty(),
+                        yolo_supported: def.yolo_supported(),
                         headless_supported: def.headless_args.is_some(),
                     }
                 })
@@ -270,6 +290,32 @@ pub fn list_agents(include_versions: bool) -> Vec<AgentInfo> {
 /// Look up a def by id.
 pub fn find_agent(id: &str) -> Option<&'static AgentDef> {
     AGENTS.iter().find(|a| a.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_agent;
+
+    #[test]
+    fn cursor_uses_unambiguous_binary_and_force_mode() {
+        let cursor = find_agent("cursor").unwrap();
+        assert_eq!(cursor.binary, "cursor-agent");
+        assert!(cursor.aliases.is_empty());
+        assert_eq!(cursor.yolo_launch_args, &["--force"]);
+        assert!(cursor.yolo_env.is_empty());
+        assert!(cursor.yolo_supported());
+    }
+
+    #[test]
+    fn opencode_uses_permission_environment_for_yolo() {
+        let opencode = find_agent("opencode").unwrap();
+        assert!(opencode.yolo_launch_args.is_empty());
+        assert_eq!(
+            opencode.yolo_env,
+            &[("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)]
+        );
+        assert!(opencode.yolo_supported());
+    }
 }
 
 /// Run `def`'s non-interactive print/exec mode with `prompt` and capture its

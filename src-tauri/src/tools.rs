@@ -140,7 +140,7 @@ pub static CATALOG: &[ToolEntry] = &[
         id: "cursor",
         name: "Cursor CLI",
         description: "Cursor's terminal coding agent",
-        binary: "agent",
+        binary: "cursor-agent",
         icon: "",
         category: "Agents",
         installs: &[

@@ -74,7 +74,7 @@ pub fn spawn_session(
     cwd: Option<&str>,
 ) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
     let def = find_agent(agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
-    if yolo && def.yolo_launch_args.is_empty() {
+    if yolo && !def.yolo_supported() {
         return Err(format!("Agent '{}' does not support YOLO mode.", def.name));
     }
     let binary = launch_binary(def).ok_or_else(|| {
@@ -104,6 +104,9 @@ pub fn spawn_session(
     if yolo {
         for arg in def.yolo_launch_args {
             cmd.arg(arg);
+        }
+        for (key, value) in def.yolo_env {
+            cmd.env(key, value);
         }
     }
     // Per-launch tuning (e.g. `-m <model>`) appended by the orchestrator.
@@ -274,6 +277,16 @@ pub fn spawn_shell_command(
     command: &str,
     project_path: &str,
 ) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
+    spawn_shell_command_with_env(manager, label, command, project_path, &[])
+}
+
+pub fn spawn_shell_command_with_env(
+    manager: &PtyManager,
+    label: &str,
+    command: &str,
+    project_path: &str,
+    env: &[(&str, &str)],
+) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
     let session_id = Uuid::new_v4().to_string();
     let (tx, rx) = mpsc::channel::<PtyEvent>();
 
@@ -303,6 +316,9 @@ pub fn spawn_shell_command(
     cmd.arg(command);
     cmd.cwd(project_path);
     cmd.env("PATH", augmented_path_string());
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
 
     let child = pair
         .slave

@@ -1668,7 +1668,13 @@ async fn continue_agent(
     let (session_id, rx) = run_blocking(move || {
         let launch = handoff::continue_launch(&project_path, &from_agent, &to_agent, yolo)?;
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, &launch.label, &launch.command, &project_path)
+        pty::spawn_shell_command_with_env(
+            &manager,
+            &launch.label,
+            &launch.command,
+            &project_path,
+            &launch.env,
+        )
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);

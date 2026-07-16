@@ -20,6 +20,7 @@ use std::time::SystemTime;
 pub struct ContinueLaunch {
     pub label: String,
     pub command: String,
+    pub env: Vec<(&'static str, &'static str)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1175,12 +1176,16 @@ recent conversation, tool activity, and git history \u{2014} then continue the w
     )
 }
 
-fn launch_command(to_id: &str, from_name: &str, yolo: bool) -> Result<String, String> {
+fn launch_command(
+    to_id: &str,
+    from_name: &str,
+    yolo: bool,
+) -> Result<(String, Vec<(&'static str, &'static str)>), String> {
     let def = find_agent(to_id).ok_or_else(|| format!("Unknown agent: {to_id}"))?;
-    if yolo && def.yolo_launch_args.is_empty() {
+    if yolo && !def.yolo_supported() {
         return Err(format!("Agent '{}' does not support YOLO mode.", def.name));
     }
-    let bin = launch_binary(def).unwrap_or_else(|| to_id.to_string());
+    let bin = launch_binary(def).unwrap_or_else(|| def.binary.to_string());
     let bin_q = shell_quote(&bin);
     let prompt_q = shell_quote(&handoff_prompt(from_name));
     let yolo_args = if yolo {
@@ -1198,7 +1203,7 @@ fn launch_command(to_id: &str, from_name: &str, yolo: bool) -> Result<String, St
         format!(" {yolo_args}")
     };
 
-    Ok(match to_id {
+    let command = match to_id {
         // Positional prompt — agent stays interactive by default
         "claude" | "codex" | "gemini" | "droid" => format!("{bin_q}{yolo_prefix} {prompt_q}"),
         // -i flag needed; positional alone is one-shot for these agents
@@ -1206,7 +1211,13 @@ fn launch_command(to_id: &str, from_name: &str, yolo: bool) -> Result<String, St
         // No reliable interactive-seed flag; handoff.md is still written.
         // Grok intentionally lands here until its TUI seed behavior is documented.
         _ => format!("{bin_q}{yolo_prefix}"),
-    })
+    };
+    let env = if yolo {
+        def.yolo_env.to_vec()
+    } else {
+        Vec::new()
+    };
+    Ok((command, env))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1245,8 +1256,43 @@ pub fn continue_launch(
     );
 
     // 6. Build interactive-seed command for target agent
-    let command = launch_command(to_agent, &from_name, yolo)?;
+    let (command, env) = launch_command(to_agent, &from_name, yolo)?;
     let label = format!("continue:{from_agent}->{to_agent}");
 
-    Ok(ContinueLaunch { label, command })
+    Ok(ContinueLaunch {
+        label,
+        command,
+        env,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::launch_command;
+
+    #[test]
+    fn cursor_handoff_uses_force_without_environment() {
+        let (command, env) = launch_command("cursor", "Codex", true).unwrap();
+        assert!(command.contains("cursor-agent"));
+        assert!(command.contains("--force"));
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn opencode_handoff_uses_permission_environment_without_auto_flag() {
+        let (command, env) = launch_command("opencode", "Codex", true).unwrap();
+        assert!(!command.contains("--auto"));
+        assert_eq!(env, vec![("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)]);
+    }
+
+    #[test]
+    fn normal_handoff_does_not_apply_yolo_configuration() {
+        let (cursor_command, cursor_env) = launch_command("cursor", "Codex", false).unwrap();
+        assert!(!cursor_command.contains("--force"));
+        assert!(cursor_env.is_empty());
+
+        let (opencode_command, opencode_env) = launch_command("opencode", "Codex", false).unwrap();
+        assert!(!opencode_command.contains("--auto"));
+        assert!(opencode_env.is_empty());
+    }
 }
