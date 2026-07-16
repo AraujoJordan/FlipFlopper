@@ -73,6 +73,25 @@ export interface PullOutcome {
   message: string;
 }
 
+export interface WorktreeInfo {
+  worktree_path: string;
+  branch: string;
+  source_branch: string;
+}
+
+export interface WorktreeStatus {
+  dirty: boolean;
+  commits_ahead: number;
+  exists: boolean;
+}
+
+export interface MergeOutcome {
+  merged: boolean;
+  conflicted: boolean;
+  conflicted_paths: string[];
+  message: string;
+}
+
 export interface CommitResult {
   sha: string;
   message: string;
@@ -160,8 +179,9 @@ export const spawnAgent = (
   projectPath: string,
   yolo = false,
   extraArgs?: string[],
+  cwd?: string,
 ): Promise<string> =>
-  invoke("spawn_agent", { agentId, projectPath, yolo, extraArgs: extraArgs ?? null });
+  invoke("spawn_agent", { agentId, projectPath, yolo, extraArgs: extraArgs ?? null, cwd: cwd ?? null });
 
 export const ptyInput = (sessionId: string, data: string): Promise<void> =>
   invoke("pty_input", { sessionId, data });
@@ -599,6 +619,27 @@ export const squashUnpushed = (projectPath: string, message: string): Promise<vo
 export const generateCommitMessage = (projectPath: string, agentId: string): Promise<string> =>
   invoke("generate_commit_message", { projectPath, agentId });
 
+export const createWorktree = (projectPath: string, agentId: string): Promise<WorktreeInfo> =>
+  invoke("create_worktree", { projectPath, agentId });
+
+export const getWorktreeStatus = (worktreePath: string, sourceBranch: string): Promise<WorktreeStatus> =>
+  invoke("get_worktree_status", { worktreePath, sourceBranch });
+
+export const commitWorktree = (worktreePath: string, message: string): Promise<string | null> =>
+  invoke("commit_worktree", { worktreePath, message });
+
+export const mergeWorktreeBranch = (projectPath: string, branch: string): Promise<MergeOutcome> =>
+  invoke("merge_worktree_branch", { projectPath, branch });
+
+export const removeWorktree = (projectPath: string, worktreePath: string, branch: string, deleteBranch: boolean): Promise<void> =>
+  invoke("remove_worktree", { projectPath, worktreePath, branch, deleteBranch });
+
+export const validateWorktree = (projectPath: string, worktreePath: string, branch: string): Promise<boolean> =>
+  invoke("validate_worktree", { projectPath, worktreePath, branch });
+
+export const generateWorktreeCommitMessage = (worktreePath: string, sourceBranch: string, agentId: string): Promise<string> =>
+  invoke("generate_worktree_commit_message", { worktreePath, sourceBranch, agentId });
+
 // ── Native diff review ───────────────────────────────────────────────────────
 
 export interface DiffLine {
@@ -816,6 +857,9 @@ export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenF
 export interface PersistedAgentTabDto {
   agent_id: string;
   flow_node_id: string | null;
+  worktree_path: string | null;
+  worktree_branch: string | null;
+  worktree_source_branch: string | null;
 }
 
 export interface PersistedProjectTabDto {

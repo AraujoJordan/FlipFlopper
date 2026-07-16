@@ -1,6 +1,6 @@
 import { Component, createResource, createSignal, For, Show } from "solid-js";
 import type { Accessor } from "solid-js";
-import { store, openReview, bumpGitStatus, clearHistoryFilter, updateCurrentBranch } from "../../lib/store";
+import { store, openReview, bumpGitStatus, clearHistoryFilter, updateCurrentBranch, effectiveRoot } from "../../lib/store";
 import { getGitLog, gitRollback, renameCommit, gitCheckoutCommit } from "../../lib/ipc";
 import { agentColor, agentLetter } from "../../lib/agentMeta";
 import { Button, Spinner, confirmDialog, toast } from "../ui";
@@ -26,7 +26,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
   // refetching); same pattern as GitPanel's status/sync resources.
   const [commitsRaw, { refetch }] = createResource(
     () => ({
-      path: store.currentProject?.path,
+      path: effectiveRoot(),
       filter: store.historyFilterPath,
       _tick: props.tick(),
       _v: store.gitStatusVersion,
@@ -38,7 +38,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
   /** `undefined` while data for the current project hasn't landed yet. */
   const commits = () => {
     const r = commitsRaw();
-    const path = store.currentProject?.path;
+    const path = effectiveRoot();
     if (!path) return [];
     return r && r.path === path ? r.value : undefined;
   };
@@ -63,7 +63,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
     if (!message || !store.currentProject) return;
     setBusySha(sha);
     try {
-      await renameCommit(store.currentProject.path, sha, message);
+      await renameCommit(effectiveRoot()!, sha, message);
       refetch();
     } catch (e) {
       toast(`Rename failed: ${String(e)}`, "error");
@@ -81,7 +81,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
     if (!ok) return;
     setBusySha(sha);
     try {
-      await gitRollback(store.currentProject.path, sha);
+      await gitRollback(effectiveRoot()!, sha);
       toast(`Rolled back to ${shortSha}`, "success");
       bumpGitStatus();
       refetch();
@@ -101,7 +101,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
     if (!ok) return;
     setBusySha(sha);
     try {
-      await gitCheckoutCommit(store.currentProject.path, sha);
+      await gitCheckoutCommit(effectiveRoot()!, sha);
       toast(`Checked out ${shortSha} (detached)`, "success");
       bumpGitStatus();
       await updateCurrentBranch();

@@ -67,6 +67,7 @@ import {
   hiddenInstallTool,
   applyLspWorkspaceEdit,
   flushAllEditorSaves,
+  effectiveRoot,
   type EditorFile,
 } from "../lib/store";
 import {
@@ -244,6 +245,7 @@ const signatureTooltipField = StateField.define<Tooltip | null>({
 // ── Per-file buffer ───────────────────────────────────────────────────────────
 
 const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) => {
+  const mountedRoot = props.file.root ?? effectiveRoot()!;
   let host!: HTMLDivElement;
   let view: EditorView | undefined;
   let applyingExternal = false;
@@ -271,8 +273,8 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
 
   const mediaUrl = () => {
     if (!store.currentProject) return "";
-    let fullPath = `${store.currentProject.path}/${props.file.path}`;
-    if (store.currentProject.path.includes("\\")) {
+    let fullPath = `${mountedRoot}/${props.file.path}`;
+    if (mountedRoot.includes("\\")) {
       fullPath = fullPath.replace(/\//g, "\\");
     }
     return convertFileSrc(fullPath);
@@ -293,7 +295,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       return;
     }
     try {
-      const modifiedMs = await writeFileText(project.path, props.file.path, content);
+      const modifiedMs = await writeFileText(mountedRoot, props.file.path, content);
       markEditorSaved(props.file.path, content, modifiedMs);
       setSaveError(null);
       setConflict(false);
@@ -352,7 +354,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     try {
       await flushLspSync();
       const indentUnit = getIndentUnit(view.state);
-      const edit = await lspFormatDocument(project.path, props.file.path, indentUnit, true);
+      const edit = await lspFormatDocument(mountedRoot, props.file.path, indentUnit, true);
       const fileEdit = edit.files.find((file) => file.path === props.file.path);
       if (fileEdit) applyCurrentFileEdits(fileEdit.edits);
       if (showSuccess) toast(fileEdit?.edits.length ? "Document formatted" : "Already formatted", "success");
@@ -377,8 +379,8 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     const start = lspPosition(Math.min(from, to));
     const end = lspPosition(Math.max(from, to));
     try {
-      const allDiagnostics = await lspDiagnostics(project.path, props.file.path).catch(() => []);
-      const actions = await lspCodeActions(project.path, props.file.path, { start, end }, allDiagnostics);
+      const allDiagnostics = await lspDiagnostics(mountedRoot, props.file.path).catch(() => []);
+      const actions = await lspCodeActions(mountedRoot, props.file.path, { start, end }, allDiagnostics);
       if (actions.length === 0) {
         toast("No code actions available", "info");
         return;
@@ -400,7 +402,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       return;
     }
     try {
-      const edit = await lspResolveCodeAction(project.path, props.file.path, action.raw);
+      const edit = await lspResolveCodeAction(mountedRoot, props.file.path, action.raw);
       const changed = await applyLspWorkspaceEdit(edit);
       toast(`Applied ${action.title}${changed.length > 1 ? ` in ${changed.length} files` : ""}`, "success");
     } catch (error) {
@@ -416,7 +418,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     const head = view.state.selection.main.head;
     const point = lspPosition(head);
     try {
-      const prepared = await lspPrepareRename(project.path, props.file.path, point.line, point.character);
+      const prepared = await lspPrepareRename(mountedRoot, props.file.path, point.line, point.character);
       if (!prepared) {
         toast("This symbol cannot be renamed", "info");
         return;
@@ -439,7 +441,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     if (!project || !state || !newName) return;
     setRenameInput(null);
     try {
-      const edit = await lspRename(project.path, props.file.path, state.line, state.character, newName);
+      const edit = await lspRename(mountedRoot, props.file.path, state.line, state.character, newName);
       const changed = await applyLspWorkspaceEdit(edit);
       toast(`Renamed in ${changed.length} file${changed.length === 1 ? "" : "s"}`, "success");
     } catch (error) {
@@ -451,7 +453,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     const project = store.currentProject;
     if (!project || !view) return;
     try {
-      sessionStatus = await lspChangeDocument(project.path, props.file.path, view.state.doc.toString());
+      sessionStatus = await lspChangeDocument(mountedRoot, props.file.path, view.state.doc.toString());
     } catch { /* ignore */ }
   }
 
@@ -478,7 +480,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     if (!project || !view) return;
     await flushLspSync();
     const point = lspPosition(pos);
-    const def = await lspDefinition(project.path, props.file.path, point.line, point.character).catch(() => null);
+    const def = await lspDefinition(mountedRoot, props.file.path, point.line, point.character).catch(() => null);
     if (!def) return;
     const name = def.path.split("/").pop() || def.path;
     await openEditorFile(def.path, name, def.line + 1);
@@ -664,7 +666,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     let items: UsageItem[] = [];
 
     try {
-      const refs = await lspReferences(project.path, props.file.path, point.line, point.character);
+      const refs = await lspReferences(mountedRoot, props.file.path, point.line, point.character);
       items = refs.map((r) => ({
         rel_path: r.path,
         line: r.line + 1,
@@ -675,7 +677,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     if (items.length === 0 && word) {
       try {
         const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const results = await searchProjectText(project.path, `\\b${escaped}\\b`, true, true, 100);
+        const results = await searchProjectText(mountedRoot, `\\b${escaped}\\b`, true, true, 100);
         items = results.map((m) => ({
           rel_path: m.rel_path,
           line: m.line,
@@ -717,7 +719,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
 
     let def = null;
     try {
-      def = await lspDefinition(project.path, props.file.path, point.line, point.character);
+      def = await lspDefinition(mountedRoot, props.file.path, point.line, point.character);
     } catch { /* treat as on-declaration below */ }
 
     const onDeclaration = !def
@@ -758,7 +760,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       const project = store.currentProject;
       if (!project) return docNode(item.documentation, item.detail);
       try {
-        const resolved = await lspCompletionResolve(project.path, props.file.path, item.raw);
+        const resolved = await lspCompletionResolve(mountedRoot, props.file.path, item.raw);
         if (resolved.completion) Object.assign(item, resolved.completion);
         return docNode(resolved.documentation ?? item.documentation, resolved.detail ?? item.detail);
       } catch {
@@ -802,7 +804,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     await flushLspSync();
     const line = context.state.doc.lineAt(context.pos);
     const items = await lspCompletion(
-      project.path,
+      mountedRoot,
       props.file.path,
       line.number - 1,
       context.pos - line.from,
@@ -830,7 +832,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
   async function lspLintSource(): Promise<readonly Diagnostic[]> {
     const project = store.currentProject;
     if (!project || !view) return [];
-    const items = await lspDiagnostics(project.path, props.file.path).catch(() => []);
+    const items = await lspDiagnostics(mountedRoot, props.file.path).catch(() => []);
     return items.map((item) => {
       const from = posFromLsp(item, "start");
       const to = Math.max(from, posFromLsp(item, "end"));
@@ -850,7 +852,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     await flushLspSync();
     const cursor = view.state.selection.main.head;
     const cursorLine = view.state.doc.lineAt(cursor);
-    const items = await lspDiagnostics(project.path, props.file.path).catch(() => []);
+    const items = await lspDiagnostics(mountedRoot, props.file.path).catch(() => []);
     const target = nextDiagnostic(items, cursorLine.number, cursor - cursorLine.from, dir);
     if (!target || !view) return;
     const lineNo = Math.min(diagnosticLine(target), view.state.doc.lines);
@@ -937,7 +939,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     if (!project || !view) return;
     await flushLspSync();
     const point = lspPosition(pos);
-    const help = await lspSignatureHelp(project.path, props.file.path, point.line, point.character).catch(() => null);
+    const help = await lspSignatureHelp(mountedRoot, props.file.path, point.line, point.character).catch(() => null);
     if (!view) return;
     if (!help || help.signatures.length === 0) {
       dismissSignatureHelp();
@@ -981,7 +983,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     const project = store.currentProject;
     if (!view || !project) return;
     try {
-      const file = await readFileText(project.path, props.file.path);
+      const file = await readFileText(mountedRoot, props.file.path);
       if (file.is_binary || file.too_large) return;
       applyingExternal = true;
       view.dispatch({
@@ -1005,7 +1007,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
     const project = store.currentProject;
     if (!project || props.file.binary || conflict()) return;
     try {
-      const diskMs = await statFile(project.path, props.file.path);
+      const diskMs = await statFile(mountedRoot, props.file.path);
       if (diskMs <= props.file.modifiedMs) return;
       if (props.file.dirty) setConflict(true);
       else await reloadFromDisk();
@@ -1062,7 +1064,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
             if (!project) return null;
             await flushLspSync();
             const point = lspPosition(pos);
-            const text = await lspHover(project.path, props.file.path, point.line, point.character).catch(() => null);
+            const text = await lspHover(mountedRoot, props.file.path, point.line, point.character).catch(() => null);
             if (!text) return null;
             return {
               pos,
@@ -1123,7 +1125,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
 
     const project = store.currentProject;
     if (project) {
-      void lspOpenDocument(project.path, props.file.path, props.file.baseline)
+      void lspOpenDocument(mountedRoot, props.file.path, props.file.baseline)
         .then((status) => { sessionStatus = status; })
         .catch(() => {});
     }
@@ -1149,7 +1151,7 @@ const EditorBuffer: Component<{ file: EditorFile; active: boolean }> = (props) =
       unregisterEditorSaveFlush(props.file.path);
       unregisterEditorReload(props.file.path);
       window.removeEventListener("flipflopper:format-on-save", onFormatPreference);
-      if (project) void finalSave.finally(() => lspCloseDocument(project.path, props.file.path));
+      if (project) void finalSave.finally(() => lspCloseDocument(mountedRoot, props.file.path));
       view?.destroy();
     });
   });
@@ -1486,7 +1488,7 @@ const EditorPane: Component = () => {
 
   const [previewInfo, { refetch: refetchPreview }] = createResource(
     () => {
-      const p = store.currentProject?.path;
+      const p = effectiveRoot();
       const f = store.activeEditorPath;
       return p && f ? { p, f, tick: savedTick() } : null;
     },
@@ -1497,7 +1499,7 @@ const EditorPane: Component = () => {
 
   const [serverStatus, { refetch: refetchServerStatus }] = createResource(
     () => {
-      const p = store.currentProject?.path;
+      const p = effectiveRoot();
       const f = store.activeEditorPath;
       return p && f ? { p, f } : null;
     },
@@ -1514,7 +1516,7 @@ const EditorPane: Component = () => {
     if (!toolId || !project) return;
     setInstallingServer(true);
     try {
-      await hiddenInstallTool(toolId, project.path);
+      await hiddenInstallTool(toolId, effectiveRoot()!);
     } finally {
       setInstallingServer(false);
       refetchServerStatus();
@@ -1523,7 +1525,7 @@ const EditorPane: Component = () => {
 
   const [diagnostics, { refetch: refetchDiagnostics }] = createResource(
     () => {
-      const p = store.currentProject?.path;
+      const p = effectiveRoot();
       const f = store.activeEditorPath;
       return p && f ? { p, f, tick: savedTick() } : null;
     },

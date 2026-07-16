@@ -30,6 +30,7 @@ export interface Tab {
   agentIcon: string;
   isClosing?: boolean;
   needsAttention?: boolean;
+  worktree?: { path: string; branch: string; sourceBranch: string };
 }
 
 export type TerminalKind = "run" | "validate" | "install" | "shell";
@@ -68,6 +69,8 @@ export interface EditorFile {
   /** tab created optimistically; content still being read from disk */
   loading?: boolean;
   isClosing?: boolean;
+  /** Absolute checkout root captured when the buffer opened. */
+  root?: string;
 }
 
 export interface EditorSelectionInfo {
@@ -115,7 +118,8 @@ export interface ProjectSnapshot {
    *  restored from disk but hasn't been viewed yet — its agents are spawned
    *  lazily on first switch (avoids spawning every CLI agent at launch and
    *  tripping the PTY park-cleanup timer for unattached sessions). */
-  pendingTabs?: { agentId: string; flowNodeId?: string }[];
+  pendingTabs?: { agentId: string; flowNodeId?: string; worktree?: Tab["worktree"] }[];
+  pendingActiveIndex?: number;
 }
 
 export interface AppStore {
@@ -308,6 +312,7 @@ const LAST_AGENT_KEY = "flipflopper:last-agent-targets";
 const RUN_TARGET_KEY = "flipflopper:run-targets";
 const VALIDATION_TARGET_KEY = "flipflopper:validation-targets";
 const ANDROID_DEVICE_KEY = "flipflopper:android-devices";
+const WORKTREE_DEFAULT_KEY = "flipflopper:worktree-default";
 
 const continueTargetsCache = readLegacyJson<Record<string, string>>(CONTINUE_TARGET_KEY, {});
 const continueUsageCache = readLegacyJson<Record<string, string[]>>(CONTINUE_USAGE_KEY, {});
@@ -315,6 +320,16 @@ const lastAgentTargetsCache = readLegacyJson<Record<string, string>>(LAST_AGENT_
 const runTargetsCache = readLegacyJson<Record<string, string>>(RUN_TARGET_KEY, {});
 const validationTargetsCache = readLegacyJson<Record<string, string>>(VALIDATION_TARGET_KEY, {});
 const androidDevicesCache = readLegacyJson<Record<string, string>>(ANDROID_DEVICE_KEY, {});
+const worktreeDefaultsCache = readLegacyJson<Record<string, boolean>>(WORKTREE_DEFAULT_KEY, {});
+
+export function getWorktreeDefault(projectPath: string): boolean {
+  return worktreeDefaultsCache[projectPath] ?? false;
+}
+
+export function setWorktreeDefault(projectPath: string, enabled: boolean) {
+  worktreeDefaultsCache[projectPath] = enabled;
+  writePref(WORKTREE_DEFAULT_KEY, worktreeDefaultsCache);
+}
 
 export function readContinueTargets(): Record<string, string> {
   return continueTargetsCache;
@@ -432,6 +447,19 @@ export function addTab(tab: Tab) {
   showAgent();
 }
 
+export function activeWorktree(): Tab["worktree"] | undefined {
+  return store.tabs.find((tab) => tab.sessionId === store.activeTabId)?.worktree;
+}
+
+export function effectiveRoot(): string | null {
+  return activeWorktree()?.path ?? store.currentProject?.path ?? null;
+}
+
+let worktreeCloseInterceptor: ((tab: Tab) => void) | null = null;
+export function registerWorktreeCloseInterceptor(interceptor: (tab: Tab) => void) {
+  worktreeCloseInterceptor = interceptor;
+}
+
 const agentModeTails: Record<string, string> = {};
 
 export function setAgentMode(sessionId: string, mode: AgentMode) {
@@ -467,9 +495,14 @@ export function sniffAgentMode(sessionId: string, rawChunk: string) {
   if (mode) setAgentMode(sessionId, mode);
 }
 
-export function removeTab(sessionId: string) {
+export function removeTab(sessionId: string, opts?: { force?: boolean }) {
   const tab = store.tabs.find((x) => x.sessionId === sessionId);
   if (!tab) return;
+
+  if (tab.worktree && !opts?.force && !tab.isClosing) {
+    worktreeCloseInterceptor?.(tab);
+    return;
+  }
 
   if (!tab.isClosing) {
     // Switch active tab immediately if closing active tab, ignoring this closing tab
@@ -709,6 +742,7 @@ export async function hydrateStorePreferences() {
     runTargets,
     validationTargets,
     androidDevices,
+    worktreeDefaults,
   ] = await Promise.all([
     readPref(CONTINUE_TARGET_KEY, continueTargetsCache, () => readJsonRecord(CONTINUE_TARGET_KEY, continueTargetsCache)),
     readPref(CONTINUE_USAGE_KEY, continueUsageCache, () => readJsonRecord(CONTINUE_USAGE_KEY, continueUsageCache)),
@@ -716,6 +750,7 @@ export async function hydrateStorePreferences() {
     readPref(RUN_TARGET_KEY, runTargetsCache, () => readJsonRecord(RUN_TARGET_KEY, runTargetsCache)),
     readPref(VALIDATION_TARGET_KEY, validationTargetsCache, () => readJsonRecord(VALIDATION_TARGET_KEY, validationTargetsCache)),
     readPref(ANDROID_DEVICE_KEY, androidDevicesCache, () => readJsonRecord(ANDROID_DEVICE_KEY, androidDevicesCache)),
+    readPref(WORKTREE_DEFAULT_KEY, worktreeDefaultsCache, () => readJsonRecord(WORKTREE_DEFAULT_KEY, worktreeDefaultsCache)),
   ]);
 
   Object.assign(continueTargetsCache, continueTargets);
@@ -724,6 +759,7 @@ export async function hydrateStorePreferences() {
   Object.assign(runTargetsCache, runTargets);
   Object.assign(validationTargetsCache, validationTargets);
   Object.assign(androidDevicesCache, androidDevices);
+  Object.assign(worktreeDefaultsCache, worktreeDefaults);
 }
 
 // ── PTY / install helpers ─────────────────────────────────────────────────────
@@ -870,8 +906,8 @@ export async function openEditorFile(
   lineNo?: number,
   character?: number,
 ) {
-  const project = store.currentProject;
-  if (!project) return;
+  const root = effectiveRoot();
+  if (!root) return;
 
   const norm = (p: string) => p.replace(/\\/g, "/").replace(/^\.?\//, "").toLowerCase();
   const normalizedRelPath = norm(relPath);
@@ -904,13 +940,14 @@ export async function openEditorFile(
       modifiedMs: 0,
       binary: false,
       loading: true,
+      root,
     },
   ]);
   setStore("activeEditorPath", relPath);
   showCode();
 
   try {
-    const file = await readFileText(project.path, relPath);
+    const file = await readFileText(root, relPath);
     setStore("editorFiles", (f) => f.path === relPath, {
       baseline: file.content,
       modifiedMs: file.modified_ms,
@@ -1088,12 +1125,12 @@ function applyTextEdits(text: string, edits: readonly LspTextEdit[]): string {
 /** Preflight and immediately apply an LSP workspace edit. Open buffers are
  * flushed first, then explicitly reloaded so CodeMirror and disk stay in sync. */
 export async function applyLspWorkspaceEdit(workspaceEdit: LspWorkspaceEdit): Promise<string[]> {
-  const project = store.currentProject;
-  if (!project) throw new Error("No project is open");
+  const root = effectiveRoot();
+  if (!root) throw new Error("No project is open");
   await flushAllEditorSaves();
 
   const prepared = await Promise.all(workspaceEdit.files.map(async (fileEdit) => {
-    const file = await readFileText(project.path, fileEdit.path);
+    const file = await readFileText(root, fileEdit.path);
     if (file.is_binary || file.too_large) throw new Error(`Cannot edit ${fileEdit.path}: file is binary or too large`);
     return {
       path: fileEdit.path,
@@ -1106,12 +1143,12 @@ export async function applyLspWorkspaceEdit(workspaceEdit: LspWorkspaceEdit): Pr
   try {
     for (const file of prepared) {
       if (file.content === file.original) continue;
-      await writeFileText(project.path, file.path, file.content);
+      await writeFileText(root, file.path, file.content);
       written.push(file);
     }
   } catch (error) {
     for (const file of written.reverse()) {
-      try { await writeFileText(project.path, file.path, file.original); } catch { /* best-effort rollback */ }
+      try { await writeFileText(root, file.path, file.original); } catch { /* best-effort rollback */ }
     }
     throw error;
   }
@@ -1128,7 +1165,7 @@ export async function applyLspWorkspaceEdit(workspaceEdit: LspWorkspaceEdit): Pr
 /** Fetch current git branch and update the store. Empty string means
  *  "no project" or "couldn't determine" — never a lie about being on main. */
 export async function updateCurrentBranch() {
-  const projectPath = store.currentProject?.path;
+  const projectPath = effectiveRoot();
   if (!projectPath) {
     setStore("currentBranch", "");
     return;

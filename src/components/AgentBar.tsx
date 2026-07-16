@@ -1,6 +1,6 @@
-import { Component, createSignal, For, Show, onMount, onCleanup } from "solid-js";
-import { store, addTab, removeTab, setActiveTab } from "../lib/store";
-import { spawnAgent, type AgentInfo } from "../lib/ipc";
+import { Component, createEffect, createSignal, For, Show, onMount, onCleanup } from "solid-js";
+import { store, addTab, removeTab, setActiveTab, getWorktreeDefault, setWorktreeDefault } from "../lib/store";
+import { createWorktree, removeWorktree, spawnAgent, type AgentInfo, type WorktreeInfo } from "../lib/ipc";
 import { Menu, MenuLabel, MenuItem, Spinner, toast } from "./ui";
 import { registerShortcutHandler } from "../lib/shortcuts";
 import { agentColor, AgentLogo, agentModeShortLabel } from "../lib/agentMeta";
@@ -15,19 +15,48 @@ export const NewAgentMenu: Component<{
   align?: "left" | "right";
 }> = (props) => {
   const [spawningId, setSpawningId] = createSignal<string | null>(null);
+  const [isolated, setIsolated] = createSignal(false);
   const installedAgents = () => store.agents.filter((a) => a.installed && (!store.yoloMode || a.yolo_supported));
   const yoloUnsupportedAgents = () => store.agents.filter((a) => a.installed && store.yoloMode && !a.yolo_supported);
   const uninstalledAgents = () => store.agents.filter((a) => !a.installed);
+
+  createEffect(() => {
+    if (props.open && store.currentProject) setIsolated(getWorktreeDefault(store.currentProject.path));
+  });
+
+  function toggleIsolated() {
+    const project = store.currentProject;
+    if (!project) return;
+    const next = !isolated();
+    setIsolated(next);
+    setWorktreeDefault(project.path, next);
+  }
 
   async function handlePick(agent: AgentInfo) {
     props.onClose();
     const project = store.currentProject;
     if (!project) return;
     setSpawningId(agent.id);
+    let wt: WorktreeInfo | undefined;
     try {
-      const sessionId = await spawnAgent(agent.id, project.path, store.yoloMode);
-      addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
+      if (isolated()) {
+        try {
+          wt = await createWorktree(project.path, agent.id);
+        } catch (e) {
+          if (String(e).toLowerCase().includes("detached head")) {
+            toast("Detached HEAD cannot create a worktree; starting in the project checkout", "info");
+          } else {
+            throw e;
+          }
+        }
+      }
+      const sessionId = await spawnAgent(agent.id, project.path, store.yoloMode, undefined, wt?.worktree_path);
+      addTab({
+        sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon,
+        worktree: wt ? { path: wt.worktree_path, branch: wt.branch, sourceBranch: wt.source_branch } : undefined,
+      });
     } catch (e) {
+      if (wt) void removeWorktree(project.path, wt.worktree_path, wt.branch, true);
       console.error(e);
       toast(`Failed to start ${agent.name}: ${String(e)}`, "error");
     } finally {
@@ -38,6 +67,15 @@ export const NewAgentMenu: Component<{
   return (
     <Menu open={props.open} onClose={props.onClose} anchorRef={props.anchorRef} align={props.align ?? "left"}>
       <MenuLabel>New session</MenuLabel>
+      <MenuItem onSelect={toggleIsolated}>
+        <span style={{ width: "16px", color: isolated() ? "var(--accent)" : "var(--fg-faint)", "font-size": "14px" }}>
+          {isolated() ? "✓" : "○"}
+        </span>
+        <div style={{ flex: "1" }}>
+          <div style={{ "font-size": "12px", color: "var(--fg-default)" }}>Run in isolated worktree</div>
+          <div style={{ "font-size": "10.5px", color: "var(--fg-subtle)" }}>Fresh branch; merge when the tab closes</div>
+        </div>
+      </MenuItem>
       <For each={installedAgents()}>
         {(agent) => (
           <MenuItem onSelect={() => handlePick(agent)} disabled={spawningId() !== null}>

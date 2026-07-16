@@ -31,6 +31,7 @@ const AddStepMenu: Component<Props> = (props) => {
   const [prompt, setPrompt] = createSignal("");
   const [gate, setGate] = createSignal(false);
   const [carry, setCarry] = createSignal(false);
+  const [worktree, setWorktree] = createSignal(false);
   const [model, setModel] = createSignal<string | null>(null);
   const [effort, setEffort] = createSignal<string | null>(null);
 
@@ -43,6 +44,7 @@ const AddStepMenu: Component<Props> = (props) => {
       const edge = flow.edges.find((e) => e.to === props.editNode!.id && !e.fired);
       setGate(edge ? edge.gate : false);
       setCarry(edge ? edge.carry : false);
+      setWorktree(props.editNode.worktree);
     } else if (props.open && !props.editNode) {
       reset();
     }
@@ -62,6 +64,7 @@ const AddStepMenu: Component<Props> = (props) => {
     setPrompt("");
     setGate(false);
     setCarry(false);
+    setWorktree(false);
     setModel(null);
     setEffort(null);
   }
@@ -79,10 +82,10 @@ const AddStepMenu: Component<Props> = (props) => {
     const m = tuning() ? model() : null;
     const e = (tuning()?.efforts.length ?? 0) > 0 ? effort() : null;
     if (props.editNode) {
-      updateStepNode(props.editNode.id, agentId, text, gate(), carry(), m, e);
+      updateStepNode(props.editNode.id, agentId, text, gate(), carry(), worktree(), m, e);
     } else {
       if (!props.fromNodeId) return;
-      addStepNode(props.fromNodeId, agentId, text, gate(), carry(), m, e);
+      addStepNode(props.fromNodeId, agentId, text, gate(), carry(), worktree(), m, e);
     }
     close();
   }
@@ -247,10 +250,15 @@ const AddStepMenu: Component<Props> = (props) => {
           <input
             type="checkbox"
             checked={carry()}
+            disabled={worktree()}
             onchange={(e) => setCarry(e.currentTarget.checked)}
             style={{ cursor: "pointer" }}
           />
           Carry context
+        </label>
+        <label style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", color: "var(--fg-muted)", cursor: "pointer", "user-select": "none" }} title="Runs on a fresh branch; carry context is unavailable">
+          <input type="checkbox" checked={worktree()} onchange={(e) => { const checked = e.currentTarget.checked; setWorktree(checked); if (checked) setCarry(false); }} style={{ cursor: "pointer" }} />
+          Isolated worktree
         </label>
         <button
           class="press"

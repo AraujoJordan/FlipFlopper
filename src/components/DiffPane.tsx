@@ -3,7 +3,7 @@ import {
 } from "solid-js";
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
-import { store, closeReview, openReview, openEditorFile } from "../lib/store";
+import { store, closeReview, openReview, openEditorFile, effectiveRoot } from "../lib/store";
 import { getReviewDiff, type FileDiff, type DiffLine } from "../lib/ipc";
 import { getFileIcon } from "../lib/fileIcons";
 import { Button, Spinner } from "./ui";
@@ -421,7 +421,7 @@ const DiffPane: Component = () => {
     (r) => {
       const project = store.currentProject;
       if (!project || !r) return Promise.resolve([]);
-      return getReviewDiff(project.path, r.rev, r.path, r.mode);
+      return getReviewDiff(effectiveRoot()!, r.rev, r.path, r.mode);
     }
   );
 

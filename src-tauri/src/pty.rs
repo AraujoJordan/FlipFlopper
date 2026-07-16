@@ -71,6 +71,7 @@ pub fn spawn_session(
     project_path: &str,
     yolo: bool,
     extra_args: &[String],
+    cwd: Option<&str>,
 ) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
     let def = find_agent(agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
     if yolo && def.yolo_launch_args.is_empty() {
@@ -109,7 +110,7 @@ pub fn spawn_session(
     for arg in extra_args {
         cmd.arg(arg);
     }
-    cmd.cwd(project_path);
+    cmd.cwd(cwd.unwrap_or(project_path));
     cmd.env("PATH", augmented_path_string());
     // Match a real terminal's environment so TUI agents (Bubble Tea, ratatui,
     // Textual, …) render correctly even when the desktop app was launched

@@ -15,6 +15,7 @@ import {
 import { store } from "../../lib/store";
 import { agentColor, AgentLogo, agentModeShortLabel } from "../../lib/agentMeta";
 import { Spinner, ContextMenu, MenuItem, MenuDivider } from "../ui";
+import { openWorktreeCloseDialog } from "../git/WorktreeCloseDialog";
 
 export const FLOW_CARD_WIDTH = 220;
 export const FLOW_CARD_HEIGHT = 112;
@@ -208,6 +209,9 @@ const FlowNodeCard: Component<Props> = (props) => {
               {tuningLabel()}
             </span>
           </Show>
+          <Show when={props.node.worktreeInfo ?? (props.node.worktree ? { branch: "isolated" } : null)}>{(wt) =>
+            <span style={{ "font-family": "var(--font-mono)", "font-size": "9px", color: "var(--accent)", "white-space": "nowrap", overflow: "hidden", "text-overflow": "ellipsis", "max-width": "76px" }}>⎇ {wt().branch.replace(/^flipflopper\//, "")}</span>
+          }</Show>
           <Show when={elapsed()}>
             <span style={{
               "font-family": "var(--font-mono)",
@@ -240,6 +244,10 @@ const FlowNodeCard: Component<Props> = (props) => {
         }}>
           {props.node.lastOutput || (props.node.prompt ? props.node.prompt.slice(0, 80) : "live session")}
         </div>
+
+        <Show when={props.node.status === "done" && props.node.sessionId && props.node.worktreeInfo}>
+          <button class="press" onclick={(e) => { e.stopPropagation(); const tab = store.tabs.find((t) => t.sessionId === props.node.sessionId); if (tab) void openWorktreeCloseDialog(tab); }} style={{ position: "absolute", right: "8px", bottom: "6px", "font-size": "9.5px", color: "var(--fg-on-accent)", background: "var(--accent)", padding: "2px 7px", "border-radius": "var(--radius-sm)" }}>Merge back</button>
+        </Show>
 
         {/* "+" port (hover-revealed) */}
         <button

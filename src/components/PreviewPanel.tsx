@@ -13,7 +13,7 @@ import {
   type PreviewImage,
   type RecordAction,
 } from "../lib/ipc";
-import { addTerminal, removeTerminal, setRunSessionId, store } from "../lib/store";
+import { addTerminal, effectiveRoot, removeTerminal, setRunSessionId, store } from "../lib/store";
 import { Button, Spinner, toast } from "./ui";
 
 const MONO = "var(--font-mono)";
@@ -120,7 +120,7 @@ const PreviewPanel: Component<{
   onClose: () => void;
   onRefresh: () => void;
 }> = (props) => {
-  const projectPath = () => store.currentProject?.path ?? "";
+  const projectPath = () => effectiveRoot() ?? "";
 
   // Session started by THIS panel (flutter/storybook/record). Never the shared
   // run session — that one is owned by RunButton and must survive panel close.

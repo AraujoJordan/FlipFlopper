@@ -11,6 +11,7 @@ mod review;
 mod runner;
 mod session;
 mod tools;
+mod worktree;
 
 use std::process::Command;
 
@@ -30,6 +31,7 @@ use pty::{PtyEvent, PtyManager, SessionInfo};
 use review::FileDiff;
 use runner::{AndroidEnvironment, IosEnvironment, RunTarget, ValidationTarget};
 use tools::ToolInfo;
+use worktree::{MergeOutcome, WorktreeInfo, WorktreeStatus};
 
 const MENU_OPEN_PROJECT: &str = "menu-open-project";
 const MENU_NEW_PROJECT: &str = "menu-new-project";
@@ -766,12 +768,13 @@ async fn spawn_agent(
     project_path: String,
     yolo: bool,
     extra_args: Option<Vec<String>>,
+    cwd: Option<String>,
 ) -> Result<String, String> {
     let extra_args = extra_args.unwrap_or_default();
     let spawn_app = app.clone();
     let (session_id, rx) = run_blocking(move || {
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_session(&manager, &agent_id, &project_path, yolo, &extra_args)
+        pty::spawn_session(&manager, &agent_id, &project_path, yolo, &extra_args, cwd.as_deref())
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
@@ -1320,6 +1323,48 @@ body, no explanation.\n\n{diff}"
         return Err(format!("{} did not return a commit message.", def.name));
     }
     Ok(cleaned)
+}
+
+#[tauri::command]
+async fn create_worktree(project_path: String, agent_id: String) -> Result<WorktreeInfo, String> {
+    run_blocking(move || worktree::create_worktree(&project_path, &agent_id)).await?
+}
+
+#[tauri::command]
+async fn get_worktree_status(worktree_path: String, source_branch: String) -> Result<WorktreeStatus, String> {
+    run_blocking(move || worktree::worktree_status(&worktree_path, &source_branch)).await
+}
+
+#[tauri::command]
+async fn commit_worktree(worktree_path: String, message: String) -> Result<Option<String>, String> {
+    run_blocking(move || worktree::commit_worktree(&worktree_path, &message)).await?
+}
+
+#[tauri::command]
+async fn merge_worktree_branch(project_path: String, branch: String) -> Result<MergeOutcome, String> {
+    run_blocking(move || worktree::merge_worktree_branch(&project_path, &branch)).await?
+}
+
+#[tauri::command]
+async fn remove_worktree(project_path: String, worktree_path: String, branch: String, delete_branch: bool) -> Result<(), String> {
+    run_blocking(move || worktree::remove_worktree(&project_path, &worktree_path, &branch, delete_branch)).await?
+}
+
+#[tauri::command]
+async fn validate_worktree(project_path: String, worktree_path: String, branch: String) -> Result<bool, String> {
+    run_blocking(move || worktree::validate_worktree(&project_path, &worktree_path, &branch)).await
+}
+
+#[tauri::command]
+async fn generate_worktree_commit_message(worktree_path: String, source_branch: String, agent_id: String) -> Result<String, String> {
+    let def = agents::find_agent(&agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
+    let diff = worktree::worktree_change_diff(&worktree_path, &source_branch)?;
+    if diff.trim().is_empty() { return Err("Nothing to summarize — no worktree changes.".to_string()); }
+    let prompt = format!("Write ONE concise imperative git commit subject line (optionally with a scope prefix like `feat(x):`), at most about 70 characters, summarizing the following changes. Output ONLY the subject line: no quotes, no backticks, no body, no explanation.\n\n{diff}");
+    let raw = agents::run_headless(def, &worktree_path, &prompt).await?;
+    let cleaned = raw.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string();
+    if cleaned.is_empty() { Err(format!("{} did not return a commit message.", def.name)) } else { Ok(cleaned) }
 }
 
 // ════════════════════════════════════════════════
@@ -2172,6 +2217,13 @@ pub fn run() {
             commits_ahead_of_remote,
             squash_unpushed,
             generate_commit_message,
+            create_worktree,
+            get_worktree_status,
+            commit_worktree,
+            merge_worktree_branch,
+            remove_worktree,
+            validate_worktree,
+            generate_worktree_commit_message,
             // Tools
             get_tool_catalog,
             install_tool,

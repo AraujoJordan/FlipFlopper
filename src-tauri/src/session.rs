@@ -15,6 +15,12 @@ use crate::project::home_dir;
 pub struct PersistedAgentTab {
     pub agent_id: String,
     pub flow_node_id: Option<String>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
+    #[serde(default)]
+    pub worktree_source_branch: Option<String>,
 }
 
 /// One open project in the single-window session: a project path plus the

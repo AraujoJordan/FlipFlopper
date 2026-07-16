@@ -1,7 +1,7 @@
 import { createEffect, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import { store, addTab, setActiveTab, removeTab, type Tab } from "./store";
-import { onPtyOutput, onPtyExit, ptySendLine, spawnAgent, continueAgent } from "./ipc";
+import { onPtyOutput, onPtyExit, ptySendLine, spawnAgent, continueAgent, createWorktree, removeWorktree } from "./ipc";
 import { stripAnsi, agentTuning } from "./agentMeta";
 import { readLegacyJson, readPref, writePref } from "./appPrefs";
 import { toast } from "../components/ui";
@@ -32,6 +32,8 @@ export interface FlowNode {
   startedAt: number | null;
   finishedAt: number | null;
   lastOutput: string;
+  worktree: boolean;
+  worktreeInfo: Tab["worktree"] | null;
 }
 
 export interface FlowEdge {
@@ -76,6 +78,11 @@ const preboundSessions = new Set<string>();
 const firingNodes = new Set<string>();
 const pendingRebinds = new Set<string>();
 const pendingTaskStarts = new Map<string, number>();
+const pendingWorktreeNodeRemovals = new Set<string>();
+
+export function cancelPendingWorktreeNodeRemoval(sessionId: string) {
+  pendingWorktreeNodeRemovals.delete(sessionId);
+}
 
 /** Mark node ids that will be re-bound during the restore loop, so the
  *  tab-sync effect doesn't prune them as edge-less detached nodes before
@@ -123,6 +130,7 @@ interface PersistedNode {
   prompt: string | null;
   model?: string | null;
   effort?: string | null;
+  worktree?: boolean;
   x: number;
   y: number;
 }
@@ -189,6 +197,7 @@ function persistableFlowSnapshot(): PersistedFlow {
       prompt: node.prompt,
       model: node.model,
       effort: node.effort,
+      worktree: node.worktree,
       x: node.x,
       y: node.y,
     }));
@@ -256,6 +265,8 @@ export function loadFlowsForProject(projectPath: string | null) {
       prompt: n.prompt ?? null,
       model: n.model ?? null,
       effort: n.effort ?? null,
+      worktree: n.worktree ?? false,
+      worktreeInfo: null,
       sessionId: null,
       status,
       x: n.x ?? 0,
@@ -302,6 +313,8 @@ function createLiveNode(tab: Tab) {
     prompt: null,
     model: null,
     effort: null,
+    worktree: !!tab.worktree,
+    worktreeInfo: tab.worktree ?? null,
     sessionId: tab.sessionId,
     status: "spawning",
     x: 24,
@@ -321,6 +334,16 @@ function createLiveNode(tab: Tab) {
 
 function syncTabsToNodes(tabs: Tab[]) {
   const sessions = new Set(tabs.map((t) => t.sessionId));
+
+  for (const sessionId of [...pendingWorktreeNodeRemovals]) {
+    if (sessions.has(sessionId)) continue;
+    const node = flow.nodes.find((item) => item.sessionId === sessionId);
+    if (node) {
+      setFlow("edges", (edges) => edges.filter((edge) => edge.from !== node.id && edge.to !== node.id));
+      setFlow("nodes", (nodes) => nodes.filter((item) => item.id !== node.id));
+    }
+    pendingWorktreeNodeRemovals.delete(sessionId);
+  }
 
   const connected = new Set<string>();
   for (const edge of flow.edges) {
@@ -765,9 +788,19 @@ async function fireStep(nodeId: string, edgeId: string | null) {
       ? tuning.spawnArgs(node.model, node.effort)
       : [];
   let tunedAtSpawn = false;
+  let worktreeInfo: Tab["worktree"] | undefined;
 
   try {
-    if (carry && fromAgentId) {
+    if (node.worktree) {
+      if (carry) toast("Isolated worktree steps start without carried context", "info");
+      const wt = await createWorktree(project.path, node.agentId);
+      worktreeInfo = { path: wt.worktree_path, branch: wt.branch, sourceBranch: wt.source_branch };
+      sessionId = await spawnAgent(
+        node.agentId, project.path, untrack(() => store.yoloMode),
+        spawnTuningArgs.length > 0 ? spawnTuningArgs : undefined, wt.worktree_path,
+      );
+      tunedAtSpawn = spawnTuningArgs.length > 0;
+    } else if (carry && fromAgentId) {
       try {
         sessionId = await continueAgent(
           project.path,
@@ -796,6 +829,7 @@ async function fireStep(nodeId: string, edgeId: string | null) {
     }
     preboundSessions.add(sessionId);
     bindNode(nodeId, sessionId);
+    setFlow("nodes", (n) => n.id === nodeId, "worktreeInfo", worktreeInfo ?? null);
     // Start readiness listener BEFORE addTab so it's registered before
     // TerminalPane calls ptyAttach and releases the buffered first chunk.
     const readyPromise = waitForReady(sessionId);
@@ -807,6 +841,7 @@ async function fireStep(nodeId: string, edgeId: string | null) {
       label: node.label,
       agentId: node.agentId,
       agentIcon: agent?.icon ?? "",
+      worktree: worktreeInfo,
     });
 
     await readyPromise;
@@ -819,6 +854,7 @@ async function fireStep(nodeId: string, edgeId: string | null) {
       setFlow("edges", (e) => e.id === edgeId, "gatePending", false);
     }
   } catch (e) {
+    if (worktreeInfo) void removeWorktree(project.path, worktreeInfo.path, worktreeInfo.branch, true);
     markNodeFailed(nodeId);
     toast(`Step failed: ${String(e)}`, "error");
   } finally {
@@ -855,9 +891,11 @@ export function bindNode(nodeId: string, sessionId: string) {
 /** Re-bind a persisted live node after an app restart. Force-gates its
  *  unfired outgoing edges so startup noise can't fire chains. Returns the
  *  number of edges that were force-gated. */
-export function rebindNode(nodeId: string, sessionId: string): number {
+export function rebindNode(nodeId: string, sessionId: string, worktreeInfo?: Tab["worktree"]): number {
   pendingRebinds.delete(nodeId);
   if (!bindNode(nodeId, sessionId)) return 0;
+  setFlow("nodes", (n) => n.id === nodeId, "worktreeInfo", worktreeInfo ?? null);
+  if (worktreeInfo) setFlow("nodes", (n) => n.id === nodeId, "worktree", true);
   const edges = untrack(() =>
     flow.edges.filter((e) => e.from === nodeId && !e.fired),
   );
@@ -874,6 +912,7 @@ export function addStepNode(
   prompt: string,
   gate: boolean,
   carry: boolean,
+  worktree: boolean,
   model: string | null = null,
   effort: string | null = null,
 ) {
@@ -909,6 +948,8 @@ export function addStepNode(
     startedAt: null,
     finishedAt: null,
     lastOutput: "",
+    worktree,
+    worktreeInfo: null,
   };
   const edge: FlowEdge = {
     id: crypto.randomUUID(),
@@ -932,6 +973,7 @@ export function updateStepNode(
   prompt: string,
   gate?: boolean,
   carry?: boolean,
+  worktree?: boolean,
   model: string | null = null,
   effort: string | null = null,
 ) {
@@ -942,6 +984,7 @@ export function updateStepNode(
     prompt,
     model,
     effort,
+    ...(worktree !== undefined ? { worktree } : {}),
   });
   if (gate !== undefined) {
     const edge = untrack(() =>
@@ -969,10 +1012,17 @@ export function moveNode(nodeId: string, x: number, y: number) {
 }
 
 export function removeNode(nodeId: string) {
+  const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
+  const tab = node?.sessionId ? untrack(() => store.tabs.find((item) => item.sessionId === node.sessionId)) : undefined;
+  if (node?.sessionId && tab?.worktree) {
+    pendingWorktreeNodeRemovals.add(node.sessionId);
+    stopMonitor(node.sessionId);
+    removeTab(node.sessionId);
+    return;
+  }
   setFlow("edges", (edges) =>
     edges.filter((e) => e.from !== nodeId && e.to !== nodeId),
   );
-  const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
   if (node?.sessionId) {
     stopMonitor(node.sessionId);
     // Close the bound tab so tab-sync doesn't recreate a live node.
@@ -1028,14 +1078,22 @@ export async function runNodeNow(nodeId: string) {
   setNodeField(nodeId, "startedAt", Date.now());
   setNodeField(nodeId, "finishedAt", null);
   let sessionId: string | null = null;
+  let worktreeInfo: Tab["worktree"] | undefined;
   try {
+    if (node.worktree) {
+      const wt = await createWorktree(project.path, node.agentId);
+      worktreeInfo = { path: wt.worktree_path, branch: wt.branch, sourceBranch: wt.source_branch };
+    }
     sessionId = await spawnAgent(
       node.agentId,
       project.path,
       untrack(() => store.yoloMode),
+      undefined,
+      worktreeInfo?.path,
     );
     preboundSessions.add(sessionId);
     bindNode(nodeId, sessionId);
+    setFlow("nodes", (n) => n.id === nodeId, "worktreeInfo", worktreeInfo ?? null);
     const agent = untrack(() =>
       store.agents.find((a) => a.id === node.agentId),
     );
@@ -1044,8 +1102,10 @@ export async function runNodeNow(nodeId: string) {
       label: node.label,
       agentId: node.agentId,
       agentIcon: agent?.icon ?? "",
+      worktree: worktreeInfo,
     });
   } catch (e) {
+    if (worktreeInfo) void removeWorktree(project.path, worktreeInfo.path, worktreeInfo.branch, true);
     markNodeFailed(nodeId);
     toast(`Launch failed: ${String(e)}`, "error");
   } finally {

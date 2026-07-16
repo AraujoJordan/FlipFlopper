@@ -1,5 +1,5 @@
 import { Component, For, Show, createSignal } from "solid-js";
-import { store, openReview, bumpGitStatus } from "../../lib/store";
+import { store, openReview, bumpGitStatus, effectiveRoot } from "../../lib/store";
 import {
   gitStage, gitUnstage, gitDiscard, gitCommit, gitStashPush, gitStashPop, getGitLog,
   type StatusEntry, type SyncStatus, triggerHaptic,
@@ -66,7 +66,7 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
     if (!store.currentProject) return;
     void triggerHaptic("generic");
     try {
-      await gitStage(store.currentProject.path, [props.entry.path]);
+      await gitStage(effectiveRoot()!, [props.entry.path]);
       settle();
     } catch (err) {
       toast(`Stage failed: ${String(err)}`, "error");
@@ -78,7 +78,7 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
     if (!store.currentProject) return;
     void triggerHaptic("generic");
     try {
-      await gitUnstage(store.currentProject.path, [props.entry.path]);
+      await gitUnstage(effectiveRoot()!, [props.entry.path]);
       settle();
     } catch (err) {
       toast(`Unstage failed: ${String(err)}`, "error");
@@ -98,7 +98,7 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
     void triggerHaptic("levelChange");
     try {
       await gitDiscard(
-        store.currentProject.path,
+        effectiveRoot()!,
         untracked ? [] : [props.entry.path],
         untracked ? [props.entry.path] : [],
       );
@@ -201,7 +201,7 @@ const ChangesTab: Component<{
     if (!store.currentProject || unstaged().length === 0) return;
     void triggerHaptic("generic");
     try {
-      await gitStage(store.currentProject.path, unstaged().map((e) => e.path));
+      await gitStage(effectiveRoot()!, unstaged().map((e) => e.path));
       bumpGitStatus();
     } catch (e) {
       toast(`Stage all failed: ${String(e)}`, "error");
@@ -212,7 +212,7 @@ const ChangesTab: Component<{
     if (!store.currentProject || staged().length === 0) return;
     void triggerHaptic("generic");
     try {
-      await gitUnstage(store.currentProject.path, staged().map((e) => e.path));
+      await gitUnstage(effectiveRoot()!, staged().map((e) => e.path));
       bumpGitStatus();
     } catch (e) {
       toast(`Unstage all failed: ${String(e)}`, "error");
@@ -225,7 +225,7 @@ const ChangesTab: Component<{
     setAmend(next);
     if (next && !message().trim() && store.currentProject) {
       try {
-        const log = await getGitLog(store.currentProject.path, 1);
+        const log = await getGitLog(effectiveRoot()!, 1);
         if (log[0]) setMessage(log[0].message);
       } catch {
         // best-effort prefill only
@@ -269,7 +269,7 @@ const ChangesTab: Component<{
     setCommitting(true);
     void triggerHaptic("generic");
     try {
-      const result = await gitCommit(store.currentProject.path, msg, all, amend());
+      const result = await gitCommit(effectiveRoot()!, msg, all, amend());
       void triggerHaptic("alignment");
       toast(`Committed ${result.sha}`, "success");
       setMessage("");
@@ -290,7 +290,7 @@ const ChangesTab: Component<{
     setStashBusy(true);
     void triggerHaptic("generic");
     try {
-      await gitStashPush(store.currentProject.path, stashMsg().trim() || undefined);
+      await gitStashPush(effectiveRoot()!, stashMsg().trim() || undefined);
       void triggerHaptic("alignment");
       toast("Stashed changes", "success");
       setStashMsg("");
@@ -309,7 +309,7 @@ const ChangesTab: Component<{
     setStashBusy(true);
     void triggerHaptic("generic");
     try {
-      await gitStashPop(store.currentProject.path);
+      await gitStashPop(effectiveRoot()!);
       void triggerHaptic("alignment");
       toast("Restored stashed changes", "success");
       bumpGitStatus();

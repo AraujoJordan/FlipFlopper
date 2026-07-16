@@ -1,5 +1,5 @@
 import { Component, Show, createSignal } from "solid-js";
-import { store, bumpGitStatus, toggleGitPanelCollapsed, updateCurrentBranch } from "../../lib/store";
+import { store, bumpGitStatus, toggleGitPanelCollapsed, updateCurrentBranch, effectiveRoot } from "../../lib/store";
 import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, commitsAheadOfRemote, type SyncStatus, triggerHaptic } from "../../lib/ipc";
 import { Button, Spinner, toast } from "../ui";
 import { openConflictDialog } from "./ConflictFixDialog";
@@ -37,7 +37,7 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
   }
 
   const doFetch = () => run("fetch", async () => {
-    await gitFetch(store.currentProject!.path);
+    await gitFetch(effectiveRoot()!);
     return "Fetched";
   });
 
@@ -54,13 +54,13 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
       // Squashing is refused on main/master server-side anyway (mirrors the
       // rollback/rename guards), so skip the dialog there and push directly.
       if (!isProtectedBranch(branch)) {
-        const commits = await commitsAheadOfRemote(project.path);
+        const commits = await commitsAheadOfRemote(effectiveRoot()!);
         if ((isPublish && commits.length >= 1) || commits.length >= 2) {
           openSquashPushDialog({ commits, isPublish });
           return;
         }
       }
-      const msg = await gitPush(project.path);
+      const msg = await gitPush(effectiveRoot()!);
       bumpGitStatus();
       await updateCurrentBranch();
       void triggerHaptic("alignment");
@@ -83,7 +83,7 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
     setBusyOp("pull");
     void triggerHaptic("generic");
     try {
-      const outcome = await gitPull(store.currentProject.path);
+      const outcome = await gitPull(effectiveRoot()!);
       bumpGitStatus();
       await updateCurrentBranch();
       if (outcome.conflicted) {
@@ -104,7 +104,7 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
   async function backFromDetached() {
     if (!store.currentProject) return;
     try {
-      await gitCheckoutPrevious(store.currentProject.path);
+      await gitCheckoutPrevious(effectiveRoot()!);
       bumpGitStatus();
       await updateCurrentBranch();
       toast("Returned from detached HEAD", "success");

@@ -1,5 +1,5 @@
 import { Component, For, Show, createResource, createSignal, onCleanup } from "solid-js";
-import { store, setGitPanelTab, toggleGitPanelCollapsed, addTerminal, toggleTerminalPanel } from "../../lib/store";
+import { store, setGitPanelTab, toggleGitPanelCollapsed, addTerminal, toggleTerminalPanel, effectiveRoot } from "../../lib/store";
 import { getSyncStatus, getGitStatusV2, openTerminal } from "../../lib/ipc";
 import SyncHeader from "./SyncHeader";
 import ChangesTab from "./ChangesTab";
@@ -48,7 +48,7 @@ const GitPanel: Component = () => {
   });
 
   const resourceKey = () => ({
-    path: store.currentProject?.path,
+    path: effectiveRoot(),
     _tick: tick(),
     _v: store.gitStatusVersion,
   });
@@ -66,7 +66,7 @@ const GitPanel: Component = () => {
     path ? { path, value: await getGitStatusV2(path) } : null
   );
 
-  const currentPath = () => store.currentProject?.path;
+  const currentPath = () => effectiveRoot();
 
   const syncData = () => {
     const r = syncRaw();
@@ -102,7 +102,7 @@ const GitPanel: Component = () => {
         if (openingTerminal()) return;
         setOpeningTerminal(true);
         try {
-          const sessionId = await openTerminal(project.path);
+          const sessionId = await openTerminal(effectiveRoot()!);
           addTerminal({ sessionId, label: "Terminal", kind: "shell" });
           if (!store.terminalPanelOpen) {
             toggleTerminalPanel();

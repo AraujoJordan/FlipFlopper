@@ -6,6 +6,8 @@ import {
   flushAllEditorSaves,
   refreshOpenedFiles,
   updateCurrentBranch,
+  activeWorktree,
+  effectiveRoot,
 } from "../lib/store";
 import { ensureWorkBranch, getRecentBranches, gitSwitchBranch, triggerHaptic } from "../lib/ipc";
 import { isProtectedBranch, WORK_BRANCH } from "../lib/constants";
@@ -27,7 +29,7 @@ const BranchIndicator: Component = () => {
     if (open()) {
       const project = store.currentProject;
       if (project) {
-        getRecentBranches(project.path, 15)
+        getRecentBranches(effectiveRoot()!, 15)
           .then(setRecentBranches)
           .catch((e) => {
             console.error("Failed to load recent branches", e);
@@ -50,7 +52,7 @@ const BranchIndicator: Component = () => {
     setSwitching(true);
     void triggerHaptic("generic");
     try {
-      await ensureWorkBranch(project.path, WORK_BRANCH);
+      await ensureWorkBranch(effectiveRoot()!, WORK_BRANCH);
       await updateCurrentBranch();
       bumpGitStatus();
       bumpFileTree();
@@ -81,7 +83,7 @@ const BranchIndicator: Component = () => {
     setSwitching(true);
     void triggerHaptic("generic");
     try {
-      await gitSwitchBranch(project.path, targetBranch);
+      await gitSwitchBranch(effectiveRoot()!, targetBranch);
       await updateCurrentBranch();
       bumpGitStatus();
       bumpFileTree();
@@ -121,7 +123,9 @@ const BranchIndicator: Component = () => {
           width: "7px", height: "7px", "border-radius": "50%",
           background: dotColor(), "box-shadow": `0 0 7px ${dotColor()}`,
         }} />
-        {branch() || "no branch"}
+        <Show when={activeWorktree()} fallback={branch() || "no branch"}>
+          {(wt) => <>⎇ {wt().branch.replace(/^flipflopper\//, "")}</>}
+        </Show>
       </button>
 
       <Menu open={open()} onClose={() => setOpen(false)} anchorRef={toggleRef} align="right" width={240}>

@@ -7,6 +7,7 @@ import { Button, Menu, MenuItem, Spinner, toast } from "../ui";
 
 interface ConflictState {
   files: string[];
+  context?: string;
 }
 
 const [state, setState] = createSignal<ConflictState | null>(null);
@@ -14,13 +15,14 @@ const [state, setState] = createSignal<ConflictState | null>(null);
 /** Show the "fix with an AI agent, or leave it" dialog for a set of
  *  conflicted file paths (e.g. after a pull that couldn't fast-forward and
  *  fell back to a real merge). */
-export function openConflictDialog(files: string[]) {
-  setState({ files });
+export function openConflictDialog(files: string[], context?: string) {
+  setState({ files, context });
 }
 
-function buildConflictPrompt(files: string[]): string {
+function buildConflictPrompt(files: string[], context?: string): string {
   const list = files.map((f) => `- ${f}`).join("\n");
-  return `Pulling from the remote created a merge conflict in ${files.length} file${files.length === 1 ? "" : "s"}:\n${list}\n\nPlease resolve the conflict markers (<<<<<<<, =======, >>>>>>>) in these files, keeping the intent of both sides where they don't overlap, then let me know when it's done so I can review.`;
+  const origin = context ?? "Pulling from the remote";
+  return `${origin} created a merge conflict in ${files.length} file${files.length === 1 ? "" : "s"}:\n${list}\n\nPlease resolve the conflict markers (<<<<<<<, =======, >>>>>>>) in these files, keeping the intent of both sides where they don't overlap, then let me know when it's done so I can review.`;
 }
 
 export const ConflictFixDialogHost: Component = () => {
@@ -60,7 +62,7 @@ export const ConflictFixDialogHost: Component = () => {
       // Type the prompt in once the CLI has produced its first output (i.e.
       // it's booted and ready for input), with a timeout fallback in case it
       // stays silent.
-      const prompt = buildConflictPrompt(s.files);
+      const prompt = buildConflictPrompt(s.files, s.context);
       let sent = false;
       const send = () => {
         if (sent) return;
@@ -111,11 +113,11 @@ export const ConflictFixDialogHost: Component = () => {
             }}
           >
             <div style={{ "font-size": "13.5px", color: "var(--fg-default)", "font-weight": "600", "margin-bottom": "6px" }}>
-              Merge conflict after pulling
+              {s().context ? "Merge conflict after worktree merge" : "Merge conflict after pulling"}
             </div>
             <div style={{ "font-size": "12px", color: "var(--fg-muted)", "line-height": "1.5", "margin-bottom": "10px" }}>
-              {s().files.length} file{s().files.length === 1 ? "" : "s"} need resolution. Nothing else changed —
-              the merge is left in place so you (or an agent) can fix it.
+              {s().files.length} file{s().files.length === 1 ? "" : "s"} need resolution. The merge is left in place —
+              you or an agent can fix it in the main checkout.
             </div>
             <div style={{
               "max-height": "120px", overflow: "auto",

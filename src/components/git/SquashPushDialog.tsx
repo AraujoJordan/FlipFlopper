@@ -1,5 +1,5 @@
 import { Component, For, Show, createSignal, createEffect } from "solid-js";
-import { store, bumpGitStatus, rankContinueCandidates, updateCurrentBranch } from "../../lib/store";
+import { store, bumpGitStatus, rankContinueCandidates, updateCurrentBranch, effectiveRoot } from "../../lib/store";
 import {
   gitPush, squashUnpushed, generateCommitMessage,
   type AgentInfo, type CommitEntry,
@@ -48,7 +48,7 @@ export const SquashPushDialogHost: Component = () => {
   });
 
   const candidates = (): AgentInfo[] =>
-    rankContinueCandidates(store.currentProject?.path ?? "", "", store.agents, false)
+    rankContinueCandidates(effectiveRoot() ?? "", "", store.agents, false)
       .filter((agent) => agent.headless_supported);
 
   const selectedAgent = (): AgentInfo | undefined => {
@@ -74,7 +74,7 @@ export const SquashPushDialogHost: Component = () => {
     if (!project || !agent) return;
     setGenerating(true);
     try {
-      const message = await generateCommitMessage(project.path, agent.id);
+      const message = await generateCommitMessage(effectiveRoot()!, agent.id);
       setName(message);
     } catch (e) {
       toast(`Failed to generate a commit message: ${String(e)}`, "error");
@@ -96,8 +96,8 @@ export const SquashPushDialogHost: Component = () => {
     if (!project || !trimmed) return;
     setBusy("squash");
     try {
-      await squashUnpushed(project.path, trimmed);
-      const msg = await gitPush(project.path);
+      await squashUnpushed(effectiveRoot()!, trimmed);
+      const msg = await gitPush(effectiveRoot()!);
       await afterPush(msg);
     } catch (e) {
       toast(`Failed to squash and push: ${String(e)}`, "error");
@@ -111,7 +111,7 @@ export const SquashPushDialogHost: Component = () => {
     if (!project) return;
     setBusy("plain");
     try {
-      const msg = await gitPush(project.path);
+      const msg = await gitPush(effectiveRoot()!);
       await afterPush(msg);
     } catch (e) {
       toast(`Failed to push: ${String(e)}`, "error");

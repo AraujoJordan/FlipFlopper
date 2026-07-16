@@ -26,6 +26,8 @@ import {
   findOpenProjectTab,
   newProjectTabId,
   snapshotActiveProject,
+  effectiveRoot,
+  closeAllEditorFiles,
   type ProjectSnapshot,
 } from "./lib/store";
 import {
@@ -45,6 +47,8 @@ import {
   type PersistedProjectTabDto,
   type SessionStateDto,
   type AgentInfo,
+  validateWorktree,
+  removeWorktree,
 } from "./lib/ipc";
 import type { Tab, WorkspaceMode } from "./lib/store";
 import {
@@ -65,6 +69,7 @@ import FileTree from "./components/FileTree";
 import ProjectTabStrip from "./components/ProjectTabStrip";
 import GitPanel from "./components/git/GitPanel";
 import { ConflictFixDialogHost } from "./components/git/ConflictFixDialog";
+import { WorktreeCloseDialogHost } from "./components/git/WorktreeCloseDialog";
 import { SquashPushDialogHost } from "./components/git/SquashPushDialog";
 import AgentTaskDialogHost from "./components/AgentTaskDialog";
 import OmniSearch from "./components/OmniSearch";
@@ -127,7 +132,7 @@ async function readWorkspace(): Promise<PersistedWorkspace | null> {
  *  store either via `addTab` (active project) or directly into a snapshot. */
 async function spawnProjectAgentTabs(
   projectPath: string,
-  tabsToRestore: { agentId: string; flowNodeId?: string }[],
+  tabsToRestore: { agentId: string; flowNodeId?: string; worktree?: Tab["worktree"] }[],
   agents: AgentInfo[],
   yolo: boolean,
   onTab?: (tab: Tab) => void,
@@ -146,24 +151,35 @@ async function spawnProjectAgentTabs(
   const spawnable = tabsToRestore
     .map((saved) => ({ saved, agent: agents.find((a) => a.id === saved.agentId) }))
     .filter((entry) => entry.agent?.installed);
-  const spawned = await Promise.allSettled(
-    spawnable.map(({ agent }) => spawnAgent(agent!.id, projectPath, yolo)),
-  );
+  const spawned = await Promise.allSettled(spawnable.map(async ({ saved, agent }) => {
+    let worktree = saved.worktree;
+    if (worktree) {
+      const valid = await validateWorktree(projectPath, worktree.path, worktree.branch).catch(() => false);
+      if (!valid) {
+        toast(`Worktree for ${worktree.branch} is gone; restored in the project checkout`, "info");
+        void removeWorktree(projectPath, worktree.path, worktree.branch, false);
+        worktree = undefined;
+      }
+    }
+    const sessionId = await spawnAgent(agent!.id, projectPath, yolo, undefined, worktree?.path);
+    return { sessionId, worktree };
+  }));
   spawnable.forEach(({ saved, agent }, i) => {
     const result = spawned[i];
     if (result.status !== "fulfilled") return; // skip failed restore
-    const sessionId = result.value;
+    const { sessionId, worktree } = result.value;
     const tab: Tab = {
       sessionId,
       label: agent!.name,
       agentId: agent!.id,
       agentIcon: agent!.icon,
+      worktree,
     };
     restoredTabs.push(tab);
     // Rebind BEFORE the tab is registered so the tab-sync effect sees the
     // already-bound node instead of creating a duplicate live node.
     if (saved.flowNodeId) {
-      gatedCount += rebindNode(saved.flowNodeId, sessionId);
+      gatedCount += rebindNode(saved.flowNodeId, sessionId, worktree);
     }
     onTab?.(tab);
   });
@@ -306,6 +322,25 @@ const WorkspaceModeSwitch: Component = () => {
 
 const App: Component = () => {
   const win = getCurrentWindow();
+  let lastWorkspaceRoot: string | null = null;
+  let lastRootProjectId: string | null = null;
+  let rootChangeGeneration = 0;
+
+  createEffect(() => {
+    const root = effectiveRoot();
+    const projectId = store.activeProjectId;
+    if (root === lastWorkspaceRoot && projectId === lastRootProjectId) return;
+    const switchedProject = projectId !== lastRootProjectId;
+    lastWorkspaceRoot = root;
+    lastRootProjectId = projectId;
+    const generation = ++rootChangeGeneration;
+    void (async () => {
+      if (!switchedProject) await closeAllEditorFiles();
+      if (generation !== rootChangeGeneration) return;
+      setStore("fileTreePath", root);
+      await updateCurrentBranch();
+    })();
+  });
 
   // Modes the user has visited this session. The editor/review panes (and
   // their lazy chunks) only mount on first visit; after that they stay
@@ -455,7 +490,7 @@ const App: Component = () => {
     // Resolve the active project (+ its persisted agent tabs) and the list of
     // inactive project tabs to restore as dormant snapshots.
     let primaryPath: string | null = null;
-    let primaryTabs: { agentId: string; flowNodeId?: string }[] = [];
+    let primaryTabs: { agentId: string; flowNodeId?: string; worktree?: Tab["worktree"] }[] = [];
     let primaryId: string | null = null;
     if (session && session.tabs.length > 0) {
       console.log(`[FlipFlopper] Restoring session with ${session.tabs.length} tabs.`);
@@ -470,6 +505,9 @@ const App: Component = () => {
       primaryTabs = active.tabs.map((t) => ({
         agentId: t.agent_id,
         flowNodeId: t.flow_node_id ?? undefined,
+        worktree: t.worktree_path && t.worktree_branch && t.worktree_source_branch ? {
+          path: t.worktree_path, branch: t.worktree_branch, sourceBranch: t.worktree_source_branch,
+        } : undefined,
       }));
       primaryId = active.id;
 
@@ -486,13 +524,15 @@ const App: Component = () => {
           }
           console.log(`[FlipFlopper] Active project ${primaryPath} opened. Spawning agent tabs...`);
 
-          const { gatedCount } = await spawnProjectAgentTabs(
+          const { tabs: restoredTabs, gatedCount } = await spawnProjectAgentTabs(
             project.path,
             primaryTabs,
             agents,
             store.yoloMode,
             (tab) => addTab(tab),
           );
+          const restoredActive = restoredTabs[active.active_index] ?? restoredTabs[restoredTabs.length - 1];
+          if (restoredActive) setStore("activeTabId", restoredActive.sessionId);
           if (gatedCount > 0) toast("Workflow restored — chains paused for review");
           console.log(`[FlipFlopper] Active project agent tabs spawned.`);
         } catch (e) {
@@ -537,7 +577,11 @@ const App: Component = () => {
               pendingTabs: entry.tabs.map((t) => ({
                 agentId: t.agent_id,
                 flowNodeId: t.flow_node_id ?? undefined,
+                worktree: t.worktree_path && t.worktree_branch && t.worktree_source_branch ? {
+                  path: t.worktree_path, branch: t.worktree_branch, sourceBranch: t.worktree_source_branch,
+                } : undefined,
               })),
+              pendingActiveIndex: entry.active_index,
             };
             setStore("projectTabs", i, snap);
             console.log(`[FlipFlopper] Preloaded inactive project [${i}]: ${entry.project_path}`);
@@ -685,15 +729,29 @@ const App: Component = () => {
             tabs: activeTabs.map((t) => ({
               agent_id: t.agentId,
               flow_node_id: flowNodeIdForSession(t.sessionId) ?? null,
+              worktree_path: t.worktree?.path ?? null,
+              worktree_branch: t.worktree?.branch ?? null,
+              worktree_source_branch: t.worktree?.sourceBranch ?? null,
             })),
             active_index: Math.max(0, activeIndex),
           });
         }
       } else {
         const snapTabs = snap.pendingTabs
-          ? snap.pendingTabs.map((p) => ({ agent_id: p.agentId, flow_node_id: p.flowNodeId ?? null }))
-          : snap.tabs.map((t) => ({ agent_id: t.agentId, flow_node_id: flowNodeIdForSession(t.sessionId) ?? null }));
-        tabs.push({ id: snap.id, project_path: snap.project.path, tabs: snapTabs, active_index: 0 });
+          ? snap.pendingTabs.map((p) => ({
+              agent_id: p.agentId, flow_node_id: p.flowNodeId ?? null,
+              worktree_path: p.worktree?.path ?? null, worktree_branch: p.worktree?.branch ?? null,
+              worktree_source_branch: p.worktree?.sourceBranch ?? null,
+            }))
+          : snap.tabs.map((t) => ({
+              agent_id: t.agentId, flow_node_id: flowNodeIdForSession(t.sessionId) ?? null,
+              worktree_path: t.worktree?.path ?? null, worktree_branch: t.worktree?.branch ?? null,
+              worktree_source_branch: t.worktree?.sourceBranch ?? null,
+            }));
+        const snapActiveIndex = snap.pendingTabs
+          ? (snap.pendingActiveIndex ?? 0)
+          : Math.max(0, snap.tabs.findIndex((tab) => tab.sessionId === snap.activeTabId));
+        tabs.push({ id: snap.id, project_path: snap.project.path, tabs: snapTabs, active_index: snapActiveIndex });
       }
     }
     pendingSession = { active_id: activeId, tabs };
@@ -827,8 +885,9 @@ const App: Component = () => {
         setStore("projectTabs", idx, {
           tabs,
           agentModes: {},
-          activeTabId: tabs.length > 0 ? tabs[tabs.length - 1].sessionId : null,
+          activeTabId: tabs.length > 0 ? (tabs[target.pendingActiveIndex ?? tabs.length - 1] ?? tabs[tabs.length - 1]).sessionId : null,
           pendingTabs: undefined,
+          pendingActiveIndex: undefined,
         });
         if (gatedCount > 0) toast("Workflow restored — chains paused for review");
       }
@@ -1297,6 +1356,7 @@ const App: Component = () => {
       <ConfirmHost />
       <AgentTaskDialogHost />
       <ConflictFixDialogHost />
+      <WorktreeCloseDialogHost />
       <SquashPushDialogHost />
       <Show when={updateDialogOpen()}>
         <UpdateDialog open={updateDialogOpen()} onClose={() => setUpdateDialogOpen(false)} />

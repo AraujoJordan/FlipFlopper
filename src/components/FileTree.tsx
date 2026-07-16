@@ -4,7 +4,7 @@ import {
 import {
   store, openReview, openEditorFile, openFileHistory, toggleFileSelection, clearFileSelection,
   bumpGitStatus, toggleExplorerCollapsed, setFileClipboard, clearFileClipboard, setPendingPromptSeed,
-  addTerminal,
+  addTerminal, effectiveRoot, activeWorktree,
 } from "../lib/store";
 import {
   getFileTree, getGitStatus, injectFileRefs, createEntry, renameEntry, deleteEntry, searchPromptFiles,
@@ -107,7 +107,7 @@ const FileTree: Component = () => {
   );
 
   const [gitStatus] = createResource(
-    () => (store.currentProject ? { path: store.currentProject.path, v: store.gitStatusVersion } : null),
+    () => (store.currentProject ? { path: effectiveRoot()!, v: store.gitStatusVersion } : null),
     (key) => (key ? getGitStatus(key.path) : Promise.resolve([]))
   );
 
@@ -398,7 +398,7 @@ const FileTree: Component = () => {
     setMenu(null);
     const clipboard = store.fileClipboard;
     if (!clipboard || clipboard.paths.length === 0) return;
-    const projectPath = store.currentProject?.path;
+    const projectPath = effectiveRoot();
     if (!projectPath) return;
     let failures = 0;
     for (const src of clipboard.paths) {
@@ -440,7 +440,7 @@ const FileTree: Component = () => {
 
   async function handleOpenInTerminal(entry: FileEntry) {
     setMenu(null);
-    const projectPath = store.currentProject?.path;
+    const projectPath = effectiveRoot();
     if (!projectPath) return;
     const cwd = entry.is_dir ? entry.path : parentOf(entry.path);
     try {
@@ -472,7 +472,7 @@ const FileTree: Component = () => {
 
   async function handleStage(entry: FileEntry) {
     setMenu(null);
-    const projectPath = store.currentProject?.path;
+    const projectPath = effectiveRoot();
     if (!projectPath) return;
     const paths = targetPaths(entry).map(relPathOf);
     try {
@@ -486,7 +486,7 @@ const FileTree: Component = () => {
 
   async function handleUnstage(entry: FileEntry) {
     setMenu(null);
-    const projectPath = store.currentProject?.path;
+    const projectPath = effectiveRoot();
     if (!projectPath) return;
     const paths = targetPaths(entry).map(relPathOf);
     try {
@@ -500,7 +500,7 @@ const FileTree: Component = () => {
 
   async function handleDiscard(entry: FileEntry, statuses: FileStatus[]) {
     setMenu(null);
-    const projectPath = store.currentProject?.path;
+    const projectPath = effectiveRoot();
     if (!projectPath) return;
     const st = entryGitStatus(entry, statuses);
     const isUntracked = st?.status === "??";
@@ -963,6 +963,7 @@ const FileTree: Component = () => {
           }}
         >
           Explorer
+          <Show when={activeWorktree()}>{(wt) => <span style={{ "text-transform": "none", "letter-spacing": "0", "font-family": "var(--font-mono)", color: "var(--accent)", "margin-left": "6px" }}>⎇ {wt().branch.replace(/^flipflopper\//, "")}</span>}</Show>
         </button>
         <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
           <Show when={statuses().length > 0}>
