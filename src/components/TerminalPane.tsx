@@ -13,9 +13,9 @@ import { getCachedTerminal, registerCachedTerminal, type CachedTerminal } from "
 interface Props {
   sessionId: string;
   active: boolean;
-  /** "agent" (default) routes Shift+Tab mode-cycling and printable keys through
-   *  the prompt composer's type-through action; "shell" leaves all keys to the
-   *  PTY, since a plain terminal has no agent mode and no composer to type into. */
+  /** "agent" (default) routes Shift+Tab to agent mode-cycling while letting all
+   *  other keys reach the PTY; "shell" leaves every key to the PTY, since a
+   *  plain terminal has no agent mode to cycle. */
   variant?: "agent" | "shell";
 }
 
@@ -72,11 +72,16 @@ function createCachedTerminal(sessionId: string, isShell: boolean): CachedTermin
       cycleAgentModeOptimistic(sessionId);
       return true;
     }
-    const printable = ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey;
-    if (printable) {
-      runAction("prompt-type-through", ev.key);
-      return false;
-    }
+    // This handler only runs while the xterm terminal itself is focused (xterm
+    // receives keydown solely through its focused hidden textarea). Agent tabs
+    // keep the composer focused by default, so a focused terminal means the
+    // user deliberately clicked in — typically to answer an interactive
+    // selection/y-n prompt. Send those keys straight to the agent's PTY; do
+    // NOT redirect them into the composer. Redirecting stole the keystroke
+    // (the prompt never saw it) and grew the composer, which resized the
+    // terminal and made the agent reflow its in-place menu, garbling it.
+    // Type-through into the composer still applies whenever the composer is
+    // focused (the default) — that path doesn't come through here.
     return true;
   });
 
