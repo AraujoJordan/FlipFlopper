@@ -6,9 +6,10 @@
 
 **One AI IDE. Every CLI coding agent. Zero terminal-tab chaos.**
 
-FlipFlopper is a cross-platform desktop IDE cockpit for easy switch AI CLI coding agents. It keeps
-real terminals, local files, git history, and agent handoffs in one place so you can switch tools
-without losing context.
+FlipFlopper is a cross-platform desktop workbench that runs every CLI coding agent
+side by side in real PTY terminals, with the local files, git history, editor, and
+agent handoffs all living in one window so you can flip tools without losing
+context.
 
 [![Build](https://github.com/AraujoJordan/FlipFlopper/actions/workflows/build.yml/badge.svg)](https://github.com/AraujoJordan/FlipFlopper/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/AraujoJordan/FlipFlopper)](https://github.com/AraujoJordan/FlipFlopper/releases)
@@ -44,13 +45,17 @@ serial monogamists at best.
 
 - **Embedded PTY terminals** - each agent gets a real terminal tab backed by `portable-pty`.
 - **Agent registry** - detects installed CLI agents, their PATH, and version info.
-- **Project workspace** - recent project persistence, project picking, and per-project `.agents/` scaffolding.
+- **Multi-agent orchestrator** - chain agents into a pipeline on a visual flow canvas: every open agent tab mirrors as a live lane, you queue downstream prompts off any node, gates hold a step for manual review, carry-context seeds the next agent with the upstream session, and per-step model/reasoning-effort can be pinned. Flows persist per project.
+- **Isolated git worktrees** - any agent tab or orchestrator step can run inside its own `flipflopper/wt-*` worktree branch, so an agent's edits never touch your source branch until you merge them back. Branch chip and one-click "Merge back" live on the node card.
+- **Project workspace** - single-window project tabs (one window, many projects, each with its own agents/editor/git/terminals kept warm in the background), recent project persistence, project picker, and per-project `.agents/` scaffolding.
+- **New Project wizard** - title-bar "+" walks you through category, stack, details, name, and folder, then seeds the prompt composer with a structured brief for the agent to build from.
 - **Lazy file explorer** - `.gitignore`-aware tree loading with git status badges, file checkboxes, and native diff entry points.
-- **Built-in editor** - tabbed file editing with syntax highlighting, autosave, conflict detection, and the preview split for UI previews and snapshot images.
-- **Prompt composer** - sends text to the active PTY, or falls back to git auto-commit when no agent is active.
-- **Native git review** - working-tree diffs, commit history, and review overlay inside the app.
+- **Built-in editor** - tabbed CodeMirror editing with LSP-backed IntelliSense (completions with auto-imports and snippets, hover/signature help, diagnostics, go-to-definition/references, quick fixes, multi-file rename, format document, opt-in format-on-save), plus the preview split for UI previews and snapshot images.
+- **Prompt composer** - sends text to the active PTY, or falls back to git auto-commit when no agent is active. `@path` chips attach file context, slash commands tune model/effort, and an `AgentTaskDialog` spins up one-shot tasks.
+- **Native git review** - working-tree diffs, commit history, and review overlay inside the app, plus stage/unstage/discard, stash, squash-and-push with an AI-generated commit message, and conflict-resolution handoff to an agent.
 - **Agent handoff** - reads available session state, writes `.agents/handoff.md`, appends `.agents/context.md`, and launches the target agent with seeded context when supported.
 - **Tool catalog** - discovers installable tools and generates install commands from the backend.
+- **Settings + shortcuts** - a Settings panel for auto-toggle sidebars, idle-alert timeout, and format-on-save, plus a `?` shortcut reference modal listing every registered binding.
 
 ## 🕹️ Supported agents
 

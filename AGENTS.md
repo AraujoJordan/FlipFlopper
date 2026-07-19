@@ -52,6 +52,28 @@ Currently implemented:
   snippets and auto-import completion edits, hover/signature help, diagnostics,
   definition/references, quick fixes, multi-file symbol rename, manual document
   formatting, and opt-in format-on-save.
+- Multi-agent orchestrator flow canvas (`src/components/flow/` over
+  `src/lib/orchestrator.ts`): every open agent tab is mirrored as a live lane,
+  and steps (downstream agent + prompt) can be chained off any node. Step
+  status is detected heuristically by sniffing PTY output. Edges support
+  review gates (hold for manual approval before firing), carry-context
+  handoff (seed the next agent with the upstream session), and isolated git
+  worktree isolation. Per-step model and reasoning-effort tuning can be
+  pinned. Flows persist per project.
+- Isolated git worktrees for agents (`src-tauri/src/worktree.rs`): each
+  worktree-enabled step or tab spawns under a `flipflopper/wt-*` branch in the
+  OS data dir, with create / status / commit / merge-back / remove / validate
+  / diff plumbing plus an AI-generated commit message helper. Agents run with
+  the worktree path as their cwd, so their edits never touch the source
+  branch until merged.
+- Guided "New Project" wizard (title-bar "+"), project picker modal for
+  recents, a Settings panel (auto-toggle sidebars, idle-alert timeout,
+  format-on-save), a keyboard-shortcut reference modal (`?`), and an
+  `AgentTaskDialog` for ad-hoc one-shot tasks with `@path` context chips.
+- Augmented PATH resolution (`src-tauri/src/env.rs`) so GUI-launched
+  (Finder/Homebrew) builds still see Homebrew, npm, Cargo, Volta, asdf, mise,
+  and other CLI-installed agent binaries. Internal infrastructure, not a
+  Tauri command.
 
 Known gaps / current quirks:
 
@@ -113,8 +135,30 @@ src/
   lib/store.ts               Solid store, tab/session helpers, review state,
                              single-window project-tab snapshot/restore
                              (beginProjectTab / switchToProject / closeProjectTab)
+  lib/orchestrator.ts        single source of truth for the multi-agent flow
+                             canvas: nodes/edges, per-project persistence, PTY
+                             output/exit monitors that drive heuristic step
+                             status, step firing, gate release, tuning apply,
+                             and worktree spawn wiring
   lib/agentMeta.tsx          agent visual identity (colors, letters, AgentLogo)
                              and per-agent mode-cycle support map
+  lib/appPrefs.ts            durable preferences.json store (tauri-plugin-store)
+                             with one-time migration helpers off legacy
+                             localStorage keys
+  lib/cmTheme.ts             CodeMirror dark theme + highlight style for editor
+                             and diff surfaces
+  lib/markdownLite.ts        tiny in-app markdown renderer (code fences via
+                             highlight.js) used by hover docs and similar
+  lib/native.ts              clipboard + notification wrappers around the
+                             tauri plugins, with permission priming
+  lib/settings.ts            idle-alert timeout (1-60 min) read/write helper
+                             backed by appPrefs
+  lib/updater.ts             Win/Linux auto-update signals (update info,
+                             install state, apply/dismiss) consumed by
+                             UpdateDialog; macOS is gated out
+  lib/useResizable.ts        shared pointer-capture drag-resize hook used by
+                             the terminal panel, editor preview split, and
+                             orchestrator panel
   lib/constants.ts           PROTECTED_BRANCHES / isProtectedBranch, WORK_BRANCH
   lib/fileIcons.ts           file extension to icon mapping (getFileIcon)
   lib/usages.ts              find-usages result model shared by EditorPane/OmniSearch
@@ -147,7 +191,31 @@ src/
                              (extracted from App.tsx)
     AgentWorkspace.tsx       active agent pane plus "Continue on..." handoff menu
                              (extracted from App.tsx)
+    AgentTaskDialog.tsx      ad-hoc one-shot task modal with @path context
+                             chips, seeded into the active or spawned agent
+    NewProjectWizard.tsx     5-step guided project creation (category, stack,
+                             details, name, folder) that seeds a prompt brief
+    ProjectPicker.tsx        recents modal opened from the title-bar project
+                             button; surfaces store.recentProjects
+    SettingsPanel.tsx        user-facing prefs modal: auto-toggle sidebars,
+                             idle-alert timeout, format-on-save
+    ShortcutHelp.tsx         keyboard-shortcut reference modal (`?`)
+    UpdateDialog.tsx         Win/Linux update flow driven by lib/updater.ts
     ui.tsx                   shared UI kit: Spinner, toast, and other primitives
+    flow/                    multi-agent orchestrator view layer (state lives in
+                             lib/orchestrator.ts); components are pure views
+                             over the flow store
+      OrchestratorPanel.tsx  resizable bottom host (split + maximize) for the
+                             canvas; owns viewport pan/zoom and panel sizing
+      FlowCanvas.tsx         pannable/zoomable canvas; lays out node cards,
+                             edges, the add-step menu, and inline step editor
+      FlowNodeCard.tsx       per-agent lane card: status, prompt preview,
+                             per-step model/effort selectors, branch chip and
+                             "Merge back" action for worktree-isolated steps
+      FlowEdges.tsx          SVG edges between nodes; renders gate / carry
+                             badges and the edge context menu
+      AddStepMenu.tsx        add-step popover and inline step editor (agent,
+                             prompt, model, effort, gate, carry, worktree)
     git/
       GitPanel.tsx           tab shell for sync/changes/history, status polling
       ChangesTab.tsx         staged/unstaged list, stage/unstage/discard/stash
@@ -171,6 +239,17 @@ src-tauri/src/
   editor.rs                  file read/write with in-project path safety
   tools.rs                   tool catalog, package manager detection, installs
   handoff.rs                 in-house session parser and handoff launcher
+  worktree.rs                isolated git worktrees for agents: create / status
+                             / commit / merge-back / remove / validate / diff
+                             plus generate_worktree_commit_message. Agents run
+                             with the worktree path as cwd; pure git plumbing,
+                             no Tauri-side coupling to spawn logic.
+  env.rs                     augmented-PATH resolution (login shell + Homebrew,
+                             npm, Cargo, Volta, asdf, mise, and friends) so
+                             GUI-launched builds still find CLI-installed
+                             binaries. Internal infrastructure, not a Tauri
+                             command; agents/tools/LSP should always spawn via
+                             the PATH resolved here.
   session.rs                 single-window project-tab session (~/.config/flipflopper/session.json):
                              open-project persistence, restore-on-launch, and
                              legacy windows.json one-time migration. PTY/LSP
@@ -180,6 +259,11 @@ src-tauri/src/
 public/
   agents/                    bundled agent logo assets
   screenshot.png             README/AGENTS screenshot
+
+docs/
+  README.md                  index for human-facing guides; intentionally
+                             sparse. AGENTS.md remains the source of truth
+                             for architecture and contracts until this grows.
 
 .agents/
   settings.json              dogfooded project settings
@@ -210,6 +294,14 @@ requires generated output.
 - Handoff has structured readers for Claude Code, Codex, agy/Gemini, Qwen,
   OpenCode, Droid, Grok, and Cline. Aider, Cursor CLI, Goose, and Plandex
   currently fall back to git-only context.
+- `worktree.rs` is pure git plumbing. It does not know how agents are spawned;
+  the frontend spawns the agent with the resolved `worktree_path` as cwd.
+  Keep it that way: new spawn-side concerns belong in `pty.rs` / the frontend,
+  not in worktree commands.
+- `env.rs` resolves an augmented PATH at startup and exposes it via a single
+  getter. Agents, tool probes, LSP servers, and PTY shells must all spawn
+  through that resolved PATH, otherwise GUI-launched (Finder/Homebrew) builds
+  will silently miss CLI-installed binaries.
 
 ## Frontend Contracts
 
@@ -228,6 +320,12 @@ requires generated output.
   lazy for large repositories.
 - `components/git/*` and `FileTree` should open native review diffs, not spawn
   an external preview server.
+- Orchestrator state lives in `lib/orchestrator.ts` as the single source of
+  truth: nodes, edges, per-project persistence, PTY output/exit monitors, and
+  step firing. `components/flow/*` are pure views over that store; do not
+  duplicate flow state into component-local signals. Step status is detected
+  by heuristically sniffing PTY output, so keep that detection tolerant of
+  unrelated agent chatter.
 - Keep UI text compact and operational. This is a desktop workbench, not a
   marketing page.
 

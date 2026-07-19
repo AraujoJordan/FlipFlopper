@@ -1255,6 +1255,35 @@ input, textarea {
 
 /* ── Flow orchestrator canvas ─────────────────────────────────────────────── */
 
+.flow-group {
+  pointer-events: none;
+  border: 1px dashed var(--border-muted);
+  border-radius: var(--radius-md);
+}
+
+.flow-group-header {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  color: var(--fg-subtle);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.flow-empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: var(--fg-subtle);
+  font-size: 13px;
+}
+
 .flow-port {
   opacity: 0;
   transition: opacity 140ms ease, transform 140ms ease;
@@ -1284,4 +1313,12 @@ input, textarea {
 
 .flow-gate-pulse {
   animation: flow-gate-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-port,
+  .flow-gate-pulse {
+    animation: none !important;
+    transition: none !important;
+  }
 }

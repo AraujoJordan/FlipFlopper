@@ -7,7 +7,6 @@ import {
 } from "solid-js";
 import type { FlowNode } from "../../lib/orchestrator";
 import {
-  moveNode,
   removeNode,
   runNodeNow,
   focusNodeTab,
@@ -16,6 +15,7 @@ import { store } from "../../lib/store";
 import { agentColor, AgentLogo, agentModeShortLabel } from "../../lib/agentMeta";
 import { Spinner, ContextMenu, MenuItem, MenuDivider } from "../ui";
 import { openWorktreeCloseDialog } from "../git/WorktreeCloseDialog";
+import type { FlowPosition } from "./FlowCanvas";
 
 export const FLOW_CARD_WIDTH = 220;
 export const FLOW_CARD_HEIGHT = 112;
@@ -30,7 +30,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 interface Props {
   node: FlowNode;
-  viewport: () => { x: number; y: number; k: number };
+  position: () => FlowPosition;
   onAddStep: (nodeId: string, anchor: HTMLElement) => void;
   onEditStep: (nodeId: string, anchor: HTMLElement) => void;
 }
@@ -38,13 +38,7 @@ interface Props {
 const FlowNodeCard: Component<Props> = (props) => {
   const color = () => agentColor(props.node.agentId);
   const [now, setNow] = createSignal(Date.now());
-  const [dragging, setDragging] = createSignal(false);
   const [menuPos, setMenuPos] = createSignal<{ x: number; y: number } | null>(null);
-  let dragStartX = 0;
-  let dragStartY = 0;
-  let nodeStartX = 0;
-  let nodeStartY = 0;
-  let dragMoved = false;
 
   const tick = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(tick));
@@ -68,36 +62,6 @@ const FlowNodeCard: Component<Props> = (props) => {
     return parts.length > 0 ? parts.join(" · ") : null;
   };
 
-  function onPointerDown(e: PointerEvent) {
-    if (e.button !== 0) return;
-    const target = e.target as HTMLElement;
-    if (target.closest("button, input, textarea, a")) return;
-    dragStartX = e.clientX;
-    dragStartY = e.clientY;
-    nodeStartX = props.node.x;
-    nodeStartY = props.node.y;
-    dragMoved = false;
-    setDragging(true);
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  }
-
-  function onPointerMove(e: PointerEvent) {
-    if (!dragging()) return;
-    const vp = props.viewport();
-    const dx = (e.clientX - dragStartX) / vp.k;
-    const dy = (e.clientY - dragStartY) / vp.k;
-    if (Math.abs(dx) + Math.abs(dy) > 3) dragMoved = true;
-    moveNode(props.node.id, nodeStartX + dx, nodeStartY + dy);
-  }
-
-  function onPointerUp(e: PointerEvent) {
-    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    setDragging(false);
-    if (!dragMoved) {
-      if (props.node.sessionId) focusNodeTab(props.node.id);
-    }
-  }
-
   function onContextMenu(e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
@@ -113,22 +77,24 @@ const FlowNodeCard: Component<Props> = (props) => {
         class="flow-card"
         style={{
           position: "absolute",
-          left: `${props.node.x}px`,
-          top: `${props.node.y}px`,
+          left: `${props.position().x}px`,
+          top: `${props.position().y}px`,
           width: `${FLOW_CARD_WIDTH}px`,
           height: `${FLOW_CARD_HEIGHT}px`,
           background: "var(--surface-3)",
           "border-radius": "var(--radius-lg)",
           "border-left": `2px solid ${color()}`,
           "box-shadow": "0 4px 14px rgba(0,0,0,.32)",
-          cursor: dragging() ? "grabbing" : "default",
+          cursor: props.node.sessionId ? "pointer" : "default",
           "user-select": "none",
           overflow: "visible",
-          "z-index": dragging() ? "10" : "1",
+          "z-index": "1",
+          "pointer-events": "auto",
         }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
+        onclick={(e) => {
+          if ((e.target as HTMLElement).closest("button, input, textarea, a")) return;
+          if (props.node.sessionId) focusNodeTab(props.node.id);
+        }}
         onContextMenu={onContextMenu}
         ondblclick={(e) => {
           if (props.node.prompt !== null && (props.node.status === "queued" || props.node.status === "failed")) {

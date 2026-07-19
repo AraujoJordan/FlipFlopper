@@ -3,26 +3,44 @@ import { flow, releaseGate, toggleEdgeGate, removeEdge, toggleEdgeCarry } from "
 import { agentColor } from "../../lib/agentMeta";
 import { ContextMenu, MenuItem, MenuDivider } from "../ui";
 import { FLOW_CARD_WIDTH, FLOW_CARD_HEIGHT } from "./FlowNodeCard";
+import type { FlowPosition } from "./FlowCanvas";
 
 function edgePath(fromX: number, fromY: number, toX: number, toY: number): string {
-  const sx = fromX + FLOW_CARD_WIDTH;
   const sy = fromY + FLOW_CARD_HEIGHT / 2;
-  const tx = toX;
   const ty = toY + FLOW_CARD_HEIGHT / 2;
-  const dx = Math.abs(tx - sx);
-  const d = Math.min(Math.max(dx / 2, 40), 160);
-  return `M ${sx},${sy} C ${sx + d},${sy} ${tx - d},${ty} ${tx},${ty}`;
+  if (toX > fromX) {
+    const sx = fromX + FLOW_CARD_WIDTH;
+    const tx = toX;
+    const d = Math.min(Math.max((tx - sx) / 2, 30), 120);
+    return `M ${sx},${sy} C ${sx + d},${sy} ${tx - d},${ty} ${tx},${ty}`;
+  }
+  if (toX < fromX) {
+    const sx = fromX;
+    const tx = toX + FLOW_CARD_WIDTH;
+    const d = Math.min(Math.max((sx - tx) / 2, 30), 120);
+    return `M ${sx},${sy} C ${sx - d},${sy} ${tx + d},${ty} ${tx},${ty}`;
+  }
+  const x = fromX + FLOW_CARD_WIDTH;
+  const bend = 52;
+  return `M ${x},${sy} C ${x + bend},${sy} ${x + bend},${ty} ${x},${ty}`;
 }
 
 function midpoint(fromX: number, fromY: number, toX: number, toY: number): { x: number; y: number } {
-  const sx = fromX + FLOW_CARD_WIDTH;
-  const sy = fromY + FLOW_CARD_HEIGHT / 2;
-  const tx = toX;
-  const ty = toY + FLOW_CARD_HEIGHT / 2;
-  return { x: (sx + tx) / 2, y: (sy + ty) / 2 };
+  const y = (fromY + toY) / 2 + FLOW_CARD_HEIGHT / 2;
+  if (toX > fromX) {
+    return { x: (fromX + FLOW_CARD_WIDTH + toX) / 2, y };
+  }
+  if (toX < fromX) {
+    return { x: (fromX + toX + FLOW_CARD_WIDTH) / 2, y };
+  }
+  return { x: fromX + FLOW_CARD_WIDTH + 39, y };
 }
 
-const FlowEdges: Component = () => {
+interface Props {
+  positions: () => Record<string, FlowPosition>;
+}
+
+const FlowEdges: Component<Props> = (props) => {
   const [menuPos, setMenuPos] = createSignal<{ x: number; y: number; edgeId: string } | null>(null);
   const [hoveredEdge, setHoveredEdge] = createSignal<string | null>(null);
 
@@ -51,19 +69,24 @@ const FlowEdges: Component = () => {
           {(edge) => {
             const from = () => nodeById(edge.from);
             const to = () => nodeById(edge.to);
+            const fromPosition = () => props.positions()[edge.from];
+            const toPosition = () => props.positions()[edge.to];
             return (
-              <Show when={from() && to()}>
+              <Show when={from() && to() && fromPosition() && toPosition()}>
                 {(() => {
                   const f = from()!;
-                  const t = to()!;
                   const stroke = agentColor(f.agentId);
-                  const d = edgePath(f.x, f.y, t.x, t.y);
                   const isHovered = () => hoveredEdge() === edge.id;
+                  const path = () => {
+                    const start = fromPosition()!;
+                    const end = toPosition()!;
+                    return edgePath(start.x, start.y, end.x, end.y);
+                  };
                   return (
                     <>
                       <Show when={edge.carry} fallback={
                         <path
-                          d={d}
+                          d={path()}
                           fill="none"
                           stroke={stroke}
                           stroke-width="2"
@@ -75,7 +98,7 @@ const FlowEdges: Component = () => {
                         />
                       }>
                         <path
-                          d={d}
+                          d={path()}
                           fill="none"
                           stroke={stroke}
                           stroke-width="4"
@@ -86,7 +109,7 @@ const FlowEdges: Component = () => {
                           }}
                         />
                         <path
-                          d={d}
+                          d={path()}
                           fill="none"
                           stroke="var(--surface-1)"
                           stroke-width="1.5"
@@ -99,7 +122,7 @@ const FlowEdges: Component = () => {
                       </Show>
                       {/* Invisible fat hit-path for right-click targeting. */}
                       <path
-                        d={d}
+                        d={path()}
                         fill="none"
                         stroke="transparent"
                         stroke-width="14"
@@ -122,19 +145,24 @@ const FlowEdges: Component = () => {
         {(edge) => {
           const from = () => nodeById(edge.from);
           const to = () => nodeById(edge.to);
+          const fromPosition = () => props.positions()[edge.from];
+          const toPosition = () => props.positions()[edge.to];
           return (
-            <Show when={from() && to()}>
+            <Show when={from() && to() && fromPosition() && toPosition()}>
               {(() => {
-                const f = from()!;
-                const t = to()!;
-                const mid = midpoint(f.x, f.y, t.x, t.y);
+                  const f = from()!;
                 const stroke = agentColor(f.agentId);
+                const mid = () => {
+                  const start = fromPosition()!;
+                  const end = toPosition()!;
+                  return midpoint(start.x, start.y, end.x, end.y);
+                };
                 return (
                   <div
                     style={{
                       position: "absolute",
-                      left: `${mid.x}px`,
-                      top: `${mid.y}px`,
+                      left: `${mid().x}px`,
+                      top: `${mid().y}px`,
                       transform: "translate(-50%, -50%)",
                       "pointer-events": "auto",
                     }}

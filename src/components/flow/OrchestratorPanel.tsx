@@ -16,6 +16,7 @@ import { useResizable } from "../../lib/useResizable";
 const OrchestratorPanel: Component = () => {
   const [viewport, setViewport] = createSignal<Viewport>({ x: 24, y: 16, k: 1 });
   let canvasRef: HTMLDivElement | undefined;
+  let fitCanvas: (() => void) | undefined;
 
   const [clearConfirm, setClearConfirm] = createSignal(false);
   let clearTimer: number | null = null;
@@ -60,25 +61,7 @@ const OrchestratorPanel: Component = () => {
   }
 
   function fitView() {
-    const nodes = flow.nodes;
-    if (nodes.length === 0 || !canvasRef) return;
-    const rect = canvasRef.getBoundingClientRect();
-    const minX = Math.min(...nodes.map((n) => n.x));
-    const maxX = Math.max(...nodes.map((n) => n.x + 220));
-    const minY = Math.min(...nodes.map((n) => n.y));
-    const maxY = Math.max(...nodes.map((n) => n.y + 112));
-    const w = maxX - minX;
-    const h = maxY - minY;
-    const padding = 40;
-    const k = Math.min(
-      2,
-      Math.max(0.25, Math.min((rect.width - padding * 2) / w, (rect.height - padding * 2) / h)),
-    );
-    setViewport({
-      x: (rect.width - w * k) / 2 - minX * k,
-      y: (rect.height - h * k) / 2 - minY * k,
-      k,
-    });
+    fitCanvas?.();
   }
 
   const zoomPct = () => Math.round(viewport().k * 100);
@@ -264,6 +247,7 @@ const OrchestratorPanel: Component = () => {
           viewport={viewport}
           setViewport={setViewport}
           containerRef={() => canvasRef}
+          registerFitView={(fit) => { fitCanvas = fit; }}
         />
       </div>
     </div>

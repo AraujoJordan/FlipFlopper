@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.0 - 2026-07-19
+
+### Added
+
+- The orchestrator canvas now auto-organizes agent lanes into three swim lanes ("Action Needed", "Running", "Done") instead of freeform manual placement: cards animate into their lane when a step's status changes, order within a lane is preserved across status churn, and a "fit view" control frames the whole board. Node cards are no longer drag-repositionable; clicking a card focuses its terminal tab instead.
+- The canvas now respects `prefers-reduced-motion`, skipping card-move animations and port/gate pulse transitions for users who have that preference set.
+
+### Changed
+
+- README and AGENTS.md now document the multi-agent orchestrator, isolated git worktrees, the New Project wizard, Settings panel, and augmented PATH resolution, which had shipped in earlier releases without corresponding docs updates.
+
+## 0.8.0 - 2026-07-16
+
+### Added
+
+- Agents can now run inside isolated git worktrees. Any agent tab or orchestrator step can spawn under a `flipflopper/wt-*` branch in the OS data dir, with the agent's cwd set to the worktree path so its edits never land on the source branch. New `src-tauri/src/worktree.rs` exposes create / status / commit / merge-back / remove / validate / diff plumbing plus a headless-agent-generated commit message helper; the orchestrator wires the worktree path into the agent spawn, `FlowNodeCard` shows a branch chip and a "Merge back" action, and a new `WorktreeCloseDialog` walks through merge / discard / keep when closing a worktree-backed tab. The editor, file explorer, git panel, diff pane, and preview panel were all made worktree-path aware so they operate against the agent's working copy rather than the source project.
+
+### Fixed
+
+- Repaired YOLO (auto-approve) launches for Cursor CLI and OpenCode, whose spawn flags had drifted so the autonomous mode wasn't actually engaged on a fresh tab. Handoff and headless-prompt paths for both agents were hardened against the same flag mismatch.
+- Restored keystroke delivery to a focused agent terminal: a focused xterm was dropping the first typed character after focus because the keydown handler short-circuited before forwarding to the PTY. Focus now forwards keystrokes immediately instead of swallowing the first one.
+
+## 0.7.0 - 2026-07-14
+
+### Fixed
+
+- Prompts sent from the prompt composer, the ad-hoc `AgentTaskDialog`, the conflict-fix handoff, and orchestrator step firing were silently swallowed by TUI agents (notably Claude Code) that treat a multi-byte chunk ending in a newline as a paste and drop the trailing Enter. A new `ptySendLine` IPC writes the body and the submit `\r` as two separate PTY writes with a brief yield between them, so the Enter lands in its own read and the prompt actually submits. All `data + "\r"` call sites now route through it.
+
 ## 0.6.0 - 2026-07-13
 
 ### Added
