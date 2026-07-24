@@ -15,7 +15,9 @@ use crate::env::augmented_path_string;
 /// Events streamed from a PTY reader thread to the UI.
 #[derive(Debug)]
 pub enum PtyEvent {
-    /// Raw bytes from the PTY master (UTF-8 lossy).
+    /// Decoded text from the PTY master. Multi-byte sequences straddling a
+    /// read boundary are carried over rather than replaced (see
+    /// `spawn_reader_thread`).
     Data(String),
     /// The child process exited; this session is done.
     Exit,
@@ -55,6 +57,87 @@ impl PtyManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+// ────────────────────────────────────────────────
+// Reader thread
+// ────────────────────────────────────────────────
+
+/// Length of the trailing bytes of `buf` that begin a UTF-8 sequence which is
+/// not finished yet, i.e. bytes that must wait for the next `read()` before
+/// they can be decoded.
+fn incomplete_tail_len(buf: &[u8]) -> usize {
+    // A UTF-8 sequence is at most 4 bytes, so only the last 3 bytes can be
+    // mid-sequence. Walk back over continuation bytes to find the lead byte.
+    let floor = buf.len().saturating_sub(3);
+    for i in (floor..buf.len()).rev() {
+        let b = buf[i];
+        if b & 0b1100_0000 == 0b1000_0000 {
+            continue; // continuation byte — keep looking for its lead byte
+        }
+        let needed = if b & 0b1000_0000 == 0 {
+            1
+        } else if b & 0b1110_0000 == 0b1100_0000 {
+            2
+        } else if b & 0b1111_0000 == 0b1110_0000 {
+            3
+        } else if b & 0b1111_1000 == 0b1111_0000 {
+            4
+        } else {
+            return 0; // invalid lead byte — nothing worth holding back
+        };
+        let have = buf.len() - i;
+        return if have < needed { have } else { 0 };
+    }
+    0
+}
+
+/// Drain `pending` into a `String`, leaving any partial trailing UTF-8
+/// sequence in the buffer for the next read to complete.
+///
+/// Decoding each `read()` chunk in isolation with `from_utf8_lossy` corrupts
+/// any character split across the 4 KiB boundary: both halves become U+FFFD
+/// and the real bytes are gone for good. Agent TUIs draw their interactive
+/// selection menus out of multi-byte glyphs (`❯`, `│`, `╭`, `●`), and every
+/// arrow-key press repaints the whole menu in one burst, so boundaries land
+/// mid-glyph constantly and the menu degrades into mojibake as you navigate.
+fn drain_utf8(pending: &mut Vec<u8>) -> String {
+    let split = pending.len() - incomplete_tail_len(pending);
+    let tail = pending.split_off(split);
+    // Anything still invalid here is genuinely malformed output, not a split
+    // sequence, so substituting U+FFFD is the right call.
+    let text = String::from_utf8_lossy(pending).into_owned();
+    *pending = tail;
+    text
+}
+
+/// Pump a PTY reader into `tx` until EOF, then signal `Exit`.
+fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<PtyEvent>) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, // EOF — child exited
+                Ok(n) => {
+                    pending.extend_from_slice(&buf[..n]);
+                    let data = drain_utf8(&mut pending);
+                    if data.is_empty() {
+                        continue; // whole chunk was a partial sequence
+                    }
+                    if tx.send(PtyEvent::Data(data)).is_err() {
+                        break; // receiver dropped (tab closed)
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        // Flush a dangling partial sequence so truncated output is not lost.
+        if !pending.is_empty() {
+            let _ = tx.send(PtyEvent::Data(String::from_utf8_lossy(&pending).into_owned()));
+        }
+        let _ = tx.send(PtyEvent::Exit);
+    });
 }
 
 // ────────────────────────────────────────────────
@@ -127,7 +210,7 @@ pub fn spawn_session(
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn {binary}: {e}"))?;
 
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| format!("Failed to clone PTY reader: {e}"))?;
@@ -137,23 +220,7 @@ pub fn spawn_session(
         .take_writer()
         .map_err(|e| format!("Failed to take PTY writer: {e}"))?;
 
-    // Background reader thread — sends PtyEvents through the channel.
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break, // EOF — agent exited
-                Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    if tx.send(PtyEvent::Data(data)).is_err() {
-                        break; // receiver dropped (tab closed)
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        let _ = tx.send(PtyEvent::Exit);
-    });
+    spawn_reader_thread(reader, tx);
 
     let session = PtySession {
         id: session_id.clone(),
@@ -325,7 +392,7 @@ pub fn spawn_shell_command_with_env(
         .spawn_command(cmd)
         .map_err(|e| format!("Spawn error: {e}"))?;
 
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| format!("Reader error: {e}"))?;
@@ -334,21 +401,7 @@ pub fn spawn_shell_command_with_env(
         .take_writer()
         .map_err(|e| format!("Writer error: {e}"))?;
 
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    if tx.send(PtyEvent::Data(data)).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-        let _ = tx.send(PtyEvent::Exit);
-    });
+    spawn_reader_thread(reader, tx);
 
     let session = PtySession {
         id: session_id.clone(),
@@ -410,7 +463,7 @@ pub fn spawn_interactive_shell(
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn shell: {e}"))?;
 
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| format!("Failed to clone PTY reader: {e}"))?;
@@ -420,22 +473,7 @@ pub fn spawn_interactive_shell(
         .take_writer()
         .map_err(|e| format!("Failed to take PTY writer: {e}"))?;
 
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    if tx.send(PtyEvent::Data(data)).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        let _ = tx.send(PtyEvent::Exit);
-    });
+    spawn_reader_thread(reader, tx);
 
     let session = PtySession {
         id: session_id.clone(),
@@ -468,4 +506,50 @@ pub fn list_sessions(manager: &PtyManager) -> Vec<SessionInfo> {
             project_path: s.project_path.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feed `input` to the decoder `chunk` bytes at a time, mimicking the
+    /// reader thread's `read()` boundaries.
+    fn decode_in_chunks(input: &[u8], chunk: usize) -> String {
+        let mut pending = Vec::new();
+        let mut out = String::new();
+        for part in input.chunks(chunk) {
+            pending.extend_from_slice(part);
+            out.push_str(&drain_utf8(&mut pending));
+        }
+        out.push_str(&String::from_utf8_lossy(&pending));
+        out
+    }
+
+    #[test]
+    fn multibyte_glyphs_survive_every_chunk_boundary() {
+        // The glyphs agent TUIs draw selection menus with.
+        let menu = "╭─ ❯ 1. yes │ ● 2. no ╰─ ✔";
+        for chunk in 1..=menu.len() {
+            assert_eq!(decode_in_chunks(menu.as_bytes(), chunk), menu, "chunk={chunk}");
+        }
+    }
+
+    #[test]
+    fn holds_back_only_the_partial_tail() {
+        let mut pending = "ok".as_bytes().to_vec();
+        pending.extend_from_slice(&"❯".as_bytes()[..2]); // 2 of 3 bytes
+        assert_eq!(drain_utf8(&mut pending), "ok");
+        assert_eq!(pending.len(), 2);
+
+        pending.push("❯".as_bytes()[2]);
+        assert_eq!(drain_utf8(&mut pending), "❯");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn malformed_bytes_do_not_stall_the_stream() {
+        let mut pending = vec![b'a', 0xff, b'b'];
+        assert_eq!(drain_utf8(&mut pending), "a\u{fffd}b");
+        assert!(pending.is_empty());
+    }
 }
