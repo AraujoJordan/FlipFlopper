@@ -958,6 +958,196 @@ fn cline_parse_json(path: &Path) -> Option<HandoffContext> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Kimi Code  ($KIMI_CODE_HOME or ~/.kimi-code; sessions/<workDirKey>/<sessionId>/)
+// session_index.jsonl maps workDir → sessionDir; the conversation lives in
+// agents/main/wire.jsonl as typed event lines.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn kimi_latest(project_path: &str) -> Option<HandoffContext> {
+    let root = std::env::var("KIMI_CODE_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home().map(|h| h.join(".kimi-code")))?;
+    let index_path = root.join("session_index.jsonl");
+    if !index_path.is_file() {
+        return None;
+    }
+
+    // Newest session for this project, keyed by wire/state file mtime.
+    let session_dir = read_jsonl(&index_path)
+        .into_iter()
+        .filter(|v| str_field(v, "workDir") == Some(project_path))
+        .filter_map(|v| str_field(&v, "sessionDir").map(PathBuf::from))
+        .filter_map(|dir| {
+            let wire = dir.join("agents").join("main").join("wire.jsonl");
+            let probe = if wire.is_file() {
+                wire
+            } else {
+                dir.join("state.json")
+            };
+            let mtime = fs::metadata(probe).ok()?.modified().ok()?;
+            Some((dir, mtime))
+        })
+        .max_by_key(|(_, t)| *t)
+        .map(|(dir, _)| dir)?;
+
+    kimi_parse_session(&session_dir, project_path)
+}
+
+fn kimi_parse_session(dir: &Path, project_path: &str) -> Option<HandoffContext> {
+    let state: Option<Value> = fs::read_to_string(dir.join("state.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let lines = read_jsonl(&dir.join("agents").join("main").join("wire.jsonl"));
+    if state.is_none() && lines.is_empty() {
+        return None;
+    }
+
+    let session_id = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+    let cwd = state
+        .as_ref()
+        .and_then(|s| str_field(s, "workDir"))
+        .unwrap_or(project_path)
+        .to_string();
+    let mut last_active = state
+        .as_ref()
+        .and_then(|s| str_field(s, "updatedAt"))
+        .map(str::to_owned);
+    // The auto-generated title doubles as a session summary; skip the
+    // placeholder title fresh sessions carry.
+    let summary = state
+        .as_ref()
+        .and_then(|s| str_field(s, "title"))
+        .filter(|t| !t.is_empty() && *t != "New Session")
+        .map(str::to_owned);
+
+    let mut sent_prompts: Vec<String> = Vec::new();
+    let mut conversation: Vec<ConvTurn> = Vec::new();
+    let mut tool_counts: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    let mut model: Option<String> = None;
+    let mut tokens_in: Option<u64> = None;
+    let mut tokens_out: Option<u64> = None;
+
+    for line in &lines {
+        let t = match str_field(line, "type") {
+            Some(t) => t,
+            None => continue,
+        };
+
+        if last_active.is_none() {
+            if let Some(ms) = line.get("time").and_then(Value::as_u64) {
+                last_active = Some(format!("t={ms}"));
+            }
+        }
+
+        match t {
+            // Real user prompts. Skill/system injections arrive via
+            // context.append_message instead, so this stays clean.
+            "turn.prompt" => {
+                let is_user = line
+                    .get("origin")
+                    .and_then(|o| o.get("kind"))
+                    .and_then(Value::as_str)
+                    .map(|k| k == "user")
+                    .unwrap_or(true);
+                if !is_user {
+                    continue;
+                }
+                let text = extract_text_from_content(line.get("input"));
+                if !text.is_empty() {
+                    if !sent_prompts.contains(&text) {
+                        sent_prompts.push(text.clone());
+                    }
+                    conversation.push(ConvTurn {
+                        role: "User".into(),
+                        text,
+                    });
+                }
+            }
+            // Repeated as the model changes; last one wins.
+            "config.update" => {
+                if let Some(m) = str_field(line, "modelAlias") {
+                    model = Some(m.to_string());
+                }
+            }
+            "usage.record" => {
+                let scope_ok = str_field(line, "usageScope")
+                    .map(|s| s == "turn")
+                    .unwrap_or(true);
+                if scope_ok {
+                    if let Some(u) = line.get("usage") {
+                        let input = u.get("inputOther").and_then(Value::as_u64).unwrap_or(0)
+                            + u
+                                .get("inputCacheCreation")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0);
+                        let output = u.get("output").and_then(Value::as_u64).unwrap_or(0);
+                        tokens_in = Some(tokens_in.unwrap_or(0) + input);
+                        tokens_out = Some(tokens_out.unwrap_or(0) + output);
+                    }
+                }
+            }
+            "context.append_loop_event" => {
+                let event = match line.get("event") {
+                    Some(e) => e,
+                    None => continue,
+                };
+                match str_field(event, "type") {
+                    Some("content.part") => {
+                        let part = match event.get("part") {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        if str_field(part, "type") == Some("text") {
+                            if let Some(text) = str_field(part, "text") {
+                                let text = text.trim();
+                                if !text.is_empty() {
+                                    conversation.push(ConvTurn {
+                                        role: "Assistant".into(),
+                                        text: text.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    Some("tool.call") => {
+                        let name = str_field(event, "name").unwrap_or("unknown").to_string();
+                        let sample = event
+                            .get("args")
+                            .map(|v| truncate(&v.to_string(), 60))
+                            .unwrap_or_default();
+                        let e = tool_counts.entry(name).or_default();
+                        e.0 += 1;
+                        if e.1.len() < 3 {
+                            e.1.push(sample);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(HandoffContext {
+        source_name: "Kimi Code".into(),
+        session_id,
+        cwd,
+        branch: None,
+        repository: None,
+        last_active,
+        summary,
+        sent_prompts,
+        conversation,
+        tool_activity: build_tool_activity(tool_counts),
+        model,
+        tokens_in,
+        tokens_out,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dispatch — map agent id → session reader
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -971,7 +1161,8 @@ fn find_latest_session(agent_id: &str, project_path: &str) -> Option<HandoffCont
         "droid" => droid_latest(project_path),
         "grok" => grok_latest(project_path),
         "cline" => cline_latest(project_path),
-        // aider / goose / plandex have no structured on-disk session files → git-only
+        "kimi" => kimi_latest(project_path),
+        // aider / cursor / goose / plandex have no structured on-disk session files → git-only
         _ => None,
     }
 }
@@ -1209,7 +1400,8 @@ fn launch_command(
         // -i flag needed; positional alone is one-shot for these agents
         "qwen" | "agy" => format!("{bin_q}{yolo_prefix} -i {prompt_q}"),
         // No reliable interactive-seed flag; handoff.md is still written.
-        // Grok intentionally lands here until its TUI seed behavior is documented.
+        // Grok and Kimi intentionally land here: neither documents a way to
+        // seed an interactive session (Kimi's `-p` is non-interactive one-shot).
         _ => format!("{bin_q}{yolo_prefix}"),
     };
     let env = if yolo {
@@ -1294,5 +1486,15 @@ mod tests {
         let (opencode_command, opencode_env) = launch_command("opencode", "Codex", false).unwrap();
         assert!(!opencode_command.contains("--auto"));
         assert!(opencode_env.is_empty());
+    }
+
+    #[test]
+    fn kimi_handoff_launches_interactive_without_seed_prompt() {
+        // Kimi has no interactive-seed flag (`-p` is non-interactive one-shot),
+        // so the handoff launches it bare plus the yolo flag when requested.
+        let (command, env) = launch_command("kimi", "Claude Code", true).unwrap();
+        assert!(command.trim_end().ends_with("--yolo"));
+        assert!(!command.contains(" -p "));
+        assert!(env.is_empty());
     }
 }

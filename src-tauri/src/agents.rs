@@ -194,6 +194,18 @@ pub static AGENTS: &[AgentDef] = &[
         icon: "/agents/grok.png",
         headless_args: Some(&["-p"]),
     },
+    AgentDef {
+        id: "kimi",
+        name: "Kimi Code",
+        binary: "kimi",
+        aliases: &[],
+        description: "Moonshot AI's Kimi Code CLI terminal coding agent",
+        launch_args: &[],
+        yolo_launch_args: &["--yolo"],
+        yolo_env: &[],
+        icon: "/agents/kimi.png",
+        headless_args: Some(&["-p"]),
+    },
 ];
 
 /// Resolve the actual binary path for an agent, trying primary + aliases.

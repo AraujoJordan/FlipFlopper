@@ -60,8 +60,8 @@ serial monogamists at best.
 ## 🕹️ Supported agents
 
 Claude Code, Codex, Cursor CLI, OpenCode, Aider, Goose, agy, Cline, Qwen Code,
-Plandex, Droid, and Grok. Yes, all of them. Yes, in one app. No, you don't
-need eleven terminal emulators pinned to your taskbar anymore.
+Plandex, Droid, Grok, and Kimi Code. Yes, all of them. Yes, in one app. No,
+you don't need eleven terminal emulators pinned to your taskbar anymore.
 
 ## 🧱 Stack
 

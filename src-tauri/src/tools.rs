@@ -281,6 +281,19 @@ pub static CATALOG: &[ToolEntry] = &[
         ],
     },
     ToolEntry {
+        id: "kimi",
+        name: "Kimi Code",
+        description: "Moonshot AI's Kimi Code CLI terminal coding agent",
+        binary: "kimi",
+        icon: "/agents/kimi.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash" },
+            InstallSpec::Shell { os: "linux", command: "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash" },
+            InstallSpec::Shell { os: "windows", command: "powershell -Command \"irm https://code.kimi.com/kimi-code/install.ps1 | iex\"" },
+        ],
+    },
+    ToolEntry {
         id: "typescript-language-server",
         name: "TypeScript Language Server",
         description: "IntelliSense (completions, hover, diagnostics) for TS/JS files",

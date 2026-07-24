@@ -34,6 +34,22 @@ export const AGENT_MODE_SUPPORT: Record<string, AgentModeSupport> = {
       { pattern: /bypass permissions on/i, mode: "bypass" },
     ],
   },
+  kimi: {
+    // Kimi's Shift+Tab toggles Plan mode only (no permission-mode cycling).
+    cycle: ["normal", "plan"],
+    labels: {
+      plan: "plan mode",
+    },
+    shortLabels: {
+      plan: "plan",
+    },
+    markers: [
+      // Toggle echo ("Plan mode: ON") — lands in the sniff tail on narrow terminals.
+      { pattern: /plan mode:\s*on/i, mode: "plan" },
+      // Persistent status-line badge while plan is on: " plan  K3 thinking: high …"
+      { pattern: /[\r\n]\s*plan\s{2}\S/i, mode: "plan" },
+    ],
+  },
 };
 
 // ── Queued-step tuning (model / effort) ──────────────────────────────────────
@@ -166,6 +182,19 @@ export const AGENT_TUNING: Record<string, AgentTuning> = {
     ],
     efforts: [],
     modelCommand: (id) => `/model ${id}`,
+    spawnArgs: (model) => (model ? ["-m", model] : []),
+  },
+  kimi: {
+    // Kimi's `/model` is a picker-only TUI panel (no inline arg), so live
+    // sessions can't be driven — fresh step sessions get `-m` instead.
+    // Model aliases are the managed kimi-code defaults from `kimi provider list`.
+    models: [
+      { id: "kimi-code/k3", label: "K3" },
+      { id: "kimi-code/k3-256k", label: "K3 256K" },
+      { id: "kimi-code/kimi-for-coding", label: "For Coding" },
+      { id: "kimi-code/kimi-for-coding-highspeed", label: "For Coding HS" },
+    ],
+    efforts: [],
     spawnArgs: (model) => (model ? ["-m", model] : []),
   },
 };
@@ -530,6 +559,53 @@ export const AGENT_SLASH_COMMANDS: Record<string, AgentCommand[]> = {
     { name: "model", description: "Switch model" },
     { name: "feedback", description: "Send feedback" },
   ],
+  kimi: [
+    { name: "login", description: "Log in via Kimi Code OAuth or an API key" },
+    { name: "logout", description: "Clear credentials for the current account" },
+    { name: "provider", description: "Open the interactive provider manager" },
+    { name: "model", description: "Switch the LLM model for this session" },
+    { name: "settings", description: "Open the settings panel" },
+    { name: "config", description: "Open the settings panel" },
+    { name: "experiments", description: "Open the experimental feature panel" },
+    { name: "experimental", description: "Open the experimental feature panel" },
+    { name: "permission", description: "Select a permission mode" },
+    { name: "editor", description: "Configure the external editor" },
+    { name: "theme", description: "Switch the terminal UI color theme" },
+    { name: "new", description: "Start a fresh session, discarding context" },
+    { name: "clear", description: "Start a fresh session, discarding context" },
+    { name: "sessions", description: "Browse and resume historical sessions" },
+    { name: "resume", description: "Browse and resume historical sessions" },
+    { name: "tasks", description: "Browse the background task list" },
+    { name: "fork", description: "Fork a new session from the current one" },
+    { name: "title", description: "Show or set the session title" },
+    { name: "rename", description: "Show or set the session title" },
+    { name: "compact", description: "Compact conversation context to free tokens" },
+    { name: "undo", description: "Undo recent prompts from the active context" },
+    { name: "reload", description: "Reload the session and apply latest config" },
+    { name: "init", description: "Analyze the codebase and generate AGENTS.md" },
+    { name: "export-md", description: "Export the current session as Markdown" },
+    { name: "export", description: "Export the current session as Markdown" },
+    { name: "export-debug-zip", description: "Export the current session as a debug ZIP" },
+    { name: "copy", description: "Copy the last assistant message" },
+    { name: "add-dir", description: "Add an extra workspace directory" },
+    { name: "web", description: "Open the current session in the web UI" },
+    { name: "yolo", description: "Toggle YOLO mode (skip approvals)" },
+    { name: "yes", description: "Toggle YOLO mode (skip approvals)" },
+    { name: "auto", description: "Toggle auto permission mode" },
+    { name: "plan", description: "Toggle Plan mode" },
+    { name: "goal", description: "Start or manage an autonomous goal" },
+    { name: "help", description: "Show keyboard shortcuts and commands" },
+    { name: "btw", description: "Open a side conversation in a forked sub-agent" },
+    { name: "usage", description: "Show token usage, context, and quota" },
+    { name: "status", description: "Show session runtime state" },
+    { name: "mcp", description: "List MCP servers and connection status" },
+    { name: "plugins", description: "Open the interactive plugin manager" },
+    { name: "version", description: "Display the Kimi Code CLI version" },
+    { name: "feedback", description: "Submit feedback with diagnostic logs" },
+    { name: "exit", description: "Exit Kimi Code CLI" },
+    { name: "quit", description: "Exit Kimi Code CLI" },
+    { name: "q", description: "Exit Kimi Code CLI" },
+  ],
 };
 
 export function stripAnsi(value: string) {
@@ -596,6 +672,7 @@ const AGENT_COLORS: Record<string, string> = {
   plandex: "#a5d6ff",
   droid: "#f778ba",
   grok: "#ffffff",
+  kimi: "#6E56CF",
   run: "#3fb950",
   validate: "#58a6ff",
 };
@@ -607,7 +684,7 @@ export function agentColor(agentId: string): string {
 export function agentLetter(agentId: string): string {
   const map: Record<string, string> = {
     claude: "C", qwen: "Q", gemini: "G", codex: "X", cursor: "C",
-    agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R", grok: "G",
+    agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R", grok: "G", kimi: "K",
     run: "▶",
     validate: "✓",
   };
