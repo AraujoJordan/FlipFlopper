@@ -266,7 +266,7 @@ fn detect_swift(root: &Path, facts: &ProjectFacts, source: &str, stem: &str) -> 
             dirs.push(fastlane);
         }
     }
-    let images = rank_images(root, &dirs, &targets, stem, &view_names);
+    let images = rank_images(root, &dirs, &targets, stem, &view_names, false);
 
     let record = if facts.exists("Package.swift")
         && facts.file_contains("Package.swift", "snapshot-testing")
@@ -299,7 +299,7 @@ fn detect_flutter(root: &Path, source: &str, stem: &str) -> PreviewInfo {
     let dirs = find_dirs(root, |path| {
         dir_name_is(path, "goldens") && !ancestor_contains(path, "failures")
     });
-    let images = rank_images(root, &dirs, &targets, stem, &[]);
+    let images = rank_images(root, &dirs, &targets, stem, &[], false);
 
     let live = resolve_executable("flutter").map(|_| LivePreviewSpec {
         id: "flutter-widget-preview".into(),
@@ -330,7 +330,7 @@ fn detect_js(root: &Path, facts: &ProjectFacts, stem: &str) -> PreviewInfo {
             facts.has_pkg_dep("react-native-web") || facts.has_pkg_dep("@storybook/react")
         });
         let dirs = find_dirs(root, |path| dir_name_is(path, "__image_snapshots__"));
-        let images = rank_images(root, &dirs, &[], stem, &[]);
+        let images = rank_images(root, &dirs, &[], stem, &[], false);
         if live.is_none() && images.is_empty() {
             return PreviewInfo::none();
         }
@@ -352,7 +352,7 @@ fn detect_js(root: &Path, facts: &ProjectFacts, stem: &str) -> PreviewInfo {
             || ends_with_components(path, &["cypress", "screenshots"])
             || ends_with_components(path, &["test-results"])
     });
-    let images = rank_images(root, &dirs, &[], stem, &[]);
+    let images = rank_images(root, &dirs, &[], stem, &[], false);
     let record = web_snapshot_record_action(facts);
     if live.is_none() && images.is_empty() {
         return PreviewInfo::none();
@@ -431,7 +431,7 @@ fn detect_generic(root: &Path, stem: &str) -> PreviewInfo {
     if !screenshots.is_dir() {
         return PreviewInfo::none();
     }
-    let images = rank_images(root, &[screenshots], &[], stem, &[]);
+    let images = rank_images(root, &[screenshots], &[], stem, &[], true);
     if images.is_empty() {
         return PreviewInfo::none();
     }
@@ -885,13 +885,16 @@ fn rank_android_images(
     ranked_files.sort_by(|a, b| a.0.cmp(&b.0));
     ranked_files.dedup_by(|a, b| a.0 == b.0);
 
+    // Only names derived from the opened file qualify an image. Package
+    // segments are excluded: they match every snapshot in the module and
+    // would surface unrelated screens; the package is a tie-break below.
     let mut names = Vec::new();
     names.push(stem.to_string());
     names.extend(class_names.iter().cloned());
     names.extend(targets.iter().map(|target| target.name.clone()));
-    if let Some(pkg) = package {
-        names.extend(pkg.split('.').map(str::to_string));
-    }
+    let package_norm = package
+        .map(normalize_for_contains)
+        .filter(|norm| !norm.is_empty());
     let name_tokens = unique_name_tokens(&names);
     let important_names = names
         .iter()
@@ -948,11 +951,18 @@ fn rank_android_images(
         if matched_target.is_some() {
             score += 50;
         }
-        score -= (tool_rank as i32) * 20;
 
+        // Require a real relation to the opened file before dir preference
+        // and package context are applied.
         if score < 45 {
             continue;
         }
+        if let Some(pkg_norm) = &package_norm {
+            if path_norm.contains(pkg_norm.as_str()) {
+                score += 10;
+            }
+        }
+        score -= (tool_rank as i32) * 20;
 
         let meta = fs::metadata(&path).ok();
         let modified_ms = meta
@@ -987,7 +997,7 @@ fn unique_name_tokens(names: &[String]) -> Vec<String> {
     let mut tokens = Vec::new();
     for name in names {
         for token in tokenize_name(name) {
-            if token.len() < 3 || weak_android_token(&token) {
+            if token.len() < 3 || weak_name_token(&token) {
                 continue;
             }
             if !tokens.contains(&token) {
@@ -1001,7 +1011,7 @@ fn unique_name_tokens(names: &[String]) -> Vec<String> {
 fn normalize_for_contains(value: &str) -> String {
     tokenize_name(value)
         .into_iter()
-        .filter(|token| !weak_android_token(token))
+        .filter(|token| !weak_name_token(token))
         .collect::<Vec<_>>()
         .join("")
 }
@@ -1023,18 +1033,28 @@ fn tokenize_name(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn weak_android_token(token: &str) -> bool {
+fn weak_name_token(token: &str) -> bool {
     matches!(
         token,
         "preview"
             | "screen"
             | "view"
+            | "page"
+            | "widget"
             | "compose"
             | "composable"
             | "screenshot"
             | "screenshots"
             | "snapshot"
             | "snapshots"
+            | "golden"
+            | "goldens"
+            | "spec"
+            | "story"
+            | "stories"
+            | "image"
+            | "images"
+            | "img"
             | "test"
             | "tests"
             | "kt"
@@ -1063,15 +1083,20 @@ fn ordered_tokens_match(needles: &[String], haystack: &[String]) -> bool {
     false
 }
 
-/// Tiered ranking: filename/parent-dir contains a target name → tier 0
-/// (attaches `target_name`), contains the source file stem → tier 1,
-/// anything else in a matched dir → tier 2. Capped at `MAX_IMAGES`.
+/// Tiered ranking over normalized names (case/separator-insensitive, weak
+/// tokens like "test"/"snapshot" stripped): filename/parent-dir matches a
+/// target or extra name → tier 0 (attaches `target_name`), matches the
+/// source file stem or a distinctive name token → tier 1. Images unrelated
+/// to the opened file are excluded unless `include_unrelated` is set (the
+/// generic `screenshots/` fallback, which is app-level by design), where
+/// they trail as tier 2. Capped at `MAX_IMAGES`.
 fn rank_images(
     root: &Path,
     dirs: &[PathBuf],
     targets: &[PreviewTarget],
     stem: &str,
     extra_names: &[String],
+    include_unrelated: bool,
 ) -> Vec<PreviewImage> {
     let mut files = Vec::new();
     for dir in dirs {
@@ -1080,13 +1105,24 @@ fn rank_images(
     files.sort();
     files.dedup();
 
-    let stem_lower = stem.to_ascii_lowercase();
+    let stem_norm = normalize_for_contains(stem);
     let target_names: Vec<(String, String)> = targets
         .iter()
-        .map(|t| (t.name.clone(), t.name.to_ascii_lowercase()))
-        .filter(|(_, lower)| !lower.is_empty())
+        .map(|t| (t.name.clone(), normalize_for_contains(&t.name)))
+        .filter(|(_, norm)| !norm.is_empty())
         .collect();
-    let extra_lower: Vec<String> = extra_names.iter().map(|n| n.to_ascii_lowercase()).collect();
+    let extra_norms: Vec<String> = extra_names
+        .iter()
+        .map(|n| normalize_for_contains(n))
+        .filter(|norm| !norm.is_empty())
+        .collect();
+    let mut strong_names: Vec<String> = vec![stem.to_string()];
+    strong_names.extend(extra_names.iter().cloned());
+    strong_names.extend(targets.iter().map(|t| t.name.clone()));
+    let strong_tokens: Vec<String> = unique_name_tokens(&strong_names)
+        .into_iter()
+        .filter(|token| token.len() >= 4)
+        .collect();
 
     let mut ranked: Vec<(u8, PreviewImage)> = Vec::new();
     for path in files {
@@ -1103,22 +1139,29 @@ fn rank_images(
                 .and_then(|p| p.file_name())
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
-            format!("{parent}/{file}").to_ascii_lowercase()
+            format!("{parent}/{file}")
         };
+        let hay_norm = normalize_for_contains(&haystack);
+        let hay_tokens = tokenize_name(&haystack);
 
         let matched_target = target_names
             .iter()
-            .find(|(_, lower)| haystack.contains(lower.as_str()))
+            .find(|(_, norm)| hay_norm.contains(norm.as_str()))
             .map(|(name, _)| name.clone());
         let tier = if matched_target.is_some()
-            || extra_lower.iter().any(|n| haystack.contains(n.as_str()))
+            || extra_norms.iter().any(|n| hay_norm.contains(n.as_str()))
         {
             0
-        } else if !stem_lower.is_empty() && haystack.contains(&stem_lower) {
+        } else if (!stem_norm.is_empty() && hay_norm.contains(&stem_norm))
+            || strong_tokens.iter().any(|t| hay_tokens.contains(t))
+        {
             1
         } else {
             2
         };
+        if tier == 2 && !include_unrelated {
+            continue;
+        }
 
         let meta = fs::metadata(&path).ok();
         let label = path
@@ -1319,6 +1362,72 @@ mod tests {
         assert_eq!(compose.target, "android");
         assert_eq!(compose.screenshot_setup.as_deref(), Some("paparazzi"));
         assert!(compose.setup_url.is_none());
+    }
+
+    #[test]
+    fn compose_package_alone_does_not_match_snapshots() {
+        let project = TempProject::new("compose_pkg_only");
+        project.write("gradlew", "#!/bin/sh\n");
+        project.write(
+            "app/build.gradle.kts",
+            "plugins { id(\"app.cash.paparazzi\") }\n",
+        );
+        project.write(
+            "app/src/main/kotlin/com/example/About.kt",
+            "package com.example\n@Preview\n@Composable\nfun AboutPreview() {}\n",
+        );
+        project.write(
+            "app/src/test/snapshots/images/com.example_LoginTest_loginScreenPreview.png",
+            "png",
+        );
+
+        let info =
+            detect_preview(project.root(), "app/src/main/kotlin/com/example/About.kt").unwrap();
+        assert_eq!(info.kind, "compose");
+        assert!(
+            info.images.is_empty(),
+            "package-only match must not surface an unrelated screen: {:?}",
+            info.images
+        );
+    }
+
+    #[test]
+    fn swift_unrelated_snapshots_excluded() {
+        let project = TempProject::new("swift_unrelated");
+        project.write(
+            "Sources/App/LoginView.swift",
+            "struct LoginView: View {}\n#Preview {\n  LoginView()\n}\n",
+        );
+        project.write(
+            "Tests/AppTests/__Snapshots__/LoginViewTests/testLoginView.1.png",
+            "png",
+        );
+        project.write(
+            "Tests/AppTests/__Snapshots__/SettingsViewTests/testSettingsView.1.png",
+            "png",
+        );
+
+        let info = detect_preview(project.root(), "Sources/App/LoginView.swift").unwrap();
+        assert_eq!(info.kind, "swift");
+        assert_eq!(info.images.len(), 1);
+        assert!(info.images[0].rel_path.contains("LoginViewTests"));
+    }
+
+    #[test]
+    fn web_unrelated_snapshots_excluded() {
+        let project = TempProject::new("web_unrelated");
+        project.write(
+            "package.json",
+            r#"{ "scripts": { "dev": "vite" }, "devDependencies": { "@playwright/test": "^1" } }"#,
+        );
+        project.write("e2e/home.spec.ts-snapshots/home-page.png", "png");
+        project.write("e2e/checkout.spec.ts-snapshots/checkout-flow.png", "png");
+        project.write("src/Home.tsx", "export const Home = () => <div />;\n");
+
+        let info = detect_preview(project.root(), "src/Home.tsx").unwrap();
+        assert_eq!(info.kind, "web");
+        assert_eq!(info.images.len(), 1);
+        assert!(info.images[0].rel_path.contains("home-page"));
     }
 
     #[test]
