@@ -2,6 +2,15 @@
 
 Rolling log of handoffs and important cross-session notes.
 
+## Current architecture — 2026-10-22
+
+The chat rebuild supersedes the initial scaffold below. The active UI is the
+sessions sidebar, transcript, docked composer and Changes/Preview/Terminal/Flow
+side pane. The editor, file explorer, PTY agent tabs, project tabs and handoff
+scraper have been removed. Native OS title bars own window controls, and app
+icons use bundled Google Material Symbols. Read AGENTS.md for current contracts
+and note.md for implementation status; older entries here are historical.
+
 ## Session 1 — Initial scaffold (Claude Code)
 
 Built the full FlipFlopper skeleton:

@@ -1,14 +1,13 @@
+import { Icon } from "./shell/Icon";
 import { Component, createEffect, createSignal, For, Show } from "solid-js";
 import {
   store,
   bumpGitStatus,
-  bumpFileTree,
-  flushAllEditorSaves,
-  refreshOpenedFiles,
   updateCurrentBranch,
   activeWorktree,
   effectiveRoot,
 } from "../lib/store";
+import { runningSessionCount } from "../lib/chat";
 import { ensureWorkBranch, getRecentBranches, gitSwitchBranch, triggerHaptic } from "../lib/ipc";
 import { isProtectedBranch, WORK_BRANCH } from "../lib/constants";
 import { Menu, MenuLabel, MenuItem, MenuDivider, Spinner, confirmDialog, toast } from "./ui";
@@ -41,23 +40,20 @@ const BranchIndicator: Component = () => {
   async function switchToWorkBranch() {
     const project = store.currentProject;
     if (!project) return;
-    if (store.tabs.length > 0) {
+    if (runningSessionCount() > 0) {
       const ok = await confirmDialog(
-        `${store.tabs.length} active agent ${store.tabs.length === 1 ? "session is" : "sessions are"} running. Switching branches might interrupt ${store.tabs.length === 1 ? "its" : "their"} context or lead to unexpected behavior. Switch anyway?`,
+        `${runningSessionCount()} agent ${runningSessionCount() === 1 ? "session is" : "sessions are"} running. Switching branches under ${runningSessionCount() === 1 ? "it" : "them"} may lead to unexpected behavior. Switch anyway?`,
         "Switch Branch"
       );
       if (!ok) return;
     }
-    await flushAllEditorSaves();
     setSwitching(true);
     void triggerHaptic("generic");
     try {
       await ensureWorkBranch(effectiveRoot()!, WORK_BRANCH);
       await updateCurrentBranch();
       bumpGitStatus();
-      bumpFileTree();
-      await refreshOpenedFiles();
-      void triggerHaptic("alignment");
+          void triggerHaptic("alignment");
       toast(`Switched to ${WORK_BRANCH}`, "success");
     } catch (e) {
       void triggerHaptic("levelChange");
@@ -72,23 +68,20 @@ const BranchIndicator: Component = () => {
     const project = store.currentProject;
     if (!project) return;
     if (targetBranch === branch()) return;
-    if (store.tabs.length > 0) {
+    if (runningSessionCount() > 0) {
       const ok = await confirmDialog(
-        `${store.tabs.length} active agent ${store.tabs.length === 1 ? "session is" : "sessions are"} running. Switching branches might interrupt ${store.tabs.length === 1 ? "its" : "their"} context or lead to unexpected behavior. Switch anyway?`,
+        `${runningSessionCount()} agent ${runningSessionCount() === 1 ? "session is" : "sessions are"} running. Switching branches under ${runningSessionCount() === 1 ? "it" : "them"} may lead to unexpected behavior. Switch anyway?`,
         "Switch Branch"
       );
       if (!ok) return;
     }
-    await flushAllEditorSaves();
     setSwitching(true);
     void triggerHaptic("generic");
     try {
       await gitSwitchBranch(effectiveRoot()!, targetBranch);
       await updateCurrentBranch();
       bumpGitStatus();
-      bumpFileTree();
-      await refreshOpenedFiles();
-      void triggerHaptic("alignment");
+          void triggerHaptic("alignment");
       toast(`Switched to ${targetBranch}`, "success");
     } catch (e) {
       void triggerHaptic("levelChange");
@@ -160,22 +153,7 @@ const BranchIndicator: Component = () => {
                 }}
               >
                 <div style={{ display: "flex", "align-items": "center", gap: "8px", width: "100%" }}>
-                  <svg
-                    viewBox="0 0 16 16"
-                    width="12"
-                    height="12"
-                    fill="none"
-                    stroke={b === branch() ? "var(--accent)" : "var(--fg-subtle)"}
-                    stroke-width="1.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <line x1="4" y1="4" x2="4" y2="12" />
-                    <circle cx="4" cy="4" r="2" />
-                    <circle cx="4" cy="12" r="2" />
-                    <path d="M4 8c2.5 0 6 1.5 6 4" />
-                    <circle cx="10" cy="12" r="2" />
-                  </svg>
+                  <Icon name="gitBranch" size={12} style={{ color: b === branch() ? "var(--accent)" : "var(--fg-subtle)" }} />
                   <span style={{
                     flex: "1",
                     "font-family": "var(--font-mono)",
@@ -188,9 +166,7 @@ const BranchIndicator: Component = () => {
                     {b}
                   </span>
                   <Show when={b === branch()}>
-                    <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" style={{ color: "var(--accent)" }}>
-                      <path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z" />
-                    </svg>
+                    <Icon name="check" size={12} style={{ color: "var(--accent)" }} />
                   </Show>
                 </div>
               </MenuItem>

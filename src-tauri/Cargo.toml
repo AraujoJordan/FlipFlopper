@@ -1,6 +1,6 @@
 [package]
 name = "flipflopper"
-version = "0.10.2"
+version = "0.11.0"
 description = "Multi-agent CLI cockpit — better UX for AI coding tools"
 authors = ["araujojordan"]
 edition = "2021"
@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri               = { version = "2", features = ["protocol-asset", "macos-private-api"] }
+tauri               = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener  = "2"
 tauri-plugin-dialog  = "2"
@@ -27,8 +27,12 @@ tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
 serde               = { version = "1", features = ["derive"] }
 serde_json          = "1"
-regex               = "1"
-lsp-types           = "0.97"
+base64              = "0.22.1"
+agent-client-protocol = "=3.5.0"
+# The ACP SDK's async transport uses futures I/O. Spawn locally so each
+# connection gets its own working directory and app-owned process lifetime.
+async-process       = "2"
+futures             = "0.3"
 
 # PTY — cross-platform terminal multiplexing (Unix + Windows ConPTY)
 portable-pty  = "0.8"
@@ -42,11 +46,8 @@ which         = "6"
 # .gitignore-aware directory walker (ripgrep's ignore crate)
 ignore        = "0.4"
 
-# Async for background tasks
-tokio         = { version = "1", features = ["full"] }
+# Async process execution, timeouts and main-thread result channels.
+tokio         = { version = "1", features = ["process", "sync", "time", "rt", "macros"] }
 
 # Home directory detection (cross-platform)
 dirs          = "5"
-
-# SQLite for reading OpenCode session storage
-rusqlite      = { version = "0.31", features = ["bundled"] }

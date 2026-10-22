@@ -19,8 +19,8 @@ interface UseResizableOptions {
   onEnd?: () => void;
 }
 
-/** Shared pointer-capture drag-resize behavior for TerminalPanel, the
- *  EditorPane preview split, and OrchestratorPanel — previously each
+/** Shared pointer-capture drag-resize behavior for the sidebar and side
+ *  pane — previously each
  *  hand-rolled an identical dragStart/dragging signal + pointer handlers. */
 export function useResizable(opts: UseResizableOptions) {
   const [dragging, setDragging] = createSignal(false);

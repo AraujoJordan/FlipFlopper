@@ -1,10 +1,25 @@
-import { createEffect, untrack } from "solid-js";
+import { createEffect, createMemo, onCleanup, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
-import { store, addTab, setActiveTab, removeTab, type Tab } from "./store";
-import { onPtyOutput, onPtyExit, ptySendLine, spawnAgent, continueAgent, createWorktree, removeWorktree } from "./ipc";
-import { stripAnsi, agentTuning } from "./agentMeta";
+import { store } from "./store";
+import {
+  archiveSession,
+  chat,
+  onTurnEnd,
+  pendingInputCount,
+  selectSession,
+  startSessionTurn,
+} from "./chat";
+import { createWorktree, removeWorktree } from "./ipc";
 import { readLegacyJson, readPref, writePref } from "./appPrefs";
 import { toast } from "../components/ui";
+
+// The multi-agent flow canvas.
+//
+// Every non-archived chat session in the open project is mirrored as a "live"
+// node (id `live-<sessionId>`); "step" nodes are queued prompts that run as a
+// new session once the node they hang off finishes a turn. Status is derived
+// from the sessions themselves — no output sniffing — so a node is "working"
+// exactly while its session has a turn in flight.
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,12 +32,18 @@ export type FlowNodeStatus =
   | "failed"
   | "detached";
 
+export interface FlowWorktree {
+  path: string;
+  branch: string;
+  sourceBranch: string;
+}
+
 export interface FlowNode {
   id: string;
   agentId: string;
   label: string;
+  /** Step nodes carry the prompt they will run; live nodes have `null`. */
   prompt: string | null;
-  /** tuning applied via the agent's slash commands before the prompt fires */
   model: string | null;
   effort: string | null;
   sessionId: string | null;
@@ -32,17 +53,20 @@ export interface FlowNode {
   startedAt: number | null;
   finishedAt: number | null;
   lastOutput: string;
+  /** Run this step in an isolated git worktree. */
   worktree: boolean;
-  worktreeInfo: Tab["worktree"] | null;
+  worktreeInfo: FlowWorktree | null;
 }
 
 export interface FlowEdge {
   id: string;
   from: string;
   to: string;
+  /** Hold for manual approval before the downstream step fires. */
   gate: boolean;
   gatePending: boolean;
   fired: boolean;
+  /** Seed the downstream session with the upstream conversation. */
   carry: boolean;
 }
 
@@ -51,72 +75,11 @@ interface FlowState {
   edges: FlowEdge[];
 }
 
-// ── Store ────────────────────────────────────────────────────────────────────
-
 const [flow, setFlow] = createStore<FlowState>({ nodes: [], edges: [] });
-
 export { flow };
 
-// ── Per-session completion monitor ───────────────────────────────────────────
-
-interface Monitor {
-  unlisten: () => void;
-  unlistenExit: () => void;
-  tail: string;
-  bellSeen: boolean;
-  settleTimer: number | null;
-  idleTimer: number | null;
-  startupTimer: number | null;
-  taskActive: boolean;
-  startedAt: number;
-  lastMeaningfulOutputAt: number;
-  lastOutputUpdate: number;
-}
-
-const monitors = new Map<string, Monitor>();
-const preboundSessions = new Set<string>();
+const liveId = (sessionId: string) => `live-${sessionId}`;
 const firingNodes = new Set<string>();
-const pendingRebinds = new Set<string>();
-const pendingTaskStarts = new Map<string, number>();
-const pendingWorktreeNodeRemovals = new Set<string>();
-
-export function cancelPendingWorktreeNodeRemoval(sessionId: string) {
-  pendingWorktreeNodeRemovals.delete(sessionId);
-}
-
-/** Mark node ids that will be re-bound during the restore loop, so the
- *  tab-sync effect doesn't prune them as edge-less detached nodes before
- *  `rebindNode` gets to run. */
-export function markPendingRebinds(nodeIds: string[]) {
-  for (const id of nodeIds) pendingRebinds.add(id);
-}
-
-export function clearPendingRebinds() {
-  pendingRebinds.clear();
-}
-
-// ── Completion sniffing ──────────────────────────────────────────────────────
-// Extends TerminalPane.tsx's permission-prompt sniff with TUI permission menus.
-
-const WAITING_RE =
-  /(?:\?\s*\(y\/n\)|\?\s*\[y\/N\]|password:|do you want|❯\s*\d+\.\s*yes|allow[?!]?)\s*$/i;
-const IDLE_PROMPT_RE =
-  /(?:^|\n)\s*(?:›|>|❯|➜|\$)\s*$|(?:esc to interrupt|ctrl-c to quit|enter to send|shift\s*\+\s*tab)/i;
-const TERMINAL_NOISE_RE =
-  /(?:\[\?\d+[hl]|\[\d*(?:;\d*)*[ABCDHJKSTfhlm]|\[\d*(?:;\d*)*[~cnR]|\][^\x07]*(?:\x07|\x1b\\)|\[\>\d+;\d+m)/g;
-
-// ── Timing constants ─────────────────────────────────────────────────────────
-
-const BELL_SETTLE_MS = 1500;
-const BELL_MIN_RUNTIME_MS = 8000;
-const IDLE_FALLBACK_MS = 12_000;
-const STARTUP_DONE_MS = 4_000;
-const READY_SILENCE_MS = 1500;
-const READY_CAP_MS = 20_000;
-const EXIT_FAIL_MS = 5000;
-const OUTPUT_THROTTLE_MS = 400;
-const TAIL_MAX = 4000;
-const LAST_OUTPUT_MAX = 120;
 
 // ── Persistence ──────────────────────────────────────────────────────────────
 
@@ -131,6 +94,8 @@ interface PersistedNode {
   model?: string | null;
   effort?: string | null;
   worktree?: boolean;
+  /** Step nodes stay bound to the session they started. */
+  sessionId?: string | null;
   x: number;
   y: number;
 }
@@ -147,47 +112,14 @@ interface PersistedFlow {
   edges: PersistedEdge[];
 }
 
-function normalizePersistedFlow(entry: PersistedFlow): PersistedFlow {
-  const seenNodes = new Set<string>();
-  const rawNodes = (entry.nodes ?? []).filter((node) => {
-    if (!node?.id || seenNodes.has(node.id)) return false;
-    seenNodes.add(node.id);
-    return true;
-  });
-
-  const rawNodeIds = new Set(rawNodes.map((node) => node.id));
-  const seenEdges = new Set<string>();
-  const rawEdges = (entry.edges ?? []).filter((edge) => {
-    if (!edge?.id || seenEdges.has(edge.id)) return false;
-    if (!rawNodeIds.has(edge.from) || !rawNodeIds.has(edge.to)) return false;
-    seenEdges.add(edge.id);
-    return true;
-  });
-
-  const connected = new Set<string>();
-  for (const edge of rawEdges) {
-    connected.add(edge.from);
-    connected.add(edge.to);
-  }
-
-  const nodes = rawNodes.filter(
-    (node) => node.prompt != null || connected.has(node.id),
-  );
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const edges = rawEdges.filter(
-    (edge) => nodeIds.has(edge.from) && nodeIds.has(edge.to),
-  );
-
-  return { nodes, edges };
-}
-
 function persistableFlowSnapshot(): PersistedFlow {
   const connected = new Set<string>();
   for (const edge of flow.edges) {
     connected.add(edge.from);
     connected.add(edge.to);
   }
-
+  // Live nodes persist only their canvas position (and only when it matters:
+  // they have an edge); step nodes persist everything.
   const nodes = flow.nodes
     .filter((node) => node.prompt !== null || connected.has(node.id))
     .map((node) => ({
@@ -198,6 +130,7 @@ function persistableFlowSnapshot(): PersistedFlow {
       model: node.model,
       effort: node.effort,
       worktree: node.worktree,
+      sessionId: node.prompt !== null ? node.sessionId : null,
       x: node.x,
       y: node.y,
     }));
@@ -212,496 +145,255 @@ function persistableFlowSnapshot(): PersistedFlow {
       fired: edge.fired,
       carry: edge.carry,
     }));
-
   return { nodes, edges };
 }
 
-function readAllFlows(): Record<string, PersistedFlow> {
-  return persistedFlowsCache;
-}
-
 export async function hydrateOrchestratorPersistence() {
-  persistedFlowsCache = await readPref(
-    FLOWS_KEY,
-    persistedFlowsCache,
-    () => persistedFlowsCache,
-  );
-}
-
-export function loadFlowsForProject(projectPath: string | null) {
-  stopAllMonitors();
-  if (!projectPath) {
-    setFlow({ nodes: [], edges: [] });
-    return;
-  }
-  const all = readAllFlows();
-  const entry = all[projectPath];
-  if (!entry) {
-    setFlow({ nodes: [], edges: [] });
-    return;
-  }
-  const normalized = normalizePersistedFlow(entry);
-
-  const edges: FlowEdge[] = normalized.edges.map((e) => ({
-    id: e.id,
-    from: e.from,
-    to: e.to,
-    gate: e.gate ?? false,
-    gatePending: false,
-    fired: e.fired ?? false,
-    carry: e.carry ?? false,
-  }));
-  const firedTargets = new Set(edges.filter((e) => e.fired).map((e) => e.to));
-
-  const nodes: FlowNode[] = normalized.nodes.map((n) => {
-    const hasPrompt = n.prompt != null;
-    const wasFired = firedTargets.has(n.id);
-    const status: FlowNodeStatus =
-      hasPrompt && !wasFired ? "queued" : "detached";
-    return {
-      id: n.id,
-      agentId: n.agentId,
-      label: n.label,
-      prompt: n.prompt ?? null,
-      model: n.model ?? null,
-      effort: n.effort ?? null,
-      worktree: n.worktree ?? false,
-      worktreeInfo: null,
-      sessionId: null,
-      status,
-      x: n.x ?? 0,
-      y: n.y ?? 0,
-      startedAt: null,
-      finishedAt: null,
-      lastOutput: "",
-    };
-  });
-
-  setFlow({ nodes, edges });
-  scheduleSave();
+  persistedFlowsCache = await readPref(FLOWS_KEY, persistedFlowsCache, () => persistedFlowsCache);
 }
 
 let saveTimer: number | null = null;
+let loadedProject: string | null = null;
+
 function scheduleSave() {
   if (saveTimer !== null) window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
     saveTimer = null;
-    const projectPath = store.currentProject?.path;
-    if (!projectPath) return;
-    const all = readAllFlows();
-    all[projectPath] = persistableFlowSnapshot();
-    persistedFlowsCache = all;
-    writePref(FLOWS_KEY, all);
+    if (!loadedProject) return;
+    persistedFlowsCache = { ...persistedFlowsCache, [loadedProject]: persistableFlowSnapshot() };
+    writePref(FLOWS_KEY, persistedFlowsCache);
   }, 500);
 }
 
-// ── Tab sync: mirror the workspace as live nodes ─────────────────────────────
-
-function nextLiveY(): number {
-  const liveNodes = untrack(() =>
-    flow.nodes.filter((n) => n.prompt === null),
-  );
-  if (liveNodes.length === 0) return 20;
-  return Math.max(...liveNodes.map((n) => n.y)) + 160;
-}
-
-function createLiveNode(tab: Tab) {
-  const node: FlowNode = {
-    id: crypto.randomUUID(),
-    agentId: tab.agentId,
-    label: tab.label,
-    prompt: null,
-    model: null,
-    effort: null,
-    worktree: !!tab.worktree,
-    worktreeInfo: tab.worktree ?? null,
-    sessionId: tab.sessionId,
-    status: "spawning",
-    x: 24,
-    y: nextLiveY(),
-    startedAt: Date.now(),
+/** Load the saved flow for `projectPath`. Live nodes are re-created from the
+ *  project's sessions by the sync effect; only their positions come from here. */
+function loadFlowsForProject(projectPath: string | null) {
+  loadedProject = projectPath;
+  const entry = projectPath ? persistedFlowsCache[projectPath] : undefined;
+  if (!entry) {
+    setFlow({ nodes: [], edges: [] });
+    return;
+  }
+  const nodes: FlowNode[] = (entry.nodes ?? []).map((n) => ({
+    id: n.id,
+    agentId: n.agentId,
+    label: n.label,
+    prompt: n.prompt ?? null,
+    model: n.model ?? null,
+    effort: n.effort ?? null,
+    worktree: n.worktree ?? false,
+    worktreeInfo: null,
+    sessionId: n.sessionId ?? null,
+    status: n.prompt != null && !n.sessionId ? "queued" : "detached",
+    x: n.x ?? 0,
+    y: n.y ?? 0,
+    startedAt: null,
     finishedAt: null,
     lastOutput: "",
-  };
-  setFlow("nodes", (nodes) => [...nodes, node]);
-  startMonitor(tab.sessionId, node.id);
-  const pendingStartedAt = pendingTaskStarts.get(tab.sessionId);
-  if (pendingStartedAt) {
-    applyTaskStarted(tab.sessionId, node.id, pendingStartedAt);
-  }
-  scheduleSave();
+  }));
+  const ids = new Set(nodes.map((n) => n.id));
+  const edges: FlowEdge[] = (entry.edges ?? [])
+    .filter((e) => ids.has(e.from) && ids.has(e.to))
+    .map((e) => ({
+      id: e.id,
+      from: e.from,
+      to: e.to,
+      gate: e.gate ?? false,
+      gatePending: false,
+      fired: e.fired ?? false,
+      carry: e.carry ?? false,
+    }));
+  setFlow({ nodes, edges });
 }
 
-function syncTabsToNodes(tabs: Tab[]) {
-  const sessions = new Set(tabs.map((t) => t.sessionId));
+// ── Session → node sync ──────────────────────────────────────────────────────
 
-  for (const sessionId of [...pendingWorktreeNodeRemovals]) {
-    if (sessions.has(sessionId)) continue;
-    const node = flow.nodes.find((item) => item.sessionId === sessionId);
-    if (node) {
-      setFlow("edges", (edges) => edges.filter((edge) => edge.from !== node.id && edge.to !== node.id));
-      setFlow("nodes", (nodes) => nodes.filter((item) => item.id !== node.id));
-    }
-    pendingWorktreeNodeRemovals.delete(sessionId);
-  }
-
-  const connected = new Set<string>();
-  for (const edge of flow.edges) {
-    connected.add(edge.from);
-    connected.add(edge.to);
-  }
-
-  // Keep at most one live node per PTY session. Prefer the node that carries
-  // workflow edges so a duplicate card cannot sever an existing chain.
-  const keepBySession = new Map<string, string>();
-  const duplicateIds = new Set<string>();
-  for (const node of flow.nodes) {
-    if (!node.sessionId) continue;
-    const existingId = keepBySession.get(node.sessionId);
-    if (!existingId) {
-      keepBySession.set(node.sessionId, node.id);
-      continue;
-    }
-    const preferCurrent = connected.has(node.id) && !connected.has(existingId);
-    if (preferCurrent) {
-      duplicateIds.add(existingId);
-      keepBySession.set(node.sessionId, node.id);
-    } else {
-      duplicateIds.add(node.id);
-    }
-  }
-  if (duplicateIds.size > 0) {
-    setFlow("nodes", (nodes) => nodes.filter((n) => !duplicateIds.has(n.id)));
-  }
-
-  // Auto-create live nodes for unbound, non-prebound tabs.
-  for (const tab of tabs) {
-    if (preboundSessions.has(tab.sessionId)) continue;
-    const existing = flow.nodes.find((n) => n.sessionId === tab.sessionId);
-    if (existing) continue;
-    createLiveNode(tab);
-  }
-
-  // Detach nodes whose sessions vanished.
-  for (const node of flow.nodes) {
-    if (node.sessionId && !sessions.has(node.sessionId)) {
-      const oldSession = node.sessionId;
-      setFlow(
-        "nodes",
-        (n) => n.id === node.id,
-        "status",
-        "detached" as FlowNodeStatus,
-      );
-      setFlow("nodes", (n) => n.id === node.id, "sessionId", null);
-      setFlow("nodes", (n) => n.id === node.id, "finishedAt", Date.now());
-      stopMonitor(oldSession);
-    }
-  }
-
-  // Prune edge-less detached nodes (skip those awaiting rebind).
-  const toPrune = flow.nodes.filter(
-    (n) =>
-      n.status === "detached" &&
-      !connected.has(n.id) &&
-      !pendingRebinds.has(n.id),
-  );
-  if (toPrune.length > 0) {
-    const pruneIds = new Set(toPrune.map((n) => n.id));
-    setFlow("nodes", (nodes) => nodes.filter((n) => !pruneIds.has(n.id)));
-  }
-
-  scheduleSave();
+interface Derived {
+  status: FlowNodeStatus;
+  lastOutput: string;
+  startedAt: number | null;
+  finishedAt: number | null;
 }
 
-// ── Monitor lifecycle ────────────────────────────────────────────────────────
+const FRESH_MS = 8000;
 
-function startMonitor(sessionId: string, nodeId: string) {
-  if (monitors.has(sessionId)) return;
-  const monitor: Monitor = {
-    unlisten: () => {},
-    unlistenExit: () => {},
-    tail: "",
-    bellSeen: false,
-    settleTimer: null,
-    idleTimer: null,
-    startupTimer: null,
-    taskActive: false,
-    startedAt: Date.now(),
-    lastMeaningfulOutputAt: Date.now(),
-    lastOutputUpdate: 0,
-  };
-  monitors.set(sessionId, monitor);
-  scheduleStartupDone(sessionId, nodeId, READY_CAP_MS);
+/** What each session looks like to the canvas, derived from chat state only. */
+function computeDerived(): Record<string, Derived> {
+  const out: Record<string, Derived> = {};
+  for (const s of chat.sessions) {
+    const view = chat.views[s.id];
+    const assistant = view
+      ? [...view.messages].reverse().find((m) => m.role === "assistant")
+      : undefined;
+    const running = view?.running ?? s.status === "running";
 
-  void onPtyOutput(sessionId, (data) => {
-    handleOutput(sessionId, nodeId, data);
-  }).then((unlisten) => {
-    const m = monitors.get(sessionId);
-    if (m) m.unlisten = unlisten;
-    else unlisten();
-  });
+    let status: FlowNodeStatus;
+    if (pendingInputCount(s.id)) status = "waiting";
+    else if (running) status = "working";
+    else if (assistant && assistant.role === "assistant") {
+      status = assistant.status === "done" ? "done" : "failed";
+    } else if (s.entry_count > 0) status = s.status === "error" ? "failed" : "done";
+    else status = Date.now() - s.created_at < FRESH_MS ? "spawning" : "failed";
 
-  void onPtyExit(sessionId, () => {
-    handleExit(sessionId, nodeId);
-  }).then((unlisten) => {
-    const m = monitors.get(sessionId);
-    if (m) m.unlistenExit = unlisten;
-    else unlisten();
-  });
-}
-
-function stopMonitor(sessionId: string) {
-  const monitor = monitors.get(sessionId);
-  if (!monitor) return;
-  monitor.unlisten();
-  monitor.unlistenExit();
-  if (monitor.settleTimer !== null) window.clearTimeout(monitor.settleTimer);
-  if (monitor.idleTimer !== null) window.clearTimeout(monitor.idleTimer);
-  if (monitor.startupTimer !== null) window.clearTimeout(monitor.startupTimer);
-  monitors.delete(sessionId);
-  pendingTaskStarts.delete(sessionId);
-}
-
-function stopAllMonitors() {
-  for (const sessionId of [...monitors.keys()]) stopMonitor(sessionId);
-}
-
-// ── Completion detection ─────────────────────────────────────────────────────
-
-function nodeStatusFor(sessionId: string): FlowNodeStatus | null {
-  const node = untrack(() => flow.nodes.find((n) => n.sessionId === sessionId));
-  return node?.status ?? null;
-}
-
-function setNodeStatus(nodeId: string, status: FlowNodeStatus) {
-  setFlow("nodes", (n) => n.id === nodeId, "status", status);
-}
-
-function setNodeField<T extends keyof FlowNode>(
-  nodeId: string,
-  field: T,
-  value: FlowNode[T],
-) {
-  setFlow("nodes", (n) => n.id === nodeId, field, value);
-}
-
-function markNodeWorking(nodeId: string, resetClock: boolean) {
-  setNodeStatus(nodeId, "working");
-  if (resetClock) {
-    setNodeField(nodeId, "startedAt", Date.now());
-    setNodeField(nodeId, "finishedAt", null);
-  }
-}
-
-function markNodeFailed(nodeId: string) {
-  const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
-  if (node?.sessionId) {
-    const monitor = monitors.get(node.sessionId);
-    if (monitor) {
-      monitor.taskActive = false;
-      clearMonitorTimer(monitor, "settleTimer");
-      clearMonitorTimer(monitor, "idleTimer");
-    }
-  }
-  setNodeStatus(nodeId, "failed");
-  setNodeField(nodeId, "finishedAt", Date.now());
-}
-
-function clearMonitorTimer(monitor: Monitor, timer: "settleTimer" | "idleTimer" | "startupTimer") {
-  const id = monitor[timer];
-  if (id !== null) {
-    window.clearTimeout(id);
-    monitor[timer] = null;
-  }
-}
-
-export function cleanTerminalText(data: string): string {
-  return stripAnsi(data)
-    .replace(TERMINAL_NOISE_RE, "")
-    .replace(/\r/g, "\n")
-    .replace(/[ \t]+\n/g, "\n");
-}
-
-export function isMeaningfulOutput(text: string): boolean {
-  const compact = text
-    .replace(/[│─╭╮╰╯╞═╪╡┌┐└┘├┤┬┴┼━┃┏┓┗┛┣┫┳┻╋]/g, "")
-    .replace(/[•·*#=_\-~]/g, "")
-    .replace(/\s+/g, "");
-  return compact.length >= 2;
-}
-
-function scheduleStartupDone(sessionId: string, nodeId: string, delay = STARTUP_DONE_MS) {
-  const monitor = monitors.get(sessionId);
-  if (!monitor || monitor.taskActive) return;
-  clearMonitorTimer(monitor, "startupTimer");
-  monitor.startupTimer = window.setTimeout(() => {
-    const m = monitors.get(sessionId);
-    if (!m || m.taskActive) return;
-    const status = nodeStatusFor(sessionId);
-    if (status === "spawning") {
-      setNodeStatus(nodeId, "done");
-      setNodeField(nodeId, "finishedAt", Date.now());
-    }
-  }, delay);
-}
-
-function scheduleCompletionCheck(sessionId: string, nodeId: string, delay: number) {
-  const monitor = monitors.get(sessionId);
-  if (!monitor || !monitor.taskActive) return;
-  const quietSince = monitor.lastMeaningfulOutputAt;
-  clearMonitorTimer(monitor, "idleTimer");
-  monitor.idleTimer = window.setTimeout(() => {
-    const m = monitors.get(sessionId);
-    if (!m || !m.taskActive) return;
-    const status = nodeStatusFor(sessionId);
-    if (!status || status === "detached" || status === "done" || status === "failed") return;
-
-    const tail = m.tail.slice(-600);
-    if (WAITING_RE.test(tail)) {
-      setNodeStatus(nodeId, "waiting");
-      return;
-    }
-    if (IDLE_PROMPT_RE.test(tail) || m.lastMeaningfulOutputAt === quietSince) {
-      onNodeDone(nodeId);
-      return;
-    }
-    scheduleCompletionCheck(sessionId, nodeId, IDLE_FALLBACK_MS);
-  }, delay);
-}
-
-function applyTaskStarted(sessionId: string, nodeId: string, startedAt = Date.now()) {
-  pendingTaskStarts.delete(sessionId);
-  markNodeWorking(nodeId, true);
-  const monitor = monitors.get(sessionId);
-  if (!monitor) return;
-  monitor.taskActive = true;
-  monitor.startedAt = startedAt;
-  monitor.lastMeaningfulOutputAt = startedAt;
-  monitor.tail = "";
-  monitor.bellSeen = false;
-  clearMonitorTimer(monitor, "settleTimer");
-  clearMonitorTimer(monitor, "idleTimer");
-  clearMonitorTimer(monitor, "startupTimer");
-  scheduleCompletionCheck(sessionId, nodeId, IDLE_FALLBACK_MS);
-}
-
-/** True when `data` contains a standalone BEL — OSC sequences (title updates,
- *  progress reports) are BEL-terminated and must not count as attention bells. */
-function hasRealBell(data: string): boolean {
-  return data.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").includes("\x07");
-}
-
-function handleOutput(sessionId: string, nodeId: string, data: string) {
-  const monitor = monitors.get(sessionId);
-  if (!monitor) return;
-
-  if (hasRealBell(data)) monitor.bellSeen = true;
-
-  const stripped = cleanTerminalText(data);
-  const meaningful = isMeaningfulOutput(stripped);
-  if (meaningful) {
-    monitor.lastMeaningfulOutputAt = Date.now();
-  }
-  monitor.tail = (monitor.tail + stripped).slice(-TAIL_MAX);
-
-  // Query-polling TUIs (claude's cursor-position polls answered by xterm.js)
-  // keep the PTY chattering even when idle. Those chunks clean to nothing, so
-  // only meaningful output may re-arm the startup/completion timers — otherwise
-  // the idle checks never fire and nodes stay spawning/working forever.
-  const status = nodeStatusFor(sessionId);
-  if (status === "spawning" && !monitor.taskActive) {
-    if (meaningful) scheduleStartupDone(sessionId, nodeId);
-  } else if (
-    monitor.taskActive &&
-    status &&
-    status !== "detached" &&
-    status !== "working" &&
-    status !== "done" &&
-    status !== "failed"
-  ) {
-    if (meaningful) markNodeWorking(nodeId, false);
-  }
-
-  if (monitor.taskActive && meaningful) {
-    const tail = monitor.tail.slice(-600);
-    if (WAITING_RE.test(tail)) {
-      setNodeStatus(nodeId, "waiting");
-    } else if (IDLE_PROMPT_RE.test(tail)) {
-      scheduleCompletionCheck(sessionId, nodeId, READY_SILENCE_MS);
-    } else {
-      scheduleCompletionCheck(sessionId, nodeId, IDLE_FALLBACK_MS);
-    }
-  }
-
-  // Bell + settle.
-  if (monitor.taskActive && monitor.bellSeen) {
-    monitor.bellSeen = false;
-    clearMonitorTimer(monitor, "settleTimer");
-    monitor.settleTimer = window.setTimeout(() => {
-      const m = monitors.get(sessionId);
-      if (!m || !m.taskActive) return;
-      const s = nodeStatusFor(sessionId);
-      if (!s || s === "detached") return;
-      const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
-      const runtime = Date.now() - (node?.startedAt ?? Date.now());
-      if (WAITING_RE.test(m.tail.slice(-200))) {
-        setNodeStatus(nodeId, "waiting");
-      } else if (runtime >= BELL_MIN_RUNTIME_MS) {
-        onNodeDone(nodeId);
+    let lastOutput = "";
+    if (assistant && assistant.role === "assistant") {
+      const blocks = assistant.blocks;
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        const b = blocks[i];
+        if (b.kind === "text") { lastOutput = b.text.slice(-120); break; }
+        if (b.kind === "tool") { lastOutput = b.title.slice(0, 120); break; }
       }
-    }, BELL_SETTLE_MS);
+    }
+    out[s.id] = {
+      status,
+      lastOutput,
+      startedAt: assistant && assistant.role === "assistant" ? assistant.startedAt : s.created_at,
+      finishedAt: status === "done" || status === "failed"
+        ? (assistant && assistant.role === "assistant" ? assistant.endedAt ?? s.updated_at : s.updated_at)
+        : null,
+    };
+  }
+  return out;
+}
+
+function nextLiveY(): number {
+  const live = flow.nodes.filter((n) => n.prompt === null);
+  return live.length === 0 ? 20 : Math.max(...live.map((n) => n.y)) + 160;
+}
+
+function syncSessions() {
+  const project = store.currentProject?.path ?? null;
+  if (project !== loadedProject) loadFlowsForProject(project);
+  if (!project) return;
+
+  const sessions = chat.sessions.filter((s) => s.project_path === project && !s.archived);
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  const boundByStep = new Set(
+    flow.nodes.filter((n) => n.prompt !== null && n.sessionId).map((n) => n.sessionId as string),
+  );
+
+  // Drop live nodes whose session is gone (and step bindings to deleted sessions).
+  const removed = new Set<string>();
+  for (const n of flow.nodes) {
+    if (n.prompt === null && (!n.sessionId || !byId.has(n.sessionId))) removed.add(n.id);
+  }
+  if (removed.size > 0) {
+    setFlow("edges", (edges) => edges.filter((e) => !removed.has(e.from) && !removed.has(e.to)));
+    setFlow("nodes", (nodes) => nodes.filter((n) => !removed.has(n.id)));
+  }
+  for (const n of flow.nodes) {
+    if (n.prompt !== null && n.sessionId && !byId.has(n.sessionId)) {
+      setFlow("nodes", (x) => x.id === n.id, { sessionId: null, status: "detached" });
+    }
   }
 
-  // Throttled lastOutput.
-  const now = Date.now();
-  if (now - monitor.lastOutputUpdate >= OUTPUT_THROTTLE_MS) {
-    monitor.lastOutputUpdate = now;
-    setNodeField(nodeId, "lastOutput", monitor.tail.slice(-LAST_OUTPUT_MAX));
+  // Add live nodes for sessions the canvas hasn't seen. Positions saved with
+  // the flow are restored for nodes that were connected before.
+  const known = new Set(flow.nodes.map((n) => n.id));
+  const saved = new Map((persistedFlowsCache[project]?.nodes ?? []).map((n) => [n.id, n]));
+  const added: FlowNode[] = [];
+  let y = nextLiveY();
+  for (const s of sessions) {
+    const id = liveId(s.id);
+    if (known.has(id) || boundByStep.has(s.id)) continue;
+    const pos = saved.get(id);
+    added.push({
+      id,
+      agentId: s.agent_id,
+      label: s.title || s.agent_id,
+      prompt: null,
+      model: s.model,
+      effort: s.effort,
+      worktree: !!s.worktree,
+      worktreeInfo: s.worktree
+        ? { path: s.worktree.path, branch: s.worktree.branch, sourceBranch: s.worktree.source_branch }
+        : null,
+      sessionId: s.id,
+      status: "detached",
+      x: pos?.x ?? 24,
+      y: pos?.y ?? y,
+      startedAt: null,
+      finishedAt: null,
+      lastOutput: "",
+    });
+    if (!pos) y += 160;
+  }
+  if (added.length > 0) {
+    setFlow("nodes", (nodes) => [...nodes, ...added]);
+    // A saved edge may point at a live node that only now exists again.
+    const have = new Set([...flow.nodes.map((n) => n.id), ...added.map((n) => n.id)]);
+    const savedEdges = persistedFlowsCache[project]?.edges ?? [];
+    const present = new Set(flow.edges.map((e) => e.id));
+    const restored = savedEdges
+      .filter((e) => !present.has(e.id) && have.has(e.from) && have.has(e.to))
+      .map((e) => ({
+        id: e.id, from: e.from, to: e.to, gate: e.gate ?? false, gatePending: false,
+        fired: e.fired ?? false, carry: e.carry ?? false,
+      }));
+    if (restored.length > 0) setFlow("edges", (edges) => [...edges, ...restored]);
+  }
+
+  // Keep labels and worktree bindings in step with the sessions.
+  for (const n of flow.nodes) {
+    const s = n.sessionId ? byId.get(n.sessionId) : undefined;
+    if (!s) continue;
+    const label = n.prompt === null ? s.title || n.label : n.label;
+    const wt = s.worktree
+      ? { path: s.worktree.path, branch: s.worktree.branch, sourceBranch: s.worktree.source_branch }
+      : null;
+    if (label !== n.label) setFlow("nodes", (x) => x.id === n.id, "label", label);
+    if ((wt?.path ?? null) !== (n.worktreeInfo?.path ?? null)) {
+      setFlow("nodes", (x) => x.id === n.id, "worktreeInfo", wt);
+    }
   }
 }
 
-function handleExit(sessionId: string, nodeId: string) {
-  const monitor = monitors.get(sessionId);
-  if (!monitor) return;
-  clearMonitorTimer(monitor, "settleTimer");
-  clearMonitorTimer(monitor, "idleTimer");
-  clearMonitorTimer(monitor, "startupTimer");
-
-  const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
-  if (!node) return;
-  const runtime = Date.now() - (node.startedAt ?? Date.now());
-  if (monitor.taskActive && runtime < EXIT_FAIL_MS) {
-    markNodeFailed(nodeId);
-  } else {
-    onNodeDone(nodeId);
+function applyDerived(derived: Record<string, Derived>) {
+  for (const n of flow.nodes) {
+    if (!n.sessionId) continue;
+    const d = derived[n.sessionId];
+    if (!d) continue;
+    const patch: Partial<FlowNode> = {};
+    if (n.status !== d.status) patch.status = d.status;
+    if (n.lastOutput !== d.lastOutput) patch.lastOutput = d.lastOutput;
+    if (n.startedAt !== d.startedAt) patch.startedAt = d.startedAt;
+    if (n.finishedAt !== d.finishedAt) patch.finishedAt = d.finishedAt;
+    if (Object.keys(patch).length > 0) setFlow("nodes", (x) => x.id === n.id, patch);
   }
+}
+
+let initialized = false;
+
+/** Wire the canvas to the chat store. Call once from within a reactive root. */
+export function initOrchestrator() {
+  if (initialized) return;
+  initialized = true;
+
+  createEffect(() => {
+    void store.currentProject?.path;
+    void chat.sessions.length;
+    for (const s of chat.sessions) { void s.archived; void s.title; void s.worktree; }
+    untrack(syncSessions);
+  });
+
+  const derived = createMemo(computeDerived);
+  createEffect(() => {
+    const d = derived();
+    untrack(() => applyDerived(d));
+  });
+
+  const off = onTurnEnd((sessionId, status) => {
+    if (status !== "done") return;
+    const node = untrack(() => flow.nodes.find((n) => n.sessionId === sessionId));
+    if (node) onNodeDone(node.id);
+  });
+  onCleanup(off);
 }
 
 // ── Firing ───────────────────────────────────────────────────────────────────
 
 function onNodeDone(nodeId: string) {
-  const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
-  if (!node) return;
-  if (node.status === "done" || node.status === "failed") return;
-  if (node.sessionId) {
-    const monitor = monitors.get(node.sessionId);
-    if (monitor) {
-      monitor.taskActive = false;
-      clearMonitorTimer(monitor, "settleTimer");
-      clearMonitorTimer(monitor, "idleTimer");
-    }
-  }
-  setNodeStatus(nodeId, "done");
-  setNodeField(nodeId, "finishedAt", Date.now());
-  // Final lastOutput flush from the monitor's tail.
-  if (node.sessionId) {
-    const m = monitors.get(node.sessionId);
-    if (m) setNodeField(nodeId, "lastOutput", m.tail.slice(-LAST_OUTPUT_MAX));
-  }
-
-  const outgoing = untrack(() =>
-    flow.edges.filter((e) => e.from === nodeId && !e.fired),
-  );
+  const outgoing = untrack(() => flow.edges.filter((e) => e.from === nodeId && !e.fired));
   for (const edge of outgoing) {
     if (edge.gate) {
       setFlow("edges", (e) => e.id === edge.id, "gatePending", true);
@@ -712,199 +404,53 @@ function onNodeDone(nodeId: string) {
   }
 }
 
-/** Type the node's model/effort slash commands into the ready TUI, pausing
- *  between sends so the agent can apply each one before the prompt arrives. */
-const TUNING_SETTLE_MS = 700;
-
-async function applyNodeTuning(sessionId: string, node: FlowNode) {
-  const tuning = agentTuning(node.agentId);
-  if (!tuning) return;
-  const commands: string[] = [];
-  if (node.model && tuning.modelCommand) commands.push(tuning.modelCommand(node.model));
-  if (node.effort && tuning.effortCommand) commands.push(tuning.effortCommand(node.effort));
-  for (const command of commands) {
-    await ptySendLine(sessionId, command);
-    await new Promise((resolve) => setTimeout(resolve, TUNING_SETTLE_MS));
-  }
-}
-
-async function waitForReady(sessionId: string): Promise<void> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let silenceTimer: number | null = null;
-    let unlisten: (() => void) | null = null;
-
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      if (silenceTimer !== null) window.clearTimeout(silenceTimer);
-      window.clearTimeout(cap);
-      unlisten?.();
-      resolve();
-    };
-
-    const cap = window.setTimeout(finish, READY_CAP_MS);
-
-    void onPtyOutput(sessionId, (data) => {
-      if (settled) return;
-      // Ignore query-poll noise, or the silence window never elapses and
-      // every step waits the full READY_CAP_MS before its prompt is sent.
-      if (!isMeaningfulOutput(cleanTerminalText(data))) return;
-      if (silenceTimer !== null) window.clearTimeout(silenceTimer);
-      silenceTimer = window.setTimeout(finish, READY_SILENCE_MS);
-    }).then((un) => {
-      unlisten = un;
-      if (settled) un();
-    });
-  });
-}
-
 async function fireStep(nodeId: string, edgeId: string | null) {
   const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
   if (!node || !node.prompt) return;
   if (firingNodes.has(nodeId)) return;
+  const project = untrack(() => store.currentProject);
+  if (!project) return;
   firingNodes.add(nodeId);
 
-  const project = untrack(() => store.currentProject);
-  if (!project) {
-    firingNodes.delete(nodeId);
-    return;
-  }
-
-  setNodeStatus(nodeId, "spawning");
-  setNodeField(nodeId, "startedAt", Date.now());
-  setNodeField(nodeId, "finishedAt", null);
-
-  let sessionId: string | null = null;
   const edge = edgeId ? untrack(() => flow.edges.find((e) => e.id === edgeId)) : null;
-  const carry = edge?.carry ?? false;
-  const parentNode = edge ? untrack(() => flow.nodes.find((n) => n.id === edge.from)) : null;
-  const fromAgentId = parentNode?.agentId;
+  const parent = edge ? untrack(() => flow.nodes.find((n) => n.id === edge.from)) : null;
 
-  // Flag-based tuning is applied at spawn; command-based tuning after ready.
-  const tuning = agentTuning(node.agentId);
-  const spawnTuningArgs =
-    tuning?.spawnArgs && (node.model || node.effort)
-      ? tuning.spawnArgs(node.model, node.effort)
-      : [];
-  let tunedAtSpawn = false;
-  let worktreeInfo: Tab["worktree"] | undefined;
+  setFlow("nodes", (n) => n.id === nodeId, { status: "spawning", startedAt: Date.now(), finishedAt: null });
 
+  let worktree: FlowWorktree | undefined;
   try {
     if (node.worktree) {
-      if (carry) toast("Isolated worktree steps start without carried context", "info");
       const wt = await createWorktree(project.path, node.agentId);
-      worktreeInfo = { path: wt.worktree_path, branch: wt.branch, sourceBranch: wt.source_branch };
-      sessionId = await spawnAgent(
-        node.agentId, project.path, untrack(() => store.yoloMode),
-        spawnTuningArgs.length > 0 ? spawnTuningArgs : undefined, wt.worktree_path,
-      );
-      tunedAtSpawn = spawnTuningArgs.length > 0;
-    } else if (carry && fromAgentId) {
-      try {
-        sessionId = await continueAgent(
-          project.path,
-          fromAgentId,
-          node.agentId,
-          untrack(() => store.yoloMode),
-        );
-      } catch (err) {
-        toast(`Context handoff failed: ${String(err)}. Starting cold instead.`, "info");
-        sessionId = await spawnAgent(
-          node.agentId,
-          project.path,
-          untrack(() => store.yoloMode),
-          spawnTuningArgs.length > 0 ? spawnTuningArgs : undefined,
-        );
-        tunedAtSpawn = spawnTuningArgs.length > 0;
-      }
-    } else {
-      sessionId = await spawnAgent(
-        node.agentId,
-        project.path,
-        untrack(() => store.yoloMode),
-        spawnTuningArgs.length > 0 ? spawnTuningArgs : undefined,
-      );
-      tunedAtSpawn = spawnTuningArgs.length > 0;
+      worktree = { path: wt.worktree_path, branch: wt.branch, sourceBranch: wt.source_branch };
     }
-    preboundSessions.add(sessionId);
-    bindNode(nodeId, sessionId);
-    setFlow("nodes", (n) => n.id === nodeId, "worktreeInfo", worktreeInfo ?? null);
-    // Start readiness listener BEFORE addTab so it's registered before
-    // TerminalPane calls ptyAttach and releases the buffered first chunk.
-    const readyPromise = waitForReady(sessionId);
-    const agent = untrack(() =>
-      store.agents.find((a) => a.id === node.agentId),
-    );
-    addTab({
-      sessionId,
-      label: node.label,
+    const meta = await startSessionTurn({
+      projectPath: project.path,
+      worktree: worktree
+        ? { path: worktree.path, branch: worktree.branch, source_branch: worktree.sourceBranch }
+        : undefined,
       agentId: node.agentId,
-      agentIcon: agent?.icon ?? "",
-      worktree: worktreeInfo,
+      model: node.model,
+      effort: node.effort,
+      mode: untrack(() => chat.composer.mode),
+      prompt: node.prompt,
+      parentId: parent?.sessionId ?? undefined,
+      contextFrom: edge?.carry && parent?.sessionId ? parent.sessionId : undefined,
     });
-
-    await readyPromise;
-    if (!tunedAtSpawn) await applyNodeTuning(sessionId, node);
-    markSessionTaskStarted(sessionId);
-    await ptySendLine(sessionId, node.prompt);
-
+    setFlow("nodes", (n) => n.id === nodeId, { sessionId: meta.id, worktreeInfo: worktree ?? null });
     if (edgeId) {
-      setFlow("edges", (e) => e.id === edgeId, "fired", true);
-      setFlow("edges", (e) => e.id === edgeId, "gatePending", false);
+      setFlow("edges", (e) => e.id === edgeId, { fired: true, gatePending: false });
     }
+    scheduleSave();
   } catch (e) {
-    if (worktreeInfo) void removeWorktree(project.path, worktreeInfo.path, worktreeInfo.branch, true);
-    markNodeFailed(nodeId);
+    if (worktree) void removeWorktree(project.path, worktree.path, worktree.branch, true);
+    setFlow("nodes", (n) => n.id === nodeId, "status", "failed");
     toast(`Step failed: ${String(e)}`, "error");
   } finally {
-    if (sessionId) preboundSessions.delete(sessionId);
     firingNodes.delete(nodeId);
   }
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
-
-export function initOrchestrator() {
-  createEffect(() => {
-    const tabs = store.tabs;
-    untrack(() => syncTabsToNodes(tabs));
-  });
-}
-
-export function bindNode(nodeId: string, sessionId: string) {
-  const exists = untrack(() => flow.nodes.some((n) => n.id === nodeId));
-  if (!exists) return false;
-  setFlow("nodes", (n) => n.id === nodeId, "sessionId", sessionId);
-  setNodeStatus(nodeId, "spawning");
-  setNodeField(nodeId, "startedAt", Date.now());
-  setNodeField(nodeId, "finishedAt", null);
-  startMonitor(sessionId, nodeId);
-  const pendingStartedAt = pendingTaskStarts.get(sessionId);
-  if (pendingStartedAt) {
-    applyTaskStarted(sessionId, nodeId, pendingStartedAt);
-  }
-  scheduleSave();
-  return true;
-}
-
-/** Re-bind a persisted live node after an app restart. Force-gates its
- *  unfired outgoing edges so startup noise can't fire chains. Returns the
- *  number of edges that were force-gated. */
-export function rebindNode(nodeId: string, sessionId: string, worktreeInfo?: Tab["worktree"]): number {
-  pendingRebinds.delete(nodeId);
-  if (!bindNode(nodeId, sessionId)) return 0;
-  setFlow("nodes", (n) => n.id === nodeId, "worktreeInfo", worktreeInfo ?? null);
-  if (worktreeInfo) setFlow("nodes", (n) => n.id === nodeId, "worktree", true);
-  const edges = untrack(() =>
-    flow.edges.filter((e) => e.from === nodeId && !e.fired),
-  );
-  for (const edge of edges) {
-    setFlow("edges", (e) => e.id === edge.id, "gate", true);
-    setFlow("edges", (e) => e.id === edge.id, "gatePending", true);
-  }
-  return edges.length;
-}
+// ── Graph editing ────────────────────────────────────────────────────────────
 
 export function addStepNode(
   fromNodeId: string,
@@ -918,18 +464,10 @@ export function addStepNode(
 ) {
   const parent = untrack(() => flow.nodes.find((n) => n.id === fromNodeId));
   if (!parent) return;
-  const outgoing = untrack(() =>
-    flow.edges.filter((e) => e.from === fromNodeId),
-  );
-  let x = parent.x + 280;
+  const outgoing = untrack(() => flow.edges.filter((e) => e.from === fromNodeId));
+  const x = parent.x + 280;
   let y = parent.y + outgoing.length * 120;
-  while (
-    untrack(() =>
-      flow.nodes.some(
-        (n) => Math.abs(n.x - x) < 60 && Math.abs(n.y - y) < 90,
-      ),
-    )
-  ) {
+  while (untrack(() => flow.nodes.some((n) => Math.abs(n.x - x) < 60 && Math.abs(n.y - y) < 90))) {
     y += 120;
   }
 
@@ -966,7 +504,7 @@ export function addStepNode(
 }
 
 /** Update a queued (or failed) step node's agent, prompt, and optionally the
- *  gate on its incoming edge. */
+ *  gate/carry on its incoming edge. */
 export function updateStepNode(
   nodeId: string,
   agentId: string,
@@ -986,50 +524,23 @@ export function updateStepNode(
     effort,
     ...(worktree !== undefined ? { worktree } : {}),
   });
-  if (gate !== undefined) {
-    const edge = untrack(() =>
-      flow.edges.find((e) => e.to === nodeId && !e.fired),
-    );
-    if (edge) {
-      setFlow("edges", (e) => e.id === edge.id, "gate", gate);
-    }
-  }
-  if (carry !== undefined) {
-    const edge = untrack(() =>
-      flow.edges.find((e) => e.to === nodeId && !e.fired),
-    );
-    if (edge) {
-      setFlow("edges", (e) => e.id === edge.id, "carry", carry);
-    }
-  }
+  const edge = untrack(() => flow.edges.find((e) => e.to === nodeId && !e.fired));
+  if (edge && gate !== undefined) setFlow("edges", (e) => e.id === edge.id, "gate", gate);
+  if (edge && carry !== undefined) setFlow("edges", (e) => e.id === edge.id, "carry", carry);
   scheduleSave();
 }
 
-export function moveNode(nodeId: string, x: number, y: number) {
-  setFlow("nodes", (n) => n.id === nodeId, "x", x);
-  setFlow("nodes", (n) => n.id === nodeId, "y", y);
-  scheduleSave();
-}
-
+/** Remove a node from the canvas. A live node is a view of a session, so
+ *  removing it archives that session; a step node is just dropped (any session
+ *  it already started stays in the sidebar). */
 export function removeNode(nodeId: string) {
   const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
-  const tab = node?.sessionId ? untrack(() => store.tabs.find((item) => item.sessionId === node.sessionId)) : undefined;
-  if (node?.sessionId && tab?.worktree) {
-    pendingWorktreeNodeRemovals.add(node.sessionId);
-    stopMonitor(node.sessionId);
-    removeTab(node.sessionId);
+  if (!node) return;
+  if (node.prompt === null && node.sessionId) {
+    void archiveSession(node.sessionId, true);
     return;
   }
-  setFlow("edges", (edges) =>
-    edges.filter((e) => e.from !== nodeId && e.to !== nodeId),
-  );
-  if (node?.sessionId) {
-    stopMonitor(node.sessionId);
-    // Close the bound tab so tab-sync doesn't recreate a live node.
-    if (untrack(() => store.tabs.some((t) => t.sessionId === node.sessionId))) {
-      removeTab(node.sessionId);
-    }
-  }
+  setFlow("edges", (edges) => edges.filter((e) => e.from !== nodeId && e.to !== nodeId));
   setFlow("nodes", (nodes) => nodes.filter((n) => n.id !== nodeId));
   scheduleSave();
 }
@@ -1042,11 +553,9 @@ export function removeEdge(edgeId: string) {
 export function toggleEdgeGate(edgeId: string) {
   const edge = untrack(() => flow.edges.find((e) => e.id === edgeId));
   if (!edge) return;
-  const turningOff = edge.gate;
   setFlow("edges", (e) => e.id === edgeId, "gate", (g) => !g);
-  if (turningOff && edge.gatePending) {
-    // Turning the gate off while it's pending → fire immediately, same as
-    // releasing the gate.
+  if (edge.gate && edge.gatePending) {
+    // Turning the gate off while it's pending fires immediately, same as release.
     setFlow("edges", (e) => e.id === edgeId, "gatePending", false);
     void fireStep(edge.to, edge.id);
   }
@@ -1060,101 +569,33 @@ export function releaseGate(edgeId: string) {
   void fireStep(edge.to, edge.id);
 }
 
-/** Manual "run now" from the context menu: queued step or re-run a detached one. */
+export function toggleEdgeCarry(edgeId: string) {
+  setFlow("edges", (e) => e.id === edgeId, "carry", (c) => !c);
+  scheduleSave();
+}
+
+/** Context-menu "Run now": start a queued (or failed) step immediately. */
 export async function runNodeNow(nodeId: string) {
   const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
   if (!node) return;
   if (node.prompt) {
-    const edge = untrack(() =>
-      flow.edges.find((e) => e.to === nodeId && !e.fired),
-    );
+    const edge = untrack(() => flow.edges.find((e) => e.to === nodeId && !e.fired));
     void fireStep(nodeId, edge?.id ?? null);
-    return;
-  }
-  // Live node: spawn + bind (no prompt to send).
-  const project = untrack(() => store.currentProject);
-  if (!project) return;
-  setNodeStatus(nodeId, "spawning");
-  setNodeField(nodeId, "startedAt", Date.now());
-  setNodeField(nodeId, "finishedAt", null);
-  let sessionId: string | null = null;
-  let worktreeInfo: Tab["worktree"] | undefined;
-  try {
-    if (node.worktree) {
-      const wt = await createWorktree(project.path, node.agentId);
-      worktreeInfo = { path: wt.worktree_path, branch: wt.branch, sourceBranch: wt.source_branch };
-    }
-    sessionId = await spawnAgent(
-      node.agentId,
-      project.path,
-      untrack(() => store.yoloMode),
-      undefined,
-      worktreeInfo?.path,
-    );
-    preboundSessions.add(sessionId);
-    bindNode(nodeId, sessionId);
-    setFlow("nodes", (n) => n.id === nodeId, "worktreeInfo", worktreeInfo ?? null);
-    const agent = untrack(() =>
-      store.agents.find((a) => a.id === node.agentId),
-    );
-    addTab({
-      sessionId,
-      label: node.label,
-      agentId: node.agentId,
-      agentIcon: agent?.icon ?? "",
-      worktree: worktreeInfo,
-    });
-  } catch (e) {
-    if (worktreeInfo) void removeWorktree(project.path, worktreeInfo.path, worktreeInfo.branch, true);
-    markNodeFailed(nodeId);
-    toast(`Launch failed: ${String(e)}`, "error");
-  } finally {
-    if (sessionId) preboundSessions.delete(sessionId);
+  } else if (node.sessionId) {
+    void selectSession(node.sessionId);
   }
 }
 
-export function flowNodeIdForSession(sessionId: string): string | null {
-  const node = untrack(() =>
-    flow.nodes.find((n) => n.sessionId === sessionId),
-  );
-  return node?.id ?? null;
-}
-
+/** Jump to the session behind a node. */
 export function focusNodeTab(nodeId: string) {
   const node = untrack(() => flow.nodes.find((n) => n.id === nodeId));
-  if (node?.sessionId) {
-    setActiveTab(node.sessionId);
-  }
-}
-
-export function markSessionTaskStarted(sessionId: string) {
-  const node = untrack(() =>
-    flow.nodes.find((n) => n.sessionId === sessionId),
-  );
-  const startedAt = Date.now();
-  if (!node || node.status === "detached") {
-    pendingTaskStarts.set(sessionId, startedAt);
-    return;
-  }
-  applyTaskStarted(sessionId, node.id, startedAt);
-}
-
-export function toggleEdgeCarry(edgeId: string) {
-  setFlow("edges", (e) => e.id === edgeId, "carry", (c) => !c);
-  scheduleSave();
+  if (node?.sessionId) void selectSession(node.sessionId);
 }
 
 export function clearStepNodesAndEdges() {
   setFlow("nodes", (nodes) => nodes.filter((n) => n.prompt === null));
   setFlow("edges", []);
   scheduleSave();
-}
-
-export function pendingAttention(): number {
-  return (
-    flow.edges.filter((e) => e.gatePending).length +
-    flow.nodes.filter((n) => n.status === "waiting").length
-  );
 }
 
 export function openFlowAgentCount(): number {

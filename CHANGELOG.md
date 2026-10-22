@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.11.0 - 2026-10-22
+
+### Changed
+
+- **New interface.** A sessions sidebar grouped by project, a chat transcript (streamed markdown, collapsible tool calls, inline diffs, "Changed N files" review footer), a rounded composer with `@` file mentions, `/` commands and skills, queued follow-ups, and agent / model / effort / permission pickers, plus a toggleable side pane with Changes, Preview, Terminal and Flow. Light and dark themes.
+- **Structured agent sessions.** Claude Code and Cursor now use persistent ACP v1 sessions; other supported CLIs run headless. The chat engine (`src-tauri/src/chat/`) normalizes native ACP or headless JSON streams instead of an interactive terminal tab, normalizes every agent's output into one event stream, and persists transcripts per session. Switching the agent mid-conversation resumes its own session or replays a digest of the conversation.
+- The orchestrator flow canvas now runs on chat sessions: status comes from real turn events, chained steps start child sessions, and carry-context uses the conversation digest.
+- Native menu and keyboard shortcuts were rebuilt around sessions and panes (`⌘N` new session, `⌘⇧N` new project, `⌘B` sidebar, `⌘⌥B` side pane, `⌘J` terminal, `⌘.` stop).
+- Restore standard native title bars on macOS, Windows and Linux, with system window controls, resizing, dragging and window-menu behavior; remove custom controls and title-bar double-click overrides.
+- Ignore legacy saved decoration state when restoring windows so an older `decorated: false` preference cannot hide the native title bar after upgrading; keep saved geometry and other window state.
+- Standardize UI and file-category icons on locally bundled Google Material Symbols; replace the generated editor icon mapping and vendored SVG theme.
+- Share the registered Highlight.js languages between chat and diffs, avoiding the full language catalog in the diff bundle. Move README media out of public app assets.
+- Use the standard Base64 crate for attachments and the existing Tauri opener for preview links; remove unused SQLite and narrow the direct Tokio feature set. Apply compatible npm security fixes.
+
+### Added
+
+- Native Claude/Cursor permissions, questions, plan approval and elicitation cards; model/effort/command catalogs from the agent; waiting state in the sidebar and Flow; structured image input and explicit transcript-based session recovery.
+- Bundled, pinned Node 24.22.1 and Claude ACP helper 0.94.0, build-time checksum verification, native lifecycle/cancellation tests and CLI sign-in/update/readiness controls. No runtime helper installation or system-Node dependency for desktop users; native Claude on macOS requires 13.5+.
+- Import existing Claude Code and Codex CLI sessions (banner on the new-session screen, and Settings). Imported sessions resume the original CLI session when continued.
+- Command palette (⌘K) with transcript content search; "Focus composer" moved to ⌘L.
+- Attachments: file picker, drag-and-drop, and pasted images, shown as chips and thumbnails.
+- Message actions (copy, retry, edit, "Continue with another agent"), grouped tool runs, todo checklists, live elapsed time with a Stop button, retry on failed turns, and a queue that survives failures.
+- Sidebar project filter, Project/Date grouping, pinned sessions, back/forward history (⌘[ ⌘]), ⌘1–9 to jump, keyboard navigation, and an update badge on Windows/Linux.
+- Install buttons for missing agents (Settings and the new-session screen), syntax-highlighted code in chat and diffs for both themes, native macOS title bar.
+
+### Known limitations
+
+- Cursor CLI build `2026.07.01-41b2de7` initializes ACP but still rejects authenticated sessions after a successful `cursor-agent login`. A real authenticated Cursor prompt/resume test remains blocked by this CLI response.
+- The expanded Circuit palette and animation catalog in `note.md` remain planned work.
+
+### Removed
+
+- The code editor (CodeMirror, language servers, format-on-save), the file explorer, command search, the UI preview split, project tabs, PTY agent tabs, YOLO toggle (now the "Full access" permission mode), `handoff.rs` session scraping, and the idle-alert setting.
+- Remaining pre-rebuild styles, unused form/submenu helpers, editor line-click hooks, PTY agent metadata/listing and YOLO launch configuration. Remove the old icon downloader, file-asset protocol and transparent-window private API features, and obsolete multiwindow/custom-control capabilities.
+
 ## 0.9.0 - 2026-07-19
 
 ### Added

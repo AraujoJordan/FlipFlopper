@@ -20,12 +20,6 @@ export function readLegacyBool(key: string, fallback: boolean): boolean {
   return raw === null ? fallback : raw === "true";
 }
 
-export function readLegacyNumber(key: string, fallback: number): number {
-  const raw = readLegacyString(key);
-  const n = raw ? Number(raw) : NaN;
-  return Number.isFinite(n) ? n : fallback;
-}
-
 export function readLegacyJson<T>(key: string, fallback: T): T {
   const raw = readLegacyString(key);
   if (!raw) return fallback;

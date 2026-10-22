@@ -1,56 +1,60 @@
 import { onMount, onCleanup, createEffect, type Component } from "solid-js";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { onPtyOutput, onPtyExit, ptyInput, ptyResize, ptyAttach, triggerHaptic } from "../lib/ipc";
-import { runAction } from "../lib/shortcuts";
-import { clearAgentMode, cycleAgentModeOptimistic, sniffAgentMode, setTabNeedsAttention, store } from "../lib/store";
-import { cleanTerminalText, isMeaningfulOutput } from "../lib/orchestrator";
-import { getIdleTimeoutMinutes } from "../lib/settings";
-import { sendNativeNotification } from "../lib/native";
+import { onPtyOutput, onPtyExit, ptyInput, ptyResize, ptyAttach } from "../lib/ipc";
 import { getCachedTerminal, registerCachedTerminal, type CachedTerminal } from "../lib/terminalCache";
 
 interface Props {
   sessionId: string;
   active: boolean;
-  /** "agent" (default) routes Shift+Tab to agent mode-cycling while letting all
-   *  other keys reach the PTY; "shell" leaves every key to the PTY, since a
-   *  plain terminal has no agent mode to cycle. */
-  variant?: "agent" | "shell";
+}
+
+/** Fired by `applyTheme` (lib/layout.ts) after the data-theme attribute changes. */
+const THEME_EVENT = "flipflopper:theme-changed";
+
+function cssVar(name: string, fallback: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+/** xterm palette derived from the current app theme tokens. */
+function terminalTheme(): ITheme {
+  const light = getComputedStyle(document.documentElement).colorScheme === "light";
+  const bg = cssVar("--surface-1", "#262624");
+  return {
+    background: bg,
+    foreground: cssVar("--fg-body", "#e8e6dc"),
+    cursor: cssVar("--accent", "#d97757"),
+    cursorAccent: bg,
+    selectionBackground: `rgba(${cssVar("--accent-rgb", "217, 119, 87")}, 0.28)`,
+    black: light ? "#3d3d3a" : "#5e5d59",
+    red: cssVar("--status-del", "#e5675d"),
+    green: cssVar("--status-add", "#6fbf73"),
+    yellow: cssVar("--status-mod", "#d9a441"),
+    blue: cssVar("--status-renamed", "#7aa7e0"),
+    magenta: light ? "#8a4fb8" : "#c39be0",
+    cyan: light ? "#1f8a96" : "#5fc4cf",
+    white: light ? "#8a8880" : "#b0aea5",
+    brightBlack: light ? "#6b6a63" : "#8b8980",
+    brightRed: light ? "#d44a3f" : "#f08a82",
+    brightGreen: light ? "#3c9d4b" : "#8ad48e",
+    brightYellow: light ? "#b9801f" : "#e8bd62",
+    brightBlue: light ? "#4a82c9" : "#9bc0f0",
+    brightMagenta: light ? "#a064d0" : "#d6b6ec",
+    brightCyan: light ? "#2ba1ae" : "#86d9e3",
+    brightWhite: light ? "#141413" : "#faf9f5",
+  };
 }
 
 /** Build the session-lifetime half of a terminal: the xterm instance, its
  *  detachable container, and the PTY listeners. It outlives any single
- *  TerminalPane mount (project switches remount the whole workspace body) so
- *  a backgrounded project's terminal keeps receiving output and keeps its
- *  scrollback. Torn down via `disposeCachedTerminal` on the store's tab and
- *  project close paths. */
-function createCachedTerminal(sessionId: string, isShell: boolean): CachedTerminal {
+ *  TerminalPane mount (switching side-pane tabs unmounts nothing, but a
+ *  session switch can) so a backgrounded terminal keeps receiving output and
+ *  keeps its scrollback. Torn down via `disposeCachedTerminal`. */
+function createCachedTerminal(sessionId: string): CachedTerminal {
   const terminal = new Terminal({
-    theme: {
-      background: "#0b0c10",
-      foreground: "#e6edf3",
-      cursor: "#58a6ff",
-      cursorAccent: "#0b0c10",
-      selectionBackground: "rgba(56, 139, 253, 0.3)",
-      black: "#484f58",
-      red: "#ff7b72",
-      green: "#3fb950",
-      yellow: "#d29922",
-      blue: "#58a6ff",
-      magenta: "#bc8cff",
-      cyan: "#39c5cf",
-      white: "#b1bac4",
-      brightBlack: "#6e7681",
-      brightRed: "#ffa198",
-      brightGreen: "#56d364",
-      brightYellow: "#e3b341",
-      brightBlue: "#79c0ff",
-      brightMagenta: "#d2a8ff",
-      brightCyan: "#56d4dd",
-      brightWhite: "#ffffff",
-    },
-    fontFamily: '"JetBrains Mono", "Fira Code", Menlo, monospace',
+    theme: terminalTheme(),
+    fontFamily: cssVar("--font-mono", "ui-monospace, Menlo, monospace"),
     fontSize: 13,
     lineHeight: 1.0,
     cursorBlink: true,
@@ -65,58 +69,17 @@ function createCachedTerminal(sessionId: string, isShell: boolean): CachedTermin
   container.style.width = "100%";
   container.style.height = "100%";
 
-  terminal.attachCustomKeyEventHandler((ev) => {
-    if (isShell) return true;
-    if (ev.type !== "keydown") return true;
-    if (ev.key === "Tab" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-      cycleAgentModeOptimistic(sessionId);
-      return true;
-    }
-    // This handler only runs while the xterm terminal itself is focused (xterm
-    // receives keydown solely through its focused hidden textarea). Agent tabs
-    // keep the composer focused by default, so a focused terminal means the
-    // user deliberately clicked in — typically to answer an interactive
-    // selection/y-n prompt. Send those keys straight to the agent's PTY; do
-    // NOT redirect them into the composer. Redirecting stole the keystroke
-    // (the prompt never saw it) and grew the composer, which resized the
-    // terminal and made the agent reflow its in-place menu, garbling it.
-    // Type-through into the composer still applies whenever the composer is
-    // focused (the default) — that path doesn't come through here.
-    return true;
-  });
+  const onThemeChanged = () => { terminal.options.theme = terminalTheme(); };
+  window.addEventListener(THEME_EVENT, onThemeChanged);
+  const media = window.matchMedia("(prefers-color-scheme: light)");
+  media.addEventListener("change", onThemeChanged);
 
-  // Forward xterm's output to the PTY BEFORE any await / ptyAttach. xterm
-  // answers the agent's terminal-capability queries (DA/DSR, cursor-position,
-  // etc.) via onData -> ptyInput; if this isn't wired up the instant the
-  // backend's buffered first chunk is released, those replies are dropped and
-  // query-first TUIs (opencode, agy) hang on a blank frame. Input before
-  // attach is harmless: pty_input writes straight to the PTY writer.
+  // Forward xterm's output to the PTY BEFORE any await / ptyAttach: xterm
+  // answers terminal-capability queries via onData -> ptyInput, and replies
+  // sent before the listener exists are dropped. Input before attach is
+  // harmless: pty_input writes straight to the PTY writer.
   terminal.onData((data) => {
     ptyInput(sessionId, data).catch(console.error);
-  });
-
-  let idleTimeoutId: number | null = null;
-  function resetIdleTimer() {
-    if (isShell) return;
-    if (idleTimeoutId !== null) {
-      window.clearTimeout(idleTimeoutId);
-      idleTimeoutId = null;
-    }
-    const minutes = getIdleTimeoutMinutes();
-    idleTimeoutId = window.setTimeout(() => {
-      setTabNeedsAttention(sessionId, true);
-      void sendNativeNotification(
-        "Agent Idle Alert",
-        `The agent has been running but silent for ${minutes} minute${minutes === 1 ? "" : "s"}. It may need attention.`,
-      );
-    }, minutes * 60 * 1000);
-  }
-
-  // Agent rings the bell (\x07) when it needs attention (permission prompt,
-  // turn finished); tap the trackpad so it is noticeable while unfocused.
-  terminal.onBell(() => {
-    void triggerHaptic("level-change");
-    setTabNeedsAttention(sessionId, true);
   });
 
   let disposed = false;
@@ -124,44 +87,18 @@ function createCachedTerminal(sessionId: string, isShell: boolean): CachedTermin
   let unlistenExit: (() => void) | null = null;
 
   void (async () => {
-    const un = await onPtyOutput(sessionId, (data) => {
-      terminal.write(data);
-      sniffAgentMode(sessionId, data);
-
-      // Query-poll noise (cursor-position replies etc.) is not agent activity;
-      // letting it reset the timer means the idle alert never fires for TUIs
-      // that poll the terminal continuously.
-      if (isMeaningfulOutput(cleanTerminalText(data))) resetIdleTimer();
-
-      if (/(?:\? \(y\/n\)|\? \[y\/N\]|Password:)\s*$/i.test(data)) {
-        setTabNeedsAttention(sessionId, true);
-      }
-    });
+    const un = await onPtyOutput(sessionId, (data) => terminal.write(data));
     if (disposed) return un();
     unlistenOutput = un;
 
     const unExit = await onPtyExit(sessionId, () => {
-      if (idleTimeoutId !== null) {
-        window.clearTimeout(idleTimeoutId);
-        idleTimeoutId = null;
-      }
-      clearAgentMode(sessionId);
       terminal.writeln("\r\n\x1b[90m[process exited]\x1b[0m");
-      void triggerHaptic("generic");
-
-      const tab = store.tabs.find((x) => x.sessionId === sessionId);
-      if (tab) {
-        setTabNeedsAttention(sessionId, true);
-        void sendNativeNotification("Agent Completed", `Agent "${tab.label}" has finished executing.`);
-      }
     });
     if (disposed) return unExit();
     unlistenExit = unExit;
 
-    // Both pty:// and pty-exit:// listeners are now registered — release the
-    // backend's buffered first chunk (capability queries, etc.) so xterm.js
-    // can answer them and the agent's TUI actually renders. Doing this before
-    // the listener exists is what left query-first TUIs (opencode, agy) blank.
+    // Both pty:// and pty-exit:// listeners are registered — release the
+    // backend's buffered first chunk so the shell prompt actually renders.
     await ptyAttach(sessionId);
   })();
 
@@ -172,7 +109,8 @@ function createCachedTerminal(sessionId: string, isShell: boolean): CachedTermin
     dispose() {
       if (disposed) return;
       disposed = true;
-      if (idleTimeoutId !== null) window.clearTimeout(idleTimeoutId);
+      window.removeEventListener(THEME_EVENT, onThemeChanged);
+      media.removeEventListener("change", onThemeChanged);
       unlistenOutput?.();
       unlistenExit?.();
       terminal.dispose();
@@ -188,11 +126,10 @@ const TerminalPane: Component<Props> = (props) => {
 
   onMount(() => {
     const sessionId = props.sessionId;
-    const isShell = props.variant === "shell";
     let entry = getCachedTerminal(sessionId);
     const fresh = !entry;
     if (!entry) {
-      entry = createCachedTerminal(sessionId, isShell);
+      entry = createCachedTerminal(sessionId);
       registerCachedTerminal(sessionId, entry);
     }
     terminal = entry.terminal;
@@ -204,20 +141,14 @@ const TerminalPane: Component<Props> = (props) => {
       // DOM. Only the first mount opens; later mounts re-use the live buffer.
       terminal.open(entry.container);
       fitAndResize();
-      if (props.active) {
-        if (isShell) terminal.focus();
-        else runAction("focus-prompt");
-      }
+      if (props.active) terminal.focus();
     } else {
-      // Re-attached after a project switch: refit to the new wrapper, sync
-      // the PTY size, and repaint the preserved buffer.
+      // Re-attached: refit to the new wrapper, sync the PTY size, and repaint
+      // the preserved buffer.
       setTimeout(() => {
         fitAndResize();
         terminal.refresh(0, terminal.rows - 1);
-        if (props.active) {
-          if (isShell) terminal.focus();
-          else runAction("focus-prompt");
-        }
+        if (props.active) terminal.focus();
       }, 0);
     }
 
@@ -231,8 +162,7 @@ const TerminalPane: Component<Props> = (props) => {
     if (props.active && fitAddon) {
       setTimeout(() => {
         fitAndResize();
-        if (props.variant === "shell") terminal.focus();
-        else runAction("focus-prompt");
+        terminal.focus();
       }, 0);
     }
   });
@@ -247,8 +177,7 @@ const TerminalPane: Component<Props> = (props) => {
 
   onCleanup(() => {
     // The Terminal, its container, and its PTY listeners live on in
-    // terminalCache so a backgrounded project keeps collecting output.
-    // disposeCachedTerminal() on the store's close paths tears them down.
+    // terminalCache; disposeCachedTerminal() on the close paths tears them down.
     resizeObserver?.disconnect();
   });
 
@@ -258,8 +187,8 @@ const TerminalPane: Component<Props> = (props) => {
       display: props.active ? "flex" : "none",
       "flex-direction": "column",
       overflow: "hidden",
-      background: "#0b0c10",
-      padding: "12px 14px 8px",
+      background: "var(--surface-1)",
+      padding: "10px 12px 6px",
     }}>
       <div ref={wrapperRef} style={{ flex: "1", overflow: "hidden" }} />
     </div>

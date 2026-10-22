@@ -4,12 +4,13 @@
 
 # FlipFlopper
 
-**One AI IDE. Every CLI coding agent. Zero terminal-tab chaos.**
+**One conversation. Every CLI coding agent. Flip any time.**
 
-FlipFlopper is a cross-platform desktop workbench that runs every CLI coding agent
-side by side in real PTY terminals, with the local files, git history, editor, and
-agent handoffs all living in one window so you can flip tools without losing
-context.
+FlipFlopper is a cross-platform desktop app with a conversation-first
+interface for every CLI coding agent. Sessions, transcripts with tool calls
+and inline diffs, a changes pane, a live preview and a terminal all live in one
+window, and you can switch the agent behind a conversation mid-stream without
+losing context.
 
 [![Build](https://github.com/AraujoJordan/FlipFlopper/actions/workflows/build.yml/badge.svg)](https://github.com/AraujoJordan/FlipFlopper/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/AraujoJordan/FlipFlopper)](https://github.com/AraujoJordan/FlipFlopper/releases)
@@ -24,10 +25,15 @@ context.
 ---
 
 <div align="center">
-  <img src="public/video.gif" alt="FlipFlopper UI Demo" width="800" />
+  <img src="docs/media/screenshot.jpg" alt="FlipFlopper's new conversation workspace in dark mode, with sessions, agent controls and the Changes pane" width="1200" />
 </div>
 
----
+<details>
+<summary>See the light theme</summary>
+
+![FlipFlopper conversation workspace in light mode](docs/media/screenshot-light.jpg)
+
+</details>
 
 ## 🤔 But why??
 
@@ -43,32 +49,53 @@ serial monogamists at best.
 
 ## ✨ Features
 
-- **Embedded PTY terminals** - each agent gets a real terminal tab backed by `portable-pty`.
-- **Agent registry** - detects installed CLI agents, their PATH, and version info.
-- **Multi-agent orchestrator** - chain agents into a pipeline on a visual flow canvas: every open agent tab mirrors as a live lane, you queue downstream prompts off any node, gates hold a step for manual review, carry-context seeds the next agent with the upstream session, and per-step model/reasoning-effort can be pinned. Flows persist per project.
-- **Isolated git worktrees** - any agent tab or orchestrator step can run inside its own `flipflopper/wt-*` worktree branch, so an agent's edits never touch your source branch until you merge them back. Branch chip and one-click "Merge back" live on the node card.
-- **Project workspace** - single-window project tabs (one window, many projects, each with its own agents/editor/git/terminals kept warm in the background), recent project persistence, project picker, and per-project `.agents/` scaffolding.
-- **New Project wizard** - title-bar "+" walks you through category, stack, details, name, and folder, then seeds the prompt composer with a structured brief for the agent to build from.
-- **Lazy file explorer** - `.gitignore`-aware tree loading with git status badges, file checkboxes, and native diff entry points.
-- **Built-in editor** - tabbed CodeMirror editing with LSP-backed IntelliSense (completions with auto-imports and snippets, hover/signature help, diagnostics, go-to-definition/references, quick fixes, multi-file rename, format document, opt-in format-on-save), plus the preview split for UI previews and snapshot images.
-- **Prompt composer** - sends text to the active PTY, or falls back to git auto-commit when no agent is active. `@path` chips attach file context, slash commands tune model/effort, and an `AgentTaskDialog` spins up one-shot tasks.
-- **Native git review** - working-tree diffs, commit history, and review overlay inside the app, plus stage/unstage/discard, stash, squash-and-push with an AI-generated commit message, and conflict-resolution handoff to an agent.
-- **Agent handoff** - reads available session state, writes `.agents/handoff.md`, appends `.agents/context.md`, and launches the target agent with seeded context when supported.
-- **Tool catalog** - discovers installable tools and generates install commands from the backend.
-- **Settings + shortcuts** - a Settings panel for auto-toggle sidebars, idle-alert timeout, and format-on-save, plus a `?` shortcut reference modal listing every registered binding.
+- **Sessions sidebar** - every conversation, grouped by project, with live status (running, finished, failed) and a worktree badge. Rename, archive, delete, search.
+- **Native Claude and Cursor integration** - persistent ACP connections with live permission, question and plan cards, using the agent's CLI login and configuration. Model/effort pickers follow the agent's catalog; native commands use `/agent:<command>`. See the Cursor authentication limitation below.
+- **Structured chat for every agent** - native ACP or headless JSON streams give you streamed markdown, collapsible tool calls (read / edit / run / search / web), inline diffs for edits, and a "Changed N files - Review" footer per turn.
+- **Flip agents mid-conversation** - pick another agent (and model / effort) in the composer. FlipFlopper owns the transcript: agents that can resume their own session do, and the others get a digest of the conversation so far.
+- **Composer** - `@` file mentions, `/` commands and skills, queued follow-ups while a turn runs, stop button, and a Plan / Auto-edit / Full access permission picker.
+- **Changes pane** - working-tree changes, stage / unstage / discard, stash, commit, push / pull, squash-and-push with an AI-generated message, history, and native diffs.
+- **Preview and terminal panes** - start the project's dev server and see it in a live frame; run validation and tests; shell terminals; or resume a session in the agent's own terminal UI.
+- **Isolated git worktrees** - run a session in its own `flipflopper/wt-*` branch so edits never touch your branch until you merge back from the Changes pane.
+- **Multi-agent flow canvas** - chain sessions into a pipeline: queue downstream prompts off any session, hold a step behind a review gate, carry the upstream conversation forward, and pin per-step model / effort. Step status comes straight from each session's turns.
+- **Import your CLI history** - bring existing Claude Code and Codex terminal sessions into the sidebar; continuing one resumes the original CLI session, and you can flip it to another agent.
+- **Command palette (⌘K)** - search session titles and the text of every conversation, jump to projects, run actions.
+- **Attachments** - drag files onto the window, pick them, or paste screenshots; native agents receive supported images directly; files remain available by their paths.
+- **Agent registry** - detects installed CLI agents, their PATH and versions.
+- **New Project wizard** - walks you through category, stack, details, name, and folder, then seeds the composer with a structured brief.
+- **Light and dark themes**, keyboard shortcuts (`?` for the reference), and an in-app updater on Windows / Linux.
+- **Native window controls** - the operating system handles close, minimize, maximize, fullscreen, resizing and title-bar behavior on macOS, Windows and Linux.
 
 ## 🕹️ Supported agents
 
-Claude Code, Codex, Cursor CLI, OpenCode, Aider, Goose, agy, Cline, Qwen Code,
-Plandex, Droid, Grok, and Kimi Code. Yes, all of them. Yes, in one app. No,
-you don't need eleven terminal emulators pinned to your taskbar anymore.
+| Integration | Agents | Status |
+|---|---|---|
+| Native ACP sessions | Claude Code | Real prompt, resume, questions and terminal handoff checked locally |
+| Native ACP sessions | Cursor CLI (`cursor-agent acp`) | Protocol initialization checked; authenticated sessions currently blocked by the CLI's authentication response |
+| Headless chat | Codex, agy, Qwen Code, Kimi Code | Exercised against real CLI output |
+| Headless chat | OpenCode, Droid, Grok, Aider, Goose | Adapters based on documented output formats |
+| Detection and terminal | Plandex, Cline | Chat support pending |
+
+**Cursor authentication:** the tested CLI build (`2026.07.01-41b2de7`) still
+returns “Authentication required” from ACP after `cursor-agent login` succeeds.
+An authenticated Cursor prompt/resume smoke test has not passed yet. The app
+surfaces that error and offers CLI sign-in/update actions.
+
+Claude and Cursor reuse their CLI authentication. Settings → Agents provides
+CLI sign-in, update and readiness actions; FlipFlopper does not collect API keys
+or passwords. If a saved native session is missing or belongs to another checkout,
+the app offers to continue in a new session using transcript context. Stop closes
+pending requests, and opening the agent's terminal UI detaches the idle native
+connection first. Extract portable archives in full, including the Node sidecar
+and `agent-runtime` directory.
 
 ## 🧱 Stack
 
 - **Backend:** Rust + Tauri 2 (`src-tauri/`)
 - **Frontend:** SolidJS + Vite + TypeScript (`src/`)
-- **Key crates:** `portable-pty`, `which`, `ignore`, `dirs`, `rusqlite`
-- **Key npm bits:** `@xterm/xterm`, `@xterm/addon-fit`, `highlight.js`
+- **Native agent runtime:** ACP v1 Rust SDK; pinned Claude ACP helper 0.94.0 and checksummed Node 24.22.1 bundled with every installer/portable archive. No system Node needed for the installed app; native Claude requires macOS 13.5+.
+- **Key crates:** `agent-client-protocol`, `async-process`, `futures`, `portable-pty` (shell terminals), `which`, `ignore`, `dirs`, `tokio`, `base64`
+- **Key npm bits:** `@xterm/xterm`, `@xterm/addon-fit`, `highlight.js`, `@material-symbols/svg-400` (Google Material Symbols, bundled offline)
 
 For the full file-by-file source map, see the "Source Map" section in
 [AGENTS.md](AGENTS.md), the canonical, agent-facing architecture doc that
@@ -93,18 +120,19 @@ brew install --cask flipflopper
 | Windows | `.msi` or NSIS `.exe` |
 | Linux | `.AppImage` or `.deb` |
 
-> macOS: right-click the `.dmg` → Open (not needed via Homebrew). Windows: "More info" → "Run anyway".
+Portable binary archives are also available. Extract the entire archive: the
+app needs its bundled `flipflopper-node` sidecar and `agent-runtime` resources.
 
 ### Keeping FlipFlopper up to date
 
-- **macOS** — update via Homebrew, which is the recommended channel here: `brew upgrade flipflopper`.
+- **macOS** — update via Homebrew: `brew upgrade --cask flipflopper`.
 - **Windows & Linux** — the app checks for new versions automatically on launch. When an update is available, an indicator appears in the title bar and a **Check for Updates…** entry lives in the Help menu.
 
 ---
 
 ## 🚀 Getting started
 
-You'll need [Node.js](https://nodejs.org), [Rust](https://rustup.rs), and the
+To build from source, you'll need [Node.js](https://nodejs.org) 22+ (24 recommended), [Rust](https://rustup.rs), and the
 [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your OS.
 
 ```sh
@@ -113,11 +141,25 @@ npm run tauri dev      # compile Rust, hot-reload frontend, open the app
 npm run tauri build    # production build when you're ready to ship
 ```
 
-Sanity checks before you commit:
+Desktop dev/build commands prepare the pinned agent helper and verify the Node
+sidecar's download checksum. Installed apps do not need system Node. Install
+and sign in to the CLI agents you want to use; native Claude requires macOS
+13.5 or newer on a Mac. `npm run dev` starts the web frontend only.
+
+Choose a project, start a session and send a task. Use the composer to change
+agent, model, permissions or worktree mode. Review edits in **Changes**, start
+a dev server in **Preview**, open a shell in **Terminal**, or chain sessions in
+**Flow**. `⌘/Ctrl+K` opens search and `⌘/Ctrl+L` focuses the composer.
+
+Run checks from the repository root:
 
 ```sh
-cd src-tauri && cargo check    # Rust must be happy
-npx tsc --noEmit               # TypeScript must also be happy
+npx tsc --noEmit
+npm run test:chat
+npm run prepare:agents
+cargo check
+cargo test --lib
+npm run build
 ```
 
 ## 🤝 Contributing

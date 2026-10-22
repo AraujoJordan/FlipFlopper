@@ -1,7 +1,8 @@
+import { Icon } from "../shell/Icon";
 import { Component, For, Show, createSignal } from "solid-js";
-import { store, addTab, rankContinueCandidates } from "../../lib/store";
-import { spawnAgent, ptySendLine, onPtyOutput, type AgentInfo } from "../../lib/ipc";
-import { markSessionTaskStarted } from "../../lib/orchestrator";
+import { store } from "../../lib/store";
+import { chat, startSessionTurn } from "../../lib/chat";
+import type { AgentInfo } from "../../lib/ipc";
 import { AgentLogo } from "../../lib/agentMeta";
 import { Button, Menu, MenuItem, Spinner, toast } from "../ui";
 
@@ -31,11 +32,11 @@ export const ConflictFixDialogHost: Component = () => {
   const [launching, setLaunching] = createSignal(false);
   let pickerAnchor: HTMLButtonElement | undefined;
 
-  const candidates = (): AgentInfo[] => {
-    const projectPath = store.currentProject?.path ?? "";
-    return rankContinueCandidates(projectPath, "", store.agents, false)
-      .filter((agent) => !store.yoloMode || agent.yolo_supported);
-  };
+  // Installed chat-capable agents, the one currently selected in the composer first.
+  const candidates = (): AgentInfo[] =>
+    store.agents
+      .filter((agent) => agent.installed && agent.chat_supported)
+      .sort((a, b) => Number(b.id === chat.composer.agentId) - Number(a.id === chat.composer.agentId));
 
   const selectedAgent = (): AgentInfo | undefined => {
     const id = selectedAgentId();
@@ -56,26 +57,15 @@ export const ConflictFixDialogHost: Component = () => {
     if (!s || !project || !agent) return;
     setLaunching(true);
     try {
-      const sessionId = await spawnAgent(agent.id, project.path, store.yoloMode);
-      addTab({ sessionId, label: agent.name, agentId: agent.id, agentIcon: agent.icon });
-
-      // Type the prompt in once the CLI has produced its first output (i.e.
-      // it's booted and ready for input), with a timeout fallback in case it
-      // stays silent.
-      const prompt = buildConflictPrompt(s.files, s.context);
-      let sent = false;
-      const send = () => {
-        if (sent) return;
-        sent = true;
-        markSessionTaskStarted(sessionId);
-        void ptySendLine(sessionId, prompt);
-      };
-      const unlisten = await onPtyOutput(sessionId, send);
-      setTimeout(() => {
-        send();
-        unlisten();
-      }, 4000);
-
+      await startSessionTurn({
+        projectPath: project.path,
+        agentId: agent.id,
+        // Resolving conflicts means editing files; never escalate to Full on the user's behalf.
+        mode: chat.composer.mode === "plan" ? "auto_edit" : chat.composer.mode,
+        prompt: buildConflictPrompt(s.files, s.context),
+        title: "Resolve merge conflicts",
+        activate: true,
+      });
       toast(`Opened ${agent.name} to fix the conflict`, "success");
       close();
     } catch (e) {
@@ -151,9 +141,7 @@ export const ConflictFixDialogHost: Component = () => {
                   </>
                 )}
               </Show>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M6 9l6 6 6-6" />
-              </svg>
+              <Icon name="chevronDown" size={12} />
             </button>
 
             <Menu open={pickerOpen()} onClose={() => setPickerOpen(false)} anchorRef={pickerAnchor} width={340}>

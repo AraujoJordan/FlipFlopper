@@ -1,72 +1,64 @@
 mod agents;
-mod editor;
+mod chat;
 mod env;
 mod git;
-mod handoff;
-mod lsp;
-mod preview;
 mod project;
 mod pty;
 mod review;
 mod runner;
-mod session;
 mod tools;
 mod worktree;
-
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_window_state::StateFlags;
 
 use agents::AgentInfo;
-use editor::FileContent;
-use git::{CommitEntry, CommitResult, FileStatus, PullOutcome, StatusEntry, SyncStatus};
-use lsp::{
-    LspCodeAction, LspCompletion, LspCompletionDetail, LspDefinition, LspDiagnostic, LspManager,
-    LspPrepareRename, LspRange, LspSignatureHelp, LspStatus, LspWorkspaceEdit,
-};
-use project::{FileEntry, ProjectInfo, SkillEntry, TextMatch};
-use pty::{PtyEvent, PtyManager, SessionInfo};
+use git::{CommitEntry, CommitResult, PullOutcome, StatusEntry, SyncStatus};
+use project::{FileEntry, ProjectInfo, SkillEntry};
+use pty::{PtyEvent, PtyManager};
 use review::FileDiff;
 use runner::{AndroidEnvironment, IosEnvironment, RunTarget, ValidationTarget};
 use tools::ToolInfo;
 use worktree::{MergeOutcome, WorktreeInfo, WorktreeStatus};
 
-const MENU_OPEN_PROJECT: &str = "menu-open-project";
+const MENU_NEW_SESSION: &str = "menu-new-session";
 const MENU_NEW_PROJECT: &str = "menu-new-project";
-
+const MENU_OPEN_PROJECT: &str = "menu-open-project";
 const MENU_REVEAL_PROJECT: &str = "menu-reveal-project";
-const MENU_CLOSE_PROJECT: &str = "menu-close-project";
-const MENU_NEW_AGENT: &str = "menu-new-agent";
+const MENU_SETTINGS: &str = "menu-settings";
 const MENU_FOCUS_PROMPT: &str = "menu-focus-prompt";
-const MENU_CLOSE_AGENT: &str = "menu-close-agent";
-const MENU_YOLO_MODE: &str = "menu-yolo-mode";
-const MENU_WORKSPACE_AGENT: &str = "menu-workspace-agent";
-const MENU_WORKSPACE_CODE: &str = "menu-workspace-code";
-const MENU_WORKSPACE_REVIEW: &str = "menu-workspace-review";
-const MENU_TOGGLE_EXPLORER: &str = "menu-toggle-explorer";
-const MENU_TOGGLE_GIT_PANEL: &str = "menu-toggle-git-panel";
-const MENU_TOGGLE_TERMINAL_PANEL: &str = "menu-toggle-terminal-panel";
-const MENU_TOGGLE_AUTO_SIDEBAR: &str = "menu-toggle-auto-sidebar";
-const MENU_REVIEW_WORKING_CHANGES: &str = "menu-review-working-changes";
+const MENU_COMMAND_PALETTE: &str = "menu-command-palette";
+const MENU_STOP_TURN: &str = "menu-stop-turn";
+const MENU_FULL_ACCESS: &str = "menu-full-access";
+const MENU_TOGGLE_SIDEBAR: &str = "menu-toggle-sidebar";
+const MENU_TOGGLE_SIDE_PANE: &str = "menu-toggle-side-pane";
 const MENU_SHOW_CHANGES: &str = "menu-show-changes";
+const MENU_SHOW_PREVIEW: &str = "menu-show-preview";
+const MENU_SHOW_TERMINAL: &str = "menu-show-terminal";
+const MENU_SHOW_FLOW: &str = "menu-show-flow";
 const MENU_SHOW_HISTORY: &str = "menu-show-history";
-const MENU_COMMAND_SEARCH: &str = "menu-command-search";
+const MENU_REVIEW_WORKING_CHANGES: &str = "menu-review-working-changes";
+const MENU_PREV_SESSION: &str = "menu-prev-session";
+const MENU_NEXT_SESSION: &str = "menu-next-session";
 #[cfg(not(target_os = "macos"))]
 const MENU_CHECK_FOR_UPDATES: &str = "menu-check-for-updates";
 
+/// What the frontend tells the native menu about the current UI so checkmarks
+/// and enabled states stay truthful.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct NativeMenuState {
     has_project: bool,
-    has_active_agent: bool,
-    workspace_mode: String,
-    yolo_mode: bool,
-    explorer_collapsed: bool,
-    git_panel_collapsed: bool,
-    terminal_panel_open: bool,
-    auto_toggle_sidebars: bool,
-    git_panel_tab: String,
+    has_session: bool,
+    running: bool,
+    full_access: bool,
+    sidebar_open: bool,
+    side_pane_open: bool,
+    /// "changes" | "preview" | "terminal" | "flow"
+    side_tab: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -213,7 +205,9 @@ fn bridge_pty_with_url(
                                 url.clone(),
                             );
                             if url_action == UrlAction::CaptureAndOpen {
-                                let _ = open_browser_url(&url);
+                                if let Err(error) = app.opener().open_url(&url, None::<&str>) {
+                                    eprintln!("Failed to open preview URL: {error}");
+                                }
                             }
                         }
                     }
@@ -314,62 +308,26 @@ fn separator(
 fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let menu = tauri::menu::Menu::default(handle)?;
 
-    let project_menu = tauri::menu::Submenu::with_id_and_items(
+    let session_menu = tauri::menu::Submenu::with_id_and_items(
         handle,
-        "project-menu",
-        "Project",
+        "session-menu",
+        "Session",
         true,
         &[
-            &menu_item(
-                handle,
-                MENU_NEW_PROJECT,
-                "New Project...",
-                Some("CmdOrCtrl+N"),
-            )?,
-            &menu_item(
-                handle,
-                MENU_OPEN_PROJECT,
-                "Open Project...",
-                Some("CmdOrCtrl+O"),
-            )?,
+            &menu_item(handle, MENU_NEW_SESSION, "New Session", Some("CmdOrCtrl+N"))?,
+            &menu_item(handle, MENU_NEW_PROJECT, "New Project...", Some("CmdOrCtrl+Shift+N"))?,
+            &menu_item(handle, MENU_OPEN_PROJECT, "Open Project...", Some("CmdOrCtrl+O"))?,
+            &menu_item(handle, MENU_REVEAL_PROJECT, reveal_project_label(), None::<&str>)?,
             &separator(handle)?,
-            &menu_item(
-                handle,
-                MENU_REVEAL_PROJECT,
-                reveal_project_label(),
-                None::<&str>,
-            )?,
+            &menu_item(handle, MENU_COMMAND_PALETTE, "Command Palette...", Some("CmdOrCtrl+K"))?,
+            &menu_item(handle, MENU_FOCUS_PROMPT, "Focus Composer", Some("CmdOrCtrl+L"))?,
+            &menu_item(handle, MENU_STOP_TURN, "Stop Running Turn", Some("CmdOrCtrl+."))?,
+            &check_menu_item(handle, MENU_FULL_ACCESS, "Full Access (no sandbox)", false, None::<&str>)?,
             &separator(handle)?,
-            &menu_item(handle, MENU_CLOSE_PROJECT, "Close Project", None::<&str>)?,
-        ],
-    )?;
-
-    let agent_menu = tauri::menu::Submenu::with_id_and_items(
-        handle,
-        "agent-menu",
-        "Agent",
-        true,
-        &[
-            &menu_item(
-                handle,
-                MENU_NEW_AGENT,
-                "New Agent Session",
-                Some("CmdOrCtrl+T"),
-            )?,
-            &menu_item(
-                handle,
-                MENU_FOCUS_PROMPT,
-                "Focus Prompt",
-                Some("CmdOrCtrl+K"),
-            )?,
-            &menu_item(
-                handle,
-                MENU_CLOSE_AGENT,
-                "Close Agent Session",
-                Some("CmdOrCtrl+W"),
-            )?,
+            &menu_item(handle, MENU_PREV_SESSION, "Previous Session", Some("CmdOrCtrl+Shift+["))?,
+            &menu_item(handle, MENU_NEXT_SESSION, "Next Session", Some("CmdOrCtrl+Shift+]"))?,
             &separator(handle)?,
-            &check_menu_item(handle, MENU_YOLO_MODE, "YOLO Mode", false, None::<&str>)?,
+            &menu_item(handle, MENU_SETTINGS, "Settings...", Some("CmdOrCtrl+,"))?,
         ],
     )?;
 
@@ -379,120 +337,38 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
         "View",
         true,
         &[
-            &check_menu_item(
-                handle,
-                MENU_WORKSPACE_CODE,
-                "Code",
-                false,
-                Some("CmdOrCtrl+1"),
-            )?,
-            &check_menu_item(
-                handle,
-                MENU_WORKSPACE_AGENT,
-                "AI Agent",
-                true,
-                Some("CmdOrCtrl+2"),
-            )?,
-            &check_menu_item(
-                handle,
-                MENU_WORKSPACE_REVIEW,
-                "Review",
-                false,
-                Some("CmdOrCtrl+3"),
-            )?,
+            &check_menu_item(handle, MENU_TOGGLE_SIDEBAR, "Sidebar", true, Some("CmdOrCtrl+B"))?,
+            &check_menu_item(handle, MENU_TOGGLE_SIDE_PANE, "Side Pane", false, Some("CmdOrCtrl+Alt+B"))?,
             &separator(handle)?,
-            &check_menu_item(
-                handle,
-                MENU_TOGGLE_EXPLORER,
-                "Explorer",
-                true,
-                Some("CmdOrCtrl+B"),
-            )?,
-            &check_menu_item(
-                handle,
-                MENU_TOGGLE_GIT_PANEL,
-                "Git Panel",
-                false,
-                Some("CmdOrCtrl+Shift+G"),
-            )?,
-            &check_menu_item(
-                handle,
-                MENU_TOGGLE_TERMINAL_PANEL,
-                "Terminal Panel",
-                false,
-                Some("CmdOrCtrl+J"),
-            )?,
+            &check_menu_item(handle, MENU_SHOW_CHANGES, "Changes", false, Some("CmdOrCtrl+Shift+G"))?,
+            &check_menu_item(handle, MENU_SHOW_PREVIEW, "Preview", false, None::<&str>)?,
+            &check_menu_item(handle, MENU_SHOW_TERMINAL, "Terminal", false, Some("CmdOrCtrl+J"))?,
+            &check_menu_item(handle, MENU_SHOW_FLOW, "Flow", false, None::<&str>)?,
             &separator(handle)?,
-            &check_menu_item(
-                handle,
-                MENU_TOGGLE_AUTO_SIDEBAR,
-                "Auto-toggle Sidebars",
-                true,
-                None::<&str>,
-            )?,
-        ],
-    )?;
-
-    let review_menu = tauri::menu::Submenu::with_id_and_items(
-        handle,
-        "review-menu",
-        "Review",
-        true,
-        &[
-            &menu_item(
-                handle,
-                MENU_REVIEW_WORKING_CHANGES,
-                "Review Working Changes",
-                None::<&str>,
-            )?,
-            &separator(handle)?,
-            &check_menu_item(
-                handle,
-                MENU_SHOW_CHANGES,
-                "Show Changes",
-                true,
-                None::<&str>,
-            )?,
-            &check_menu_item(
-                handle,
-                MENU_SHOW_HISTORY,
-                "Show History",
-                false,
-                None::<&str>,
-            )?,
+            &menu_item(handle, MENU_REVIEW_WORKING_CHANGES, "Review Working Changes", None::<&str>)?,
+            &menu_item(handle, MENU_SHOW_HISTORY, "Commit History", None::<&str>)?,
         ],
     )?;
 
     #[cfg(target_os = "macos")]
     {
-        menu.insert(&project_menu, 2)?;
-        menu.insert(&agent_menu, 3)?;
-        menu.insert(&view_menu, 5)?;
-        menu.insert(&review_menu, 6)?;
+        menu.insert(&session_menu, 2)?;
+        menu.insert(&view_menu, 4)?;
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        menu.insert(&project_menu, 1)?;
-        menu.insert(&agent_menu, 2)?;
-        menu.insert(&view_menu, 4)?;
-        menu.insert(&review_menu, 5)?;
+        menu.insert(&session_menu, 1)?;
+        menu.insert(&view_menu, 3)?;
     }
 
     if let Some(tauri::menu::MenuItemKind::Submenu(help_menu)) =
         menu.get(tauri::menu::HELP_SUBMENU_ID)
     {
-        let command_search = menu_item(
-            handle,
-            MENU_COMMAND_SEARCH,
-            "Command Search",
-            Some("CmdOrCtrl+Shift+F"),
-        )?;
         if !help_menu.items().unwrap_or_default().is_empty() {
             let help_separator = separator(handle)?;
             let _ = help_menu.append(&help_separator);
         }
-        let _ = help_menu.append(&command_search);
 
         // In-app auto-update is Windows/Linux-only. macOS users update via
         // Homebrew (`brew upgrade flipflopper`), so the menu entry is gated
@@ -535,29 +411,22 @@ fn sync_native_menu(app: &tauri::AppHandle, state: &NativeMenuState) {
     };
 
     set_menu_enabled(&menu, MENU_REVEAL_PROJECT, state.has_project);
-    set_menu_enabled(&menu, MENU_CLOSE_PROJECT, state.has_project);
-    set_menu_enabled(&menu, MENU_NEW_AGENT, state.has_project);
-    set_menu_enabled(&menu, MENU_FOCUS_PROMPT, state.has_project);
-    set_menu_enabled(&menu, MENU_CLOSE_AGENT, state.has_active_agent);
+    set_menu_enabled(&menu, MENU_FOCUS_PROMPT, state.has_project || state.has_session);
+    set_menu_enabled(&menu, MENU_STOP_TURN, state.running);
     set_menu_enabled(&menu, MENU_REVIEW_WORKING_CHANGES, state.has_project);
-    set_menu_enabled(&menu, MENU_SHOW_CHANGES, state.has_project);
     set_menu_enabled(&menu, MENU_SHOW_HISTORY, state.has_project);
-    set_menu_enabled(&menu, MENU_COMMAND_SEARCH, state.has_project);
 
-    set_menu_checked(&menu, MENU_WORKSPACE_CODE, state.workspace_mode == "code");
-    set_menu_checked(&menu, MENU_WORKSPACE_AGENT, state.workspace_mode == "agent");
-    set_menu_checked(
-        &menu,
-        MENU_WORKSPACE_REVIEW,
-        state.workspace_mode == "review",
-    );
-    set_menu_checked(&menu, MENU_YOLO_MODE, state.yolo_mode);
-    set_menu_checked(&menu, MENU_TOGGLE_EXPLORER, !state.explorer_collapsed);
-    set_menu_checked(&menu, MENU_TOGGLE_GIT_PANEL, !state.git_panel_collapsed);
-    set_menu_checked(&menu, MENU_TOGGLE_TERMINAL_PANEL, state.terminal_panel_open);
-    set_menu_checked(&menu, MENU_TOGGLE_AUTO_SIDEBAR, state.auto_toggle_sidebars);
-    set_menu_checked(&menu, MENU_SHOW_CHANGES, state.git_panel_tab == "changes");
-    set_menu_checked(&menu, MENU_SHOW_HISTORY, state.git_panel_tab == "history");
+    set_menu_checked(&menu, MENU_FULL_ACCESS, state.full_access);
+    set_menu_checked(&menu, MENU_TOGGLE_SIDEBAR, state.sidebar_open);
+    set_menu_checked(&menu, MENU_TOGGLE_SIDE_PANE, state.side_pane_open);
+    for (id, tab) in [
+        (MENU_SHOW_CHANGES, "changes"),
+        (MENU_SHOW_PREVIEW, "preview"),
+        (MENU_SHOW_TERMINAL, "terminal"),
+        (MENU_SHOW_FLOW, "flow"),
+    ] {
+        set_menu_checked(&menu, id, state.side_pane_open && state.side_tab == tab);
+    }
 }
 
 fn find_menu_item(
@@ -686,29 +555,14 @@ fn strip_terminal_sequences(input: &str) -> String {
     output
 }
 
-fn open_browser_url(url: &str) -> Result<(), String> {
-    let mut command = if tools::current_os() == "macos" {
-        let mut cmd = Command::new("open");
-        cmd.arg(url);
-        cmd
-    } else if tools::current_os() == "windows" {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", url]);
-        cmd
-    } else {
-        let mut cmd = Command::new("xdg-open");
-        cmd.arg(url);
-        cmd
-    };
-
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("Failed to open browser: {e}"))
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_menu_accepts_the_frontend_snapshot() {
+        let snapshot=serde_json::json!({"hasProject":true,"hasSession":true,"running":false,"fullAccess":false,"sidebarOpen":true,"sidePaneOpen":false,"sideTab":"changes"});
+        let state:super::NativeMenuState=serde_json::from_value(snapshot).unwrap();
+        assert!(state.has_project && state.has_session && state.sidebar_open);
+    }
     use super::find_local_browser_url;
 
     #[test]
@@ -759,28 +613,6 @@ async fn run_blocking<T: Send + 'static>(
 // PTY commands
 // ════════════════════════════════════════════════
 
-// Async + spawn_blocking so the PTY fork/exec runs off the main thread and
-// concurrent spawns (workspace restore) actually overlap.
-#[tauri::command]
-async fn spawn_agent(
-    app: tauri::AppHandle,
-    agent_id: String,
-    project_path: String,
-    yolo: bool,
-    extra_args: Option<Vec<String>>,
-    cwd: Option<String>,
-) -> Result<String, String> {
-    let extra_args = extra_args.unwrap_or_default();
-    let spawn_app = app.clone();
-    let (session_id, rx) = run_blocking(move || {
-        let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_session(&manager, &agent_id, &project_path, yolo, &extra_args, cwd.as_deref())
-    })
-    .await??;
-    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
-    Ok(session_id)
-}
-
 #[tauri::command]
 fn pty_input(state: State<'_, PtyManager>, session_id: String, data: String) -> Result<(), String> {
     pty::send_input(&state, &session_id, &data)
@@ -816,11 +648,6 @@ fn pty_kill(app: tauri::AppHandle, state: State<'_, PtyManager>, session_id: Str
 fn pty_attach(app: tauri::AppHandle, window: tauri::WebviewWindow, session_id: String) -> Result<(), String> {
     attach_bridge(&app, &session_id, window.label());
     Ok(())
-}
-
-#[tauri::command]
-fn list_sessions(state: State<'_, PtyManager>) -> Vec<SessionInfo> {
-    pty::list_sessions(&state)
 }
 
 #[tauri::command]
@@ -890,11 +717,6 @@ async fn remove_recent_project(project_path: String) {
 }
 
 #[tauri::command]
-async fn get_file_tree(path: String) -> Result<Vec<FileEntry>, String> {
-    run_blocking(move || project::list_dir(&path)).await?
-}
-
-#[tauri::command]
 async fn search_prompt_files(
     project_path: String,
     query: String,
@@ -904,256 +726,10 @@ async fn search_prompt_files(
 }
 
 #[tauri::command]
-async fn search_project_text(
-    project_path: String,
-    query: String,
-    use_regex: bool,
-    case_sensitive: bool,
-    limit: usize,
-) -> Result<Vec<TextMatch>, String> {
-    run_blocking(move || {
-        project::search_text(&project_path, &query, use_regex, case_sensitive, limit)
-    })
-    .await?
-}
-
-#[tauri::command]
 async fn list_prompt_skills(project_path: Option<String>) -> Vec<SkillEntry> {
     run_blocking(move || project::list_skills(project_path.as_deref()))
         .await
         .unwrap_or_default()
-}
-
-#[tauri::command]
-fn inject_file_refs(
-    state: State<'_, PtyManager>,
-    session_id: String,
-    paths: Vec<String>,
-) -> Result<(), String> {
-    pty::inject_refs(&state, &session_id, &paths)
-}
-
-#[tauri::command]
-async fn create_entry(parent_path: String, name: String, is_dir: bool) -> Result<FileEntry, String> {
-    run_blocking(move || project::create_entry(&parent_path, &name, is_dir)).await?
-}
-
-#[tauri::command]
-async fn rename_entry(path: String, new_name: String) -> Result<FileEntry, String> {
-    run_blocking(move || project::rename_entry(&path, &new_name)).await?
-}
-
-#[tauri::command]
-async fn delete_entry(path: String) -> Result<(), String> {
-    run_blocking(move || project::delete_entry(&path)).await?
-}
-
-#[tauri::command]
-async fn duplicate_entry(path: String) -> Result<FileEntry, String> {
-    run_blocking(move || project::duplicate_entry(&path)).await?
-}
-
-#[tauri::command]
-async fn copy_entry(src_path: String, dest_dir: String) -> Result<FileEntry, String> {
-    run_blocking(move || project::copy_entry_into(&src_path, &dest_dir)).await?
-}
-
-#[tauri::command]
-async fn move_entry(src_path: String, dest_dir: String) -> Result<FileEntry, String> {
-    run_blocking(move || project::move_entry_into(&src_path, &dest_dir)).await?
-}
-
-// ════════════════════════════════════════════════
-// Editor commands
-// ════════════════════════════════════════════════
-
-#[tauri::command]
-async fn read_file_text(project_path: String, rel_path: String) -> Result<FileContent, String> {
-    run_blocking(move || editor::read_file_text(&project_path, &rel_path)).await?
-}
-
-#[tauri::command]
-async fn write_file_text(
-    project_path: String,
-    rel_path: String,
-    content: String,
-) -> Result<u64, String> {
-    run_blocking(move || editor::write_file_text(&project_path, &rel_path, &content)).await?
-}
-
-#[tauri::command]
-fn stat_file(project_path: String, rel_path: String) -> Result<u64, String> {
-    editor::stat_file(&project_path, &rel_path)
-}
-
-#[tauri::command]
-async fn lsp_status(project_path: String, rel_path: String) -> LspStatus {
-    lsp::status(&project_path, &rel_path)
-}
-
-#[tauri::command]
-async fn lsp_open_document(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    content: String,
-) -> Result<LspStatus, String> {
-    lsp::open_document(&state, &project_path, &rel_path, &content)
-}
-
-#[tauri::command]
-async fn lsp_change_document(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    content: String,
-) -> Result<LspStatus, String> {
-    lsp::change_document(&state, &project_path, &rel_path, &content)
-}
-
-#[tauri::command]
-async fn lsp_close_document(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-) -> Result<(), String> {
-    lsp::close_document(&state, &project_path, &rel_path)
-}
-
-#[tauri::command]
-async fn lsp_completion(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    line: u64,
-    character: u64,
-    trigger_character: Option<String>,
-) -> Result<Vec<LspCompletion>, String> {
-    lsp::completion(&state, &project_path, &rel_path, line, character, trigger_character)
-}
-
-#[tauri::command]
-async fn lsp_completion_resolve(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    item: serde_json::Value,
-) -> Result<LspCompletionDetail, String> {
-    lsp::completion_resolve(&state, &project_path, &rel_path, item)
-}
-
-#[tauri::command]
-async fn lsp_signature_help(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    line: u64,
-    character: u64,
-) -> Result<Option<LspSignatureHelp>, String> {
-    lsp::signature_help(&state, &project_path, &rel_path, line, character)
-}
-
-#[tauri::command]
-async fn lsp_hover(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    line: u64,
-    character: u64,
-) -> Result<Option<String>, String> {
-    lsp::hover(&state, &project_path, &rel_path, line, character)
-}
-
-#[tauri::command]
-async fn lsp_definition(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    line: u64,
-    character: u64,
-) -> Result<Option<LspDefinition>, String> {
-    lsp::definition(&state, &project_path, &rel_path, line, character)
-}
-
-#[tauri::command]
-async fn lsp_references(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    line: u64,
-    character: u64,
-) -> Result<Vec<LspDefinition>, String> {
-    lsp::references(&state, &project_path, &rel_path, line, character)
-}
-
-#[tauri::command]
-async fn lsp_code_actions(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    range: LspRange,
-    diagnostics: Vec<LspDiagnostic>,
-) -> Result<Vec<LspCodeAction>, String> {
-    lsp::code_actions(&state, &project_path, &rel_path, range, diagnostics)
-}
-
-#[tauri::command]
-async fn lsp_resolve_code_action(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    action: serde_json::Value,
-) -> Result<LspWorkspaceEdit, String> {
-    lsp::resolve_code_action(&state, &project_path, &rel_path, action)
-}
-
-#[tauri::command]
-async fn lsp_prepare_rename(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    line: u64,
-    character: u64,
-) -> Result<Option<LspPrepareRename>, String> {
-    lsp::prepare_rename(&state, &project_path, &rel_path, line, character)
-}
-
-#[tauri::command]
-async fn lsp_rename(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    line: u64,
-    character: u64,
-    new_name: String,
-) -> Result<LspWorkspaceEdit, String> {
-    lsp::rename(&state, &project_path, &rel_path, line, character, &new_name)
-}
-
-#[tauri::command]
-async fn lsp_format_document(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-    tab_size: u64,
-    insert_spaces: bool,
-) -> Result<LspWorkspaceEdit, String> {
-    lsp::format_document(&state, &project_path, &rel_path, tab_size, insert_spaces)
-}
-
-#[tauri::command]
-async fn lsp_diagnostics(
-    state: State<'_, LspManager>,
-    project_path: String,
-    rel_path: String,
-) -> Result<Vec<LspDiagnostic>, String> {
-    lsp::diagnostics(&state, &project_path, &rel_path)
-}
-
-#[tauri::command]
-async fn lsp_shutdown_project(state: State<'_, LspManager>, project_path: String) -> Result<(), ()> {
-    lsp::shutdown_project(&state, &project_path);
-    Ok(())
 }
 
 // ════════════════════════════════════════════════
@@ -1162,11 +738,6 @@ async fn lsp_shutdown_project(state: State<'_, LspManager>, project_path: String
 
 // All git commands shell out to a `git` subprocess (network-bound for
 // fetch/pull/push), so every one runs through run_blocking.
-#[tauri::command]
-async fn get_git_status(project_path: String) -> Result<Vec<FileStatus>, String> {
-    run_blocking(move || git::get_status(&project_path)).await?
-}
-
 #[tauri::command]
 async fn get_git_status_v2(project_path: String) -> Result<Vec<StatusEntry>, String> {
     run_blocking(move || git::get_status_v2(&project_path)).await?
@@ -1351,11 +922,6 @@ async fn remove_worktree(project_path: String, worktree_path: String, branch: St
 }
 
 #[tauri::command]
-async fn validate_worktree(project_path: String, worktree_path: String, branch: String) -> Result<bool, String> {
-    run_blocking(move || worktree::validate_worktree(&project_path, &worktree_path, &branch)).await
-}
-
-#[tauri::command]
 async fn generate_worktree_commit_message(worktree_path: String, source_branch: String, agent_id: String) -> Result<String, String> {
     let def = agents::find_agent(&agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
     let diff = worktree::worktree_change_diff(&worktree_path, &source_branch)?;
@@ -1384,11 +950,10 @@ async fn install_tool(
 ) -> Result<String, String> {
     let cmd = tools::install_command(&tool_id)
         .ok_or_else(|| format!("No install command found for tool: {tool_id}"))?;
-    let label = format!("install:{tool_id}");
     let spawn_app = app.clone();
     let (session_id, rx) = run_blocking(move || {
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, &label, &cmd, &project_path)
+        pty::spawn_shell_command(&manager, &cmd, &project_path)
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
@@ -1435,10 +1000,9 @@ async fn run_project(
         } else {
             UrlAction::Capture
         };
-        let label = format!("run:{}", target.kind);
         let manager = spawn_app.state::<PtyManager>();
         let (session_id, rx) =
-            pty::spawn_shell_command(&manager, &label, &target.command, &project_path)?;
+            pty::spawn_shell_command(&manager, &target.command, &project_path)?;
         Ok::<_, String>((session_id, rx, url_action))
     })
     .await??;
@@ -1460,9 +1024,8 @@ async fn validate_project(
     let spawn_app = app.clone();
     let (session_id, rx) = run_blocking(move || {
         let target = runner::resolve_validation_command(&project_path, target_id.as_deref())?;
-        let label = format!("validate:{}", target.kind);
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, &label, &target.command, &project_path)
+        pty::spawn_shell_command(&manager, &target.command, &project_path)
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
@@ -1479,7 +1042,7 @@ async fn start_android_scrcpy(
     let (session_id, rx) = run_blocking(move || {
         let command = runner::resolve_android_scrcpy_command(&project_path, serial.as_deref())?;
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, "android:scrcpy", &command, &project_path)
+        pty::spawn_shell_command(&manager, &command, &project_path)
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
@@ -1496,7 +1059,7 @@ async fn start_android_logcat(
     let (session_id, rx) = run_blocking(move || {
         let command = runner::resolve_android_logcat_command(&project_path, serial.as_deref())?;
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, "android:logcat", &command, &project_path)
+        pty::spawn_shell_command(&manager, &command, &project_path)
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
@@ -1520,7 +1083,7 @@ async fn boot_android_emulator(
             wipe.unwrap_or(false),
         )?;
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, "android:emulator", &command, &project_path)
+        pty::spawn_shell_command(&manager, &command, &project_path)
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
@@ -1541,9 +1104,8 @@ async fn run_android_device_action(
             serial.as_deref(),
             &action,
         )?;
-        let label = format!("android:{action}");
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, &label, &command, &project_path)
+        pty::spawn_shell_command(&manager, &command, &project_path)
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
@@ -1562,7 +1124,7 @@ async fn send_android_deeplink(
         let command =
             runner::resolve_android_deeplink_command(&project_path, serial.as_deref(), &uri)?;
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, "android:deeplink", &command, &project_path)
+        pty::spawn_shell_command(&manager, &command, &project_path)
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
@@ -1579,7 +1141,7 @@ async fn open_ios_simulator(
     let (session_id, rx) = run_blocking(move || {
         let command = runner::resolve_ios_simulator_command(&project_path, udid.as_deref())?;
         let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, "ios:simulator", &command, &project_path)
+        pty::spawn_shell_command(&manager, &command, &project_path)
     })
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
@@ -1587,50 +1149,149 @@ async fn open_ios_simulator(
 }
 
 // ════════════════════════════════════════════════
-// UI preview commands
+// Preview / session URL commands
 // ════════════════════════════════════════════════
-
-/// Detect available UI previews for the file open in the editor: native
-/// annotations, matching snapshot images, live tooling, and record actions.
-#[tauri::command]
-async fn detect_preview(
-    project_path: String,
-    rel_path: String,
-) -> Result<preview::PreviewInfo, String> {
-    run_blocking(move || preview::detect_preview(&project_path, &rel_path)).await?
-}
-
-/// Read a snapshot/screenshot image as a `data:` URL for `<img>` display.
-#[tauri::command]
-async fn read_preview_image(project_path: String, rel_path: String) -> Result<String, String> {
-    run_blocking(move || preview::read_preview_image(&project_path, &rel_path)).await?
-}
-
-/// Start a live preview or snapshot-record process (flutter widget preview,
-/// Storybook, gradle record task, …) in a PTY session; returns the session id.
-#[tauri::command]
-async fn start_preview_session(
-    app: tauri::AppHandle,
-    project_path: String,
-    rel_path: String,
-    preview_id: String,
-) -> Result<String, String> {
-    let spawn_app = app.clone();
-    let (session_id, rx) = run_blocking(move || {
-        let (label, command) =
-            preview::resolve_preview_command(&project_path, &rel_path, &preview_id)?;
-        let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command(&manager, &format!("preview:{label}"), &command, &project_path)
-    })
-    .await??;
-    park_bridge(app, session_id.clone(), rx, UrlAction::Capture);
-    Ok(session_id)
-}
 
 /// Return the local URL captured for a running session, if one was seen yet.
 #[tauri::command]
 fn get_session_url(state: State<'_, SessionUrls>, session_id: String) -> Option<String> {
     state.0.lock().unwrap().get(&session_id).cloned()
+}
+
+// ════════════════════════════════════════════════
+// Chat sessions (headless agent turns)
+// ════════════════════════════════════════════════
+
+#[tauri::command]
+async fn chat_create_session(args: chat::NewSession) -> Result<chat::store::SessionMeta, String> {
+    run_blocking(move || chat::create_session(args)).await?
+}
+
+#[tauri::command]
+async fn chat_list_sessions() -> Vec<chat::store::SessionMeta> {
+    run_blocking(chat::store::list_sessions).await.unwrap_or_default()
+}
+
+/// Find CLI sessions (Claude Code, Codex) for these projects that can be imported.
+#[tauri::command]
+async fn chat_import_scan(project_paths: Vec<String>) -> Vec<chat::import::ImportCandidate> {
+    run_blocking(move || chat::import::scan(&project_paths)).await.unwrap_or_default()
+}
+
+#[tauri::command]
+async fn chat_import(requests: Vec<chat::import::ImportRequest>) -> Vec<chat::store::SessionMeta> {
+    run_blocking(move || chat::import::import(requests)).await.unwrap_or_default()
+}
+
+/// Store a pasted file (base64) and return the attachment to send with a message.
+#[tauri::command]
+async fn save_attachment(data_base64: String, ext: String) -> Result<chat::store::Attachment, String> {
+    run_blocking(move || chat::attach::save(&data_base64, &ext)).await?
+}
+
+/// Inline `data:` URL for a small image attachment (transcript thumbnails).
+#[tauri::command]
+async fn read_image_thumbnail(path: String) -> Option<String> {
+    run_blocking(move || chat::attach::thumbnail(&path)).await.ok().flatten()
+}
+
+/// Native multi-file picker for the composer's "Add files…".
+#[tauri::command]
+async fn pick_files(app: tauri::AppHandle) -> Vec<chat::store::Attachment> {
+    use tauri_plugin_dialog::FilePath;
+    app.dialog()
+        .file()
+        .set_title("Attach files")
+        .blocking_pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|fp| match fp {
+            FilePath::Path(p) => p.to_string_lossy().into_owned(),
+            FilePath::Url(u) => u.path().to_string(),
+        })
+        .map(|path| chat::store::Attachment {
+            name: std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone()),
+            kind: chat::attach::kind_for(&path).into(),
+            path,
+        })
+        .collect()
+}
+
+/// Search all transcripts for text (command palette).
+#[tauri::command]
+async fn chat_search(query: String, limit: usize) -> Vec<chat::store::SearchHit> {
+    run_blocking(move || chat::store::search(&query, limit)).await.unwrap_or_default()
+}
+
+#[tauri::command]
+async fn chat_load_transcript(session_id: String) -> Vec<chat::store::Entry> {
+    run_blocking(move || chat::store::load_entries(&session_id))
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn chat_send(
+    app: tauri::AppHandle,
+    state: State<'_, std::sync::Arc<chat::ChatManager>>,
+    args: chat::SendArgs,
+) -> Result<String, String> {
+    let manager = state.inner().clone();
+    let emit: chat::Emitter = std::sync::Arc::new(move |session_id, entry| {
+        let _ = app.emit(&format!("chat://{session_id}"), entry);
+    });
+    run_blocking(move || manager.send(emit, args)).await?
+}
+
+#[tauri::command]
+fn chat_cancel(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, force: Option<bool>) {
+    state.cancel(&session_id);
+    // Checkout removal/merge cannot wait for a cooperative protocol cancel.
+    if force==Some(true){state.native.close_session(&session_id);}
+}
+
+#[tauri::command]
+fn chat_detach_native(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String) -> Result<(), String> {
+    if state.is_running(&session_id) { return Err("Stop the current turn before opening its terminal UI".into()); }
+    state.native.close_session(&session_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn chat_runtime_state(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String) -> chat::acp_types::RuntimeState {
+    state.native.state(&session_id)
+}
+
+#[tauri::command]
+fn chat_respond(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, turn_id: String, request_id: String, response: chat::acp_types::InteractionResponse) -> Result<(), String> {
+    state.native.respond(&session_id, &turn_id, &request_id, response)
+}
+
+#[tauri::command]
+fn agent_runtime_info(agent_id: String) -> chat::acp::RuntimeInfo {
+    chat::acp::runtime_info(&agent_id)
+}
+
+#[tauri::command]
+async fn chat_update_session(
+    state: State<'_, std::sync::Arc<chat::ChatManager>>,
+    session_id: String,
+    patch: chat::SessionPatch,
+) -> Result<chat::store::SessionMeta, String> {
+    if patch.archived == Some(true) || patch.cwd.is_some() || patch.worktree.is_some() {
+        state.cancel(&session_id);
+        state.native.close_session(&session_id);
+    }
+    run_blocking(move || chat::update_session(&session_id, patch)).await?
+}
+
+#[tauri::command]
+async fn chat_delete_session(
+    state: State<'_, std::sync::Arc<chat::ChatManager>>,
+    session_id: String,
+) -> Result<(), String> {
+    let manager = state.inner().clone();
+    run_blocking(move || manager.delete_session(&session_id)).await?
 }
 
 // ════════════════════════════════════════════════
@@ -1654,84 +1315,9 @@ async fn get_review_diff(
 // Handoff commands
 // ════════════════════════════════════════════════
 
-// The handoff parses session stores, shells out to git, writes handoff files,
-// and forks a PTY — all blocking work that must stay off the main thread.
-#[tauri::command]
-async fn continue_agent(
-    app: tauri::AppHandle,
-    project_path: String,
-    from_agent: String,
-    to_agent: String,
-    yolo: bool,
-) -> Result<String, String> {
-    let spawn_app = app.clone();
-    let (session_id, rx) = run_blocking(move || {
-        let launch = handoff::continue_launch(&project_path, &from_agent, &to_agent, yolo)?;
-        let manager = spawn_app.state::<PtyManager>();
-        pty::spawn_shell_command_with_env(
-            &manager,
-            &launch.label,
-            &launch.command,
-            &project_path,
-            &launch.env,
-        )
-    })
-    .await??;
-    park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
-    Ok(session_id)
-}
-
 #[tauri::command]
 fn sync_native_menu_state(app: tauri::AppHandle, state: NativeMenuState) -> Result<(), String> {
     sync_native_menu(&app, &state);
-    Ok(())
-}
-
-// ════════════════════════════════════════════════
-// Project tabs (single-window session)
-// ════════════════════════════════════════════════
-
-/// Load the persisted single-window session (every open project tab plus the
-/// active id). `None` on a true first run (no `session.json` and no migratable
-/// legacy `windows.json`); the frontend then falls back to the legacy
-/// single-slot localStorage workspace.
-#[tauri::command]
-fn get_session_tabs() -> Option<session::SessionState> {
-    session::load_session()
-}
-
-/// Persist the full session (every project tab + active id). Always writes:
-/// the frontend debounces these calls and flushes the final state from
-/// `beforeunload`, so a quit-time write must land, not be skipped.
-#[tauri::command]
-fn update_session_tabs(
-    registry: State<'_, session::SessionRegistry>,
-    state: session::SessionState,
-) -> Result<(), String> {
-    let mut guard = registry.0.lock().unwrap();
-    *guard = state;
-    session::persist_session(&guard);
-    Ok(())
-}
-
-/// Tear down a project tab: kill its PTY sessions and shut down its language
-/// servers. Called by the frontend when a project tab is closed.
-#[tauri::command]
-fn close_project_tab(app: tauri::AppHandle, project_path: String) -> Result<(), String> {
-    let pty = app.state::<PtyManager>();
-    let killed = pty::kill_sessions_for_project(&pty, &project_path);
-    if !killed.is_empty() {
-        let urls_state = app.state::<SessionUrls>();
-        let pending_state = app.state::<PendingBridges>();
-        let mut urls = urls_state.0.lock().unwrap();
-        let mut pending = pending_state.0.lock().unwrap();
-        for id in &killed {
-            urls.remove(id);
-            pending.remove(id);
-        }
-    }
-    let lsp = app.state::<LspManager>();
-    lsp::shutdown_project(&lsp, &project_path);
     Ok(())
 }
 
@@ -1750,40 +1336,6 @@ async fn pick_project_folder(app: tauri::AppHandle) -> Option<String> {
             FilePath::Path(p) => p.to_string_lossy().into_owned(),
             FilePath::Url(u) => u.path().to_string(),
         })
-}
-
-#[tauri::command]
-async fn pick_prompt_file(
-    app: tauri::AppHandle,
-    project_path: Option<String>,
-    image_only: Option<bool>,
-) -> Option<String> {
-    use tauri_plugin_dialog::FilePath;
-
-    let mut dialog = app
-        .dialog()
-        .file()
-        .set_title(if image_only.unwrap_or(false) {
-            "Attach image"
-        } else {
-            "Attach file"
-        });
-    if let Some(path) = project_path {
-        dialog = dialog.set_directory(path);
-    }
-    if image_only.unwrap_or(false) {
-        dialog = dialog.add_filter(
-            "Images",
-            &[
-                "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg",
-            ],
-        );
-    }
-
-    dialog.blocking_pick_file().map(|fp| match fp {
-        FilePath::Path(p) => p.to_string_lossy().into_owned(),
-        FilePath::Url(u) => u.path().to_string(),
-    })
 }
 
 #[cfg(target_os = "macos")]
@@ -2097,22 +1649,28 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Older frameless builds persisted `decorated: false`. Decorations are
+        // now an app invariant; restoring that flag would remove native controls
+        // even when the window configuration enables them.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::all() & !StateFlags::DECORATIONS)
+                .build(),
+        )
         .manage(PtyManager::new())
-        .manage(LspManager::new())
+        .manage(std::sync::Arc::new(chat::ChatManager::default()))
         .manage(SessionUrls::default())
         .manage(PendingBridges::default())
-        .manage(session::SessionRegistry::new())
         .setup(|app| {
+            if let Ok(resources) = app.path().resource_dir() { chat::acp::set_resource_dir(resources); }
+            chat::recover_interrupted_sessions();
             let handle = app.handle();
             if let Ok(menu) = build_app_menu(handle) {
                 let _ = app.set_menu(menu);
             }
 
-            // Session restore is driven by the frontend, which calls
-            // `get_session_tabs` on mount and rehydrates every open project
-            // tab into the single window. Here we just arm the main-window
-            // show fallback (the frontend's own `win.show()` is the fast path).
+            // Arm the main-window show fallback (the frontend's own
+            // `win.show()` is the fast path).
             if let Some(win) = app.get_webview_window("main") {
                 let w = win.clone();
                 std::thread::spawn(move || {
@@ -2125,8 +1683,9 @@ pub fn run() {
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::Destroyed => {
                 // The single window is going away — the app is quitting. Kill
-                // every live PTY and shut down every LSP so no orphans survive.
+                // every live PTY and running chat turn so no orphans survive.
                 let app = window.app_handle();
+                app.state::<std::sync::Arc<chat::ChatManager>>().cancel_all();
                 let pty = app.state::<PtyManager>();
                 let killed = pty::kill_all_sessions(&pty);
                 if !killed.is_empty() {
@@ -2139,8 +1698,6 @@ pub fn run() {
                         pending.remove(id);
                     }
                 }
-                let lsp = app.state::<LspManager>();
-                lsp::shutdown_all(&lsp);
             }
             _ => {}
         })
@@ -2152,12 +1709,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // PTY
-            spawn_agent,
             pty_input,
             pty_resize,
             pty_kill,
             pty_attach,
-            list_sessions,
             open_terminal,
             // Agents
             get_agents,
@@ -2165,40 +1720,9 @@ pub fn run() {
             open_project,
             get_recent_projects,
             remove_recent_project,
-            get_file_tree,
             search_prompt_files,
-            search_project_text,
             list_prompt_skills,
-            inject_file_refs,
-            create_entry,
-            rename_entry,
-            delete_entry,
-            duplicate_entry,
-            copy_entry,
-            move_entry,
-            // Editor
-            read_file_text,
-            write_file_text,
-            stat_file,
-            lsp_status,
-            lsp_open_document,
-            lsp_change_document,
-            lsp_close_document,
-            lsp_completion,
-            lsp_completion_resolve,
-            lsp_signature_help,
-            lsp_hover,
-            lsp_definition,
-            lsp_references,
-            lsp_code_actions,
-            lsp_resolve_code_action,
-            lsp_prepare_rename,
-            lsp_rename,
-            lsp_format_document,
-            lsp_diagnostics,
-            lsp_shutdown_project,
             // Git
-            get_git_status,
             get_git_status_v2,
             get_sync_status,
             auto_commit,
@@ -2228,7 +1752,6 @@ pub fn run() {
             commit_worktree,
             merge_worktree_branch,
             remove_worktree,
-            validate_worktree,
             generate_worktree_commit_message,
             // Tools
             get_tool_catalog,
@@ -2246,26 +1769,34 @@ pub fn run() {
             run_android_device_action,
             send_android_deeplink,
             open_ios_simulator,
-            // Preview
-            detect_preview,
-            read_preview_image,
-            start_preview_session,
             get_session_url,
+            chat_create_session,
+            chat_list_sessions,
+            chat_load_transcript,
+            chat_search,
+            save_attachment,
+            read_image_thumbnail,
+            pick_files,
+            chat_import_scan,
+            chat_import,
+            chat_send,
+            chat_runtime_state,
+            chat_detach_native,
+            chat_respond,
+            agent_runtime_info,
+            chat_cancel,
+            chat_update_session,
+            chat_delete_session,
             // Review
             get_review_diff,
             // Handoff
-            continue_agent,
             // Dialog
             create_project,
             pick_project_folder,
-            pick_prompt_file,
             trigger_haptic,
             // Menu
             sync_native_menu_state,
             // Project tabs (single-window session)
-            get_session_tabs,
-            update_session_tabs,
-            close_project_tab,
         ])
         .build(tauri::generate_context!())
         .expect("error while building FlipFlopper")

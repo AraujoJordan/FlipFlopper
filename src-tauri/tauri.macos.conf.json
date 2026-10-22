@@ -1,0 +1,22 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "FlipFlopper",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 720,
+        "minHeight": 600,
+        "decorations": true,
+        "resizable": true,
+        "minimizable": true,
+        "maximizable": true,
+        "closable": true,
+        "titleBarStyle": "Visible",
+        "hiddenTitle": false,
+        "visible": false,
+        "transparent": false
+      }
+    ]
+  }
+}

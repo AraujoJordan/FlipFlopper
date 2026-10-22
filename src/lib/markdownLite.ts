@@ -1,12 +1,95 @@
-import hljs from "highlight.js";
+import hljs from "highlight.js/lib/core";
+import javascript from "highlight.js/lib/languages/javascript";
+import typescript from "highlight.js/lib/languages/typescript";
+import json from "highlight.js/lib/languages/json";
+import bash from "highlight.js/lib/languages/bash";
+import shell from "highlight.js/lib/languages/shell";
+import python from "highlight.js/lib/languages/python";
+import rust from "highlight.js/lib/languages/rust";
+import go from "highlight.js/lib/languages/go";
+import java from "highlight.js/lib/languages/java";
+import kotlin from "highlight.js/lib/languages/kotlin";
+import swift from "highlight.js/lib/languages/swift";
+import c from "highlight.js/lib/languages/c";
+import cpp from "highlight.js/lib/languages/cpp";
+import csharp from "highlight.js/lib/languages/csharp";
+import css from "highlight.js/lib/languages/css";
+import scss from "highlight.js/lib/languages/scss";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
+import markdown from "highlight.js/lib/languages/markdown";
+import sql from "highlight.js/lib/languages/sql";
+import diff from "highlight.js/lib/languages/diff";
+import ruby from "highlight.js/lib/languages/ruby";
+import php from "highlight.js/lib/languages/php";
+import dart from "highlight.js/lib/languages/dart";
+import ini from "highlight.js/lib/languages/ini";
+import dockerfile from "highlight.js/lib/languages/dockerfile";
+import groovy from "highlight.js/lib/languages/groovy";
+import gradle from "highlight.js/lib/languages/gradle";
+import powershell from "highlight.js/lib/languages/powershell";
+import lua from "highlight.js/lib/languages/lua";
+import makefile from "highlight.js/lib/languages/makefile";
+import graphql from "highlight.js/lib/languages/graphql";
+import objectivec from "highlight.js/lib/languages/objectivec";
+import scala from "highlight.js/lib/languages/scala";
+import plaintext from "highlight.js/lib/languages/plaintext";
 
-const FENCE_RE = /```(\w*)\n([\s\S]*?)```/g;
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("shell", shell);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("go", go);
+hljs.registerLanguage("java", java);
+hljs.registerLanguage("kotlin", kotlin);
+hljs.registerLanguage("swift", swift);
+hljs.registerLanguage("c", c);
+hljs.registerLanguage("cpp", cpp);
+hljs.registerLanguage("csharp", csharp);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("scss", scss);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("yaml", yaml);
+hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("diff", diff);
+hljs.registerLanguage("ruby", ruby);
+hljs.registerLanguage("php", php);
+hljs.registerLanguage("dart", dart);
+hljs.registerLanguage("ini", ini);
+hljs.registerLanguage("dockerfile", dockerfile);
+hljs.registerLanguage("groovy", groovy);
+hljs.registerLanguage("gradle", gradle);
+hljs.registerLanguage("powershell", powershell);
+hljs.registerLanguage("lua", lua);
+hljs.registerLanguage("makefile", makefile);
+hljs.registerLanguage("graphql", graphql);
+hljs.registerLanguage("objectivec", objectivec);
+hljs.registerLanguage("scala", scala);
+hljs.registerLanguage("plaintext", plaintext);
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// Common fence labels that aren't highlight.js language names.
+for (const [alias, target] of Object.entries({
+  js: "javascript", jsx: "javascript", ts: "typescript", tsx: "typescript", sh: "bash", zsh: "bash",
+  py: "python", rs: "rust", golang: "go", kt: "kotlin", cs: "csharp", html: "xml", yml: "yaml",
+  md: "markdown", rb: "ruby", toml: "ini", docker: "dockerfile", "objective-c": "objectivec", ps1: "powershell", text: "plaintext",
+})) {
+  hljs.registerAliases(alias, { languageName: target });
 }
 
-function highlightCode(code: string, lang: string | undefined): string {
+
+// Small, dependency-free Markdown → HTML for assistant messages. All input is
+// HTML-escaped before any markup is added, so the output is safe to assign to
+// innerHTML. Styling lives in App.css under `.md`.
+
+export function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+export function highlightCode(code: string, lang: string | null | undefined): string {
   if (lang && hljs.getLanguage(lang)) {
     try {
       return hljs.highlight(code, { language: lang }).value;
@@ -17,34 +100,166 @@ function highlightCode(code: string, lang: string | undefined): string {
   return escapeHtml(code);
 }
 
+function safeHref(url: string): string | null {
+  return /^(https?:\/\/|mailto:)/i.test(url) ? url : null;
+}
+
+/** Inline spans. Code spans are lifted out first so their contents are never
+ *  interpreted as emphasis or links. */
 function renderInline(text: string): string {
-  return escapeHtml(text)
-    .replace(/`([^`]+)`/g, (_m, code) => `<code style="background:var(--surface-3);padding:1px 4px;border-radius:4px;">${code}</code>`)
-    .replace(/\*\*([^*]+)\*\*/g, (_m, bold) => `<strong>${bold}</strong>`);
+  const codes: string[] = [];
+  let out = text.replace(/`([^`\n]+)`/g, (_m, code: string) => {
+    codes.push(`<code>${escapeHtml(code)}</code>`);
+    return `\u0000${codes.length - 1}\u0000`;
+  });
+  out = escapeHtml(out)
+    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, label: string, url: string) => {
+      const href = safeHref(url.replace(/&amp;/g, "&"));
+      return href ? `<a href="${escapeHtml(href)}" data-md-link>${label}</a>` : m;
+    })
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?])/g, (_m, pre: string, url: string) =>
+      `${pre}<a href="${url}" data-md-link>${url}</a>`)
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
+    .replace(/(^|[^_\w])_([^_\n]+)_(?![_\w])/g, "$1<em>$2</em>")
+    .replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+  return out.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => codes[Number(i)]);
 }
 
-function renderParagraphs(text: string): string {
-  return text
-    .split(/\n{2,}/)
-    .map((para) => para.trim())
-    .filter(Boolean)
-    .map((para) => `<p style="margin:4px 0;">${renderInline(para).replace(/\n/g, "<br/>")}</p>`)
-    .join("");
+const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+
+function splitTableRow(line: string): string[] {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
 }
 
-/** Minimal Markdown-to-HTML for LSP hover/documentation text: fenced code
- *  blocks (highlighted via highlight.js), inline code, bold, and paragraphs. */
-export function renderMarkdownLite(text: string): string {
-  let html = "";
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  FENCE_RE.lastIndex = 0;
-  while ((match = FENCE_RE.exec(text)) !== null) {
-    const [full, lang, code] = match;
-    html += renderParagraphs(text.slice(lastIndex, match.index));
-    html += `<pre style="margin:6px 0;padding:8px;border-radius:6px;background:var(--surface-2);overflow:auto;"><code class="hljs">${highlightCode(code.replace(/\n$/, ""), lang || undefined)}</code></pre>`;
-    lastIndex = match.index + full.length;
+function isTableSeparator(line: string): boolean {
+  return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line) && line.includes("-");
+}
+
+function renderBlocks(src: string): string {
+  const lines = src.split("\n");
+  const html: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      html.push(`<h${level}>${renderInline(heading[2].trim())}</h${level}>`);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      html.push("<hr/>");
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*>/.test(line)) {
+      const quote: string[] = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) {
+        quote.push(lines[i].replace(/^\s*>\s?/, ""));
+        i += 1;
+      }
+      html.push(`<blockquote>${renderBlocks(quote.join("\n"))}</blockquote>`);
+      continue;
+    }
+
+    if (line.includes("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      const head = splitTableRow(line);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        rows.push(splitTableRow(lines[i]));
+        i += 1;
+      }
+      html.push(
+        `<div class="md-table"><table><thead><tr>${head.map((c) => `<th>${renderInline(c)}</th>`).join("")}</tr></thead>` +
+          `<tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${renderInline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`,
+      );
+      continue;
+    }
+
+    const item = LIST_ITEM.exec(line);
+    if (item) {
+      const ordered = /\d/.test(item[2]);
+      const tag = ordered ? "ol" : "ul";
+      const baseIndent = item[1].length;
+      const items: string[] = [];
+      while (i < lines.length) {
+        const m = LIST_ITEM.exec(lines[i]);
+        if (!m || m[1].length < baseIndent) break;
+        if (m[1].length > baseIndent) {
+          // Nested list: gather the deeper block and attach to the previous item.
+          const nested: string[] = [];
+          while (i < lines.length) {
+            const n = LIST_ITEM.exec(lines[i]);
+            if (!n || n[1].length <= baseIndent) break;
+            nested.push(lines[i]);
+            i += 1;
+          }
+          if (items.length) items[items.length - 1] += renderBlocks(nested.join("\n"));
+          continue;
+        }
+        let body = renderInline(m[3]);
+        i += 1;
+        // Continuation lines (indented, not a new item) belong to this item.
+        while (i < lines.length && lines[i].trim() && !LIST_ITEM.test(lines[i]) && /^\s+/.test(lines[i])) {
+          body += "<br/>" + renderInline(lines[i].trim());
+          i += 1;
+        }
+        items.push(body);
+      }
+      html.push(`<${tag}>${items.map((b) => `<li>${b}</li>`).join("")}</${tag}>`);
+      continue;
+    }
+
+    // Paragraph: consume until a blank line or a block starter.
+    const para: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^(#{1,6})\s+/.test(lines[i]) &&
+      !/^\s*>/.test(lines[i]) &&
+      !LIST_ITEM.test(lines[i]) &&
+      !/^\s*([-*_])(\s*\1){2,}\s*$/.test(lines[i])
+    ) {
+      para.push(lines[i]);
+      i += 1;
+    }
+    html.push(`<p>${renderInline(para.join("\n")).replace(/\n/g, "<br/>")}</p>`);
   }
-  html += renderParagraphs(text.slice(lastIndex));
-  return html;
+  return html.join("");
+}
+
+/** Markdown → HTML. Fenced code blocks are highlighted; an unterminated fence
+ *  (a message still streaming) renders as code too. */
+export function renderMarkdownLite(text: string): string {
+  const parts: string[] = [];
+  // `(?![\s\S])` is end-of-input: with the `m` flag a bare `$` would match at every line end.
+  const fence = /^[ \t]*```([\w+-]*)[^\n]*\n([\s\S]*?)(?:\n[ \t]*```[ \t]*(?=\n|(?![\s\S]))|(?![\s\S]))/gm;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = fence.exec(text)) !== null) {
+    parts.push(renderBlocks(text.slice(last, m.index)));
+    const lang = m[1] || undefined;
+    const code = m[2];
+    parts.push(
+      `<div class="md-code"><div class="md-code-head"><span>${escapeHtml(lang ?? "text")}</span>` +
+        `<button type="button" data-md-copy>Copy</button></div>` +
+        `<pre><code class="hljs">${highlightCode(code, lang)}</code></pre></div>`,
+    );
+    last = m.index + m[0].length;
+    if (m[0].length === 0) fence.lastIndex += 1;
+  }
+  parts.push(renderBlocks(text.slice(last)));
+  return parts.join("");
 }

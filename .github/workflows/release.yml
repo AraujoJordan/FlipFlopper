@@ -69,7 +69,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -88,10 +88,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Updater signing — tauri-action emits latest.json + .sig sidecars
-          # automatically when these are set alongside plugins.updater config.
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_PRIVATE_KEY_PASSWORD }}
+          RUNTIME_TARGET: ${{ matrix.target }}
+          # Tauri 2 names; retain the existing repository secrets.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_PRIVATE_KEY_PASSWORD }}
           # macOS signing / notarization
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -106,30 +106,54 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            Download the installer or binary archive for your platform below.
+            A new conversation workspace with project sessions, streamed transcripts,
+            Changes / Preview / Terminal / Flow panes and native OS window controls.
 
-            > **Unsigned builds** — these are not code-signed yet.
-            > - **macOS:** right-click the `.dmg` → Open to bypass Gatekeeper.
-            > - **Windows:** click "More info" → "Run anyway" in the SmartScreen prompt.
-          releaseDraft: false
+            Claude Code and Cursor use persistent ACP sessions with live request cards
+            and agent-provided model/command catalogs. Claude prompt/resume and native
+            UI interactions were checked locally. Cursor's tested CLI still rejects
+            authenticated ACP sessions after login; see the README for details.
+
+            Installers include the pinned Node sidecar and Claude ACP helper. Extract
+            portable archives in full. Native Claude requires macOS 13.5+ on a Mac.
+          releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
 
       - name: Package binary
         shell: bash
         run: |
           mkdir -p artifacts/binary
           cp "${{ matrix.binary }}" artifacts/binary/
+          mkdir -p artifacts/binary/agent-runtime
+          cp -R src-tauri/agent-runtime/node_modules artifacts/binary/agent-runtime/
+          cp src-tauri/agent-runtime/NODE-LICENSE artifacts/binary/agent-runtime/
+          node scripts/package-agent-runtime.mjs "${{ matrix.binary }}" artifacts/binary
           tar -czf "artifacts/${{ matrix.archive }}" -C artifacts/binary .
 
       - name: Upload binary to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNTIME_TARGET: ${{ matrix.target }}
         run: gh release upload "${{ env.RELEASE_TAG }}" "artifacts/${{ matrix.archive }}" --clobber
+
+  publish:
+    name: Publish completed release
+    needs: release
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish after every platform succeeds
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest
 
   update-cask:
     name: Update Homebrew Cask
-    needs: release
+    needs: publish
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

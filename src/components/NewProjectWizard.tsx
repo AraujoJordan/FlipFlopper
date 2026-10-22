@@ -23,12 +23,12 @@ function ProjectArt(props: { id: CategoryId; accent: string }) {
     <circle cx="142" cy="22" r="30" fill={props.accent} opacity=".1"/><path d="M18 83C43 43 71 35 95 56s42 20 68-12v54H18Z" fill={`url(#g-${props.id})`} opacity=".22"/>
     <Show when={props.id === "mobile"}><rect x="67" y="13" width="47" height="82" rx="10" fill="none" stroke={props.accent} stroke-width="5"/><path d="M82 22h17M86 85h9" stroke={props.accent} stroke-width="4" stroke-linecap="round"/></Show>
     <Show when={props.id === "web"}><rect x="28" y="20" width="125" height="73" rx="8" fill="none" stroke={props.accent} stroke-width="4"/><path d="M28 38h125M40 29h2m8 0h2m8 0h2M44 54h44M44 67h66M44 80h34" stroke={props.accent} stroke-width="4" stroke-linecap="round"/></Show>
-    <Show when={props.id === "backend"}><For each={[25,50,75]}>{(y) => <><ellipse cx="90" cy={y} rx="48" ry="12" fill="#14161d" stroke={props.accent} stroke-width="4"/><path d={`M42 ${y}v14c0 7 22 12 48 12s48-5 48-12V${y}`} fill="none" stroke={props.accent} stroke-width="4"/></>}</For></Show>
+    <Show when={props.id === "backend"}><For each={[25,50,75]}>{(y) => <><ellipse cx="90" cy={y} rx="48" ry="12" style={{ fill: "var(--surface-1)" }} stroke={props.accent} stroke-width="4"/><path d={`M42 ${y}v14c0 7 22 12 48 12s48-5 48-12V${y}`} fill="none" stroke={props.accent} stroke-width="4"/></>}</For></Show>
     <Show when={props.id === "game2d"}><path d="M38 75h22V53h22V31h22v22h22v22h22" fill="none" stroke={props.accent} stroke-width="7" stroke-linejoin="round"/><rect x="70" y="60" width="15" height="15" fill={props.accent}/></Show>
     <Show when={props.id === "game3d"}><path d="m90 15 52 29v47L90 103 38 74V32Z" fill="none" stroke={props.accent} stroke-width="4"/><path d="m38 32 52 29 52-17M90 61v42" fill="none" stroke={props.accent} stroke-width="4"/></Show>
     <Show when={props.id === "desktop"}><rect x="25" y="18" width="130" height="70" rx="6" fill="none" stroke={props.accent} stroke-width="4"/><path d="M68 101h44M82 88l-4 13m20-13 4 13" stroke={props.accent} stroke-width="5" stroke-linecap="round"/></Show>
     <Show when={props.id === "cli"}><rect x="22" y="20" width="136" height="72" rx="8" fill="none" stroke={props.accent} stroke-width="4"/><path d="m43 46 16 13-16 13m29 0h38" stroke={props.accent} stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></Show>
-    <Show when={props.id === "custom"}><path d="M90 15v80M50 34l80 42m0-42L50 76" stroke={props.accent} stroke-width="7" stroke-linecap="round"/><circle cx="90" cy="55" r="18" fill="#14161d" stroke={props.accent} stroke-width="5"/></Show>
+    <Show when={props.id === "custom"}><path d="M90 15v80M50 34l80 42m0-42L50 76" stroke={props.accent} stroke-width="7" stroke-linecap="round"/><circle cx="90" cy="55" r="18" style={{ fill: "var(--surface-1)" }} stroke={props.accent} stroke-width="5"/></Show>
   </svg>;
 }
 

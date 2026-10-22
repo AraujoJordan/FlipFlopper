@@ -1,3 +1,4 @@
+import { Icon } from "./shell/Icon";
 import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import {
   detectValidationTargets,
@@ -15,34 +16,6 @@ import {
   writeValidationTarget,
 } from "../lib/store";
 import { Menu, MenuItem, MenuLabel, Spinner, toast } from "./ui";
-
-const CheckIcon: Component<{ color?: string }> = (props) => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={props.color ?? "currentColor"} stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style={{ flex: "0 0 auto" }}>
-    <path d="M20 6L9 17l-5-5" />
-  </svg>
-);
-
-const StopIcon: Component<{ pulse?: boolean }> = (props) => (
-  <svg
-    class={props.pulse ? "running-pulse" : undefined}
-    width="12" height="12" viewBox="0 0 24 24" style={{ color: "var(--status-del)", flex: "0 0 auto" }}
-  >
-    <path d="M7 7h10v10H7z" fill="currentColor" />
-  </svg>
-);
-
-const ChevronIcon: Component<{ open?: boolean }> = (props) => (
-  <svg
-    width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"
-    style={{
-      flex: "0 0 auto",
-      transform: props.open ? "rotate(180deg)" : "rotate(0deg)",
-      transition: "transform var(--dur-base) var(--ease-standard)",
-    }}
-  >
-    <path d="M6 9l6 6 6-6" />
-  </svg>
-);
 
 const shortLabel = (target: ValidationTarget) => target.label.split(" - ")[0] || target.id;
 
@@ -218,10 +191,10 @@ const ValidationButton: Component = () => {
               <Spinner size={12} color="var(--accent)" />
             </span>
             <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && !running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <CheckIcon />
+              <Icon name="check" size={13} />
             </span>
             <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <StopIcon pulse />
+              <Icon name="stop" size={12} class="running-pulse" style={{ color: "var(--status-del)" }} />
             </span>
           </div>
         </button>
@@ -246,7 +219,7 @@ const ValidationButton: Component = () => {
             cursor: projectPath() && targets().length > 0 && !running() ? "pointer" : "default",
           }}
         >
-          <ChevronIcon open={menuOpen()} />
+          <Icon name="chevronDown" size={10} style={{ transform: menuOpen() ? "rotate(180deg)" : "none", transition: "transform var(--dur-base) var(--ease-standard)" }} />
         </button>
       </div>
 
@@ -264,7 +237,7 @@ const ValidationButton: Component = () => {
                   background: selected() ? "var(--surface-4)" : undefined,
                 }}
               >
-                <CheckIcon color={selected() ? "var(--accent)" : "var(--fg-muted)"} />
+                <Icon name="check" size={13} style={{ color: selected() ? "var(--accent)" : "var(--fg-muted)" }} />
                 <div style={{ flex: "1", "min-width": 0 }}>
                   <div style={{
                     display: "flex",

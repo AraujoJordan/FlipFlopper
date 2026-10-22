@@ -5,88 +5,107 @@ and `GEMINI.md` are symlinks to this file, so keep it accurate and practical.
 
 ## Project Snapshot
 
-FlipFlopper is a cross-platform desktop cockpit for CLI AI coding agents. It
-uses Tauri 2 for the native shell, Rust for backend commands, and SolidJS +
-Vite + TypeScript for the UI.
+FlipFlopper is a cross-platform desktop app that presents CLI AI coding agents
+through a conversation-first interface. It uses Tauri 2 for the
+native shell, Rust for backend commands, and SolidJS + Vite + TypeScript for
+the UI. There is no code editor: agents write the code, the app shows
+conversations, diffs, a preview and a terminal.
 
-The current source tree is a Tauri/Solid app. Older commits and some stale docs
-mention a libui rewrite, `cli-continues`, `diffx`, `Sidebar`, `ToolInstaller`,
-and a `PreviewPane`; those are not the active implementation in `src/`. (Note:
-the current `PreviewPanel.tsx` UI-preview split is unrelated to that old
-`PreviewPane`.)
+Older commits and some stale docs mention a libui rewrite, `cli-continues`,
+`diffx`, a CodeMirror editor, an LSP manager, a file explorer, PTY agent tabs,
+project tabs and a `handoff.rs` session scraper. None of those exist in `src/`
+any more. The current chat shell is the only UI implementation; do not restore
+the earlier editor/workspace UI or keep parallel implementations of it.
 
 Currently implemented:
 
-- Embedded PTY-backed terminal tabs for installed CLI agents.
+- **Chat engine** (`src-tauri/src/chat/`): Claude Code and Cursor use persistent
+  ACP v1 connections (`acp.rs`, official Rust ACP SDK). Claude runs the pinned
+  `@agentclientprotocol/claude-agent-acp` helper on bundled Node, pointing at the
+  user's installed Claude executable. Cursor runs `cursor-agent acp`; never use
+  the ambiguous `agent` alias. Existing CLI credentials/settings/MCP servers
+  remain CLI-owned. Other agents use one headless JSON-stream process per turn.
+  All paths normalize to additive `ChatEvent`s, persist JSONL and emit
+  `chat://{session_id}`. Native load/resume replay never reaches the transcript.
+- Per-agent headless adapters (`chat/adapters/`): codex, agy, kimi, qwen
+  (Claude-compatible schema), opencode, droid, and tolerant text parsers for
+  grok, aider and goose. The shared Claude parser is retained for imports and
+  Qwen; there is no Claude/Cursor headless fallback. Plandex/Cline are terminal-only.
+- Permission modes are `plan | auto_edit | full`. ACP maps native modes and
+  supports live permission, question, plan and elicitation cards; historical
+  requests are read-only. Full access still respects native security policies.
+  Headless agents receive their policy at launch and cannot ask mid-turn.
+  Worktree merge/removal awaits forced cancellation before touching git; ordinary
+  Stop allows a brief cooperative protocol cancellation first.
+- ACP bindings are scoped to the effective cwd. Native-session recovery starts
+  a new conversation with a transcript digest only after an explicit UI choice.
+  Up to four idle connections are retained for five minutes; active/waiting
+  turns are exempt. Stop cancels requests and the protocol turn, then kills the
+  owned process group if needed. Quit/archive/delete/detach close connections.
+- Native model/effort/command catalogs come from the connected agent, including
+  model-dependent option updates. `/agent:<command>` distinguishes native
+  commands from local app actions. Images up to 20 MiB use structured ACP image
+  blocks when supported; other attachments remain accessible by prompt paths.
+- Sessions sidebar grouped by project; transcript with markdown, collapsible
+  tool rows and inline diffs; composer with `@` mentions, `/` commands and
+  skills, queued follow-ups, agent/model/effort and permission pickers, and a
+  Local/Worktree toggle.
+- Side pane with Changes (git status/sync/history over the existing git
+  backend, diffs via `DiffPane`), Preview (Run targets + iframe of the
+  captured dev-server URL), Terminal (shell PTYs, validation targets, resume
+  in the agent's TUI) and Flow tabs.
+- Multi-agent orchestrator flow canvas (`lib/orchestrator.ts`): every session
+  in the open project is a live node (`live-<sessionId>`); queued steps start
+  child sessions when the upstream node finishes a turn. Edges support review
+  gates and carry-context (backend `context_from` digest). Step status is
+  derived from session state, not PTY sniffing.
+- Isolated git worktrees (`worktree.rs`): sessions or steps can run under a
+  `flipflopper/wt-*` branch; merge back / discard from the Changes pane or a
+  flow card (`WorktreeCloseDialog.tsx`).
 - Agent registry and install detection for Claude Code, Codex, Cursor CLI,
-  OpenCode, Aider, Goose, agy, Cline, Qwen Code, Plandex, Droid, Grok, and
-  Kimi Code.
-- Project picker, recent project persistence, and per-project `.agents/`
-  scaffolding.
-- Lazy, `.gitignore`-aware file explorer that highlights git status and opens
-  native diffs.
-- Prompt composer that sends text to the active PTY; if no agent is active, it
-  attempts a git auto-commit with the prompt as the message.
-- Commit timeline that opens per-commit diffs.
-- Native GitHub-style diff review overlay, replacing the old external `diffx`
-  iframe/server flow.
-- In-house agent handoff that reads native session stores when possible, writes
-  `.agents/handoff.md`, appends `.agents/context.md`, and launches the target
-  agent with seeded context where the target CLI supports it.
-- In-app auto-updater (Windows/Linux only). On launch it silently checks the
-  GitHub release `latest.json`, surfaces an update via a title-bar badge and a
-  Help-menu "Check for Updates…" entry, then downloads + relaunches. macOS is
-  gated out (`platform() === "macos"`); Mac users update via Homebrew. Signing
-  keypair lives in GitHub secrets (`TAURI_PRIVATE_KEY` /
-  `TAURI_PRIVATE_KEY_PASSWORD`); the public key is in
-  `tauri.conf.json` under `plugins.updater.pubkey`.
-- Tool catalog and install-command backend; no dedicated current
-  `ToolInstaller.tsx` panel exists.
-- Android-Studio-style UI preview split inside the editor: when the open file
-  has previews (Compose/SwiftUI/Flutter `@Preview`/`#Preview` annotations, or
-  snapshot/screenshot images from Paparazzi, Roborazzi, Compose Screenshot
-  Testing, swift-snapshot-testing, Flutter goldens, jest/Playwright/Cypress,
-  or a `screenshots/` folder), a "Preview" toggle appears in the editor header
-  and opens a side panel with a live iframe (Flutter widget previewer, web dev
-  server, Storybook), a snapshot image grid, or a "record snapshots" action.
-- Capability-driven editor IntelliSense for the configured language servers:
-  snippets and auto-import completion edits, hover/signature help, diagnostics,
-  definition/references, quick fixes, multi-file symbol rename, manual document
-  formatting, and opt-in format-on-save.
-- Multi-agent orchestrator flow canvas (`src/components/flow/` over
-  `src/lib/orchestrator.ts`): every open agent tab is mirrored as a live lane,
-  and steps (downstream agent + prompt) can be chained off any node. Step
-  status is detected heuristically by sniffing PTY output. Edges support
-  review gates (hold for manual approval before firing), carry-context
-  handoff (seed the next agent with the upstream session), and isolated git
-  worktree isolation. Per-step model and reasoning-effort tuning can be
-  pinned. Flows persist per project.
-- Isolated git worktrees for agents (`src-tauri/src/worktree.rs`): each
-  worktree-enabled step or tab spawns under a `flipflopper/wt-*` branch in the
-  OS data dir, with create / status / commit / merge-back / remove / validate
-  / diff plumbing plus an AI-generated commit message helper. Agents run with
-  the worktree path as their cwd, so their edits never touch the source
-  branch until merged.
-- Guided "New Project" wizard (title-bar "+"), project picker modal for
-  recents, a Settings panel (auto-toggle sidebars, idle-alert timeout,
-  format-on-save), a keyboard-shortcut reference modal (`?`), and an
-  `AgentTaskDialog` for ad-hoc one-shot tasks with `@path` context chips.
-- Augmented PATH resolution (`src-tauri/src/env.rs`) so GUI-launched
-  (Finder/Homebrew) builds still see Homebrew, npm, Cargo, Volta, asdf, mise,
-  and other CLI-installed agent binaries. Internal infrastructure, not a
-  Tauri command.
+  OpenCode, Aider, Goose, agy, Cline, Qwen Code, Plandex, Droid, Grok and Kimi
+  Code; tool catalog and install-command backend (no UI yet).
+- Import of existing Claude Code / Codex CLI sessions (`chat/import.rs`): scan
+  reads only first lines of each file, conversion streams (keeps the newest
+  3000 entries), and the imported session stores the CLI's own session id in
+  `native_ids`, so continuing it resumes the real CLI session.
+- Command palette (⌘K): sessions by title, message-content search over all
+  transcripts (`chat_search`), projects and actions. Focus composer is ⌘L.
+- Attachments: pick (`pick_files`), drop (Tauri drag-drop event) or paste
+  images (`save_attachment`); stored on `Entry::User.attachments`, passed to
+  agents as absolute paths in the prompt.
+- Sidebar: project filter, Project/Date grouping, pinned section, nested flow
+  child sessions, back/forward history (⌘[ ⌘]), ⌘1–9 jump.
+- Native window decorations on macOS, Windows and Linux: the OS owns close,
+  minimize, maximize/restore, fullscreen, title-bar dragging and window menus.
+  `tauri.conf.json` enables decorations; `tauri.macos.conf.json` keeps a visible
+  standard title bar. App toolbars must not duplicate window controls or
+  override native title-bar double-click behavior.
+  Window-state restoration excludes `StateFlags::DECORATIONS` so legacy saved
+  frameless state cannot remove native controls after an upgrade.
+- Project picker, recent projects, per-project `.agents/` scaffolding, the New
+  Project wizard, Settings window (permissions, notifications, theme, agents,
+  shortcuts, about), keyboard shortcut reference (`?`), light/dark theme.
+- In-app auto-updater (Windows/Linux only; macOS is gated out and updates via
+  Homebrew). Signing keypair lives in GitHub secrets (`TAURI_PRIVATE_KEY` /
+  `TAURI_PRIVATE_KEY_PASSWORD`); the public key is in `tauri.conf.json` under
+  `plugins.updater.pubkey`.
+- Augmented PATH resolution (`src-tauri/src/env.rs`) so GUI-launched builds
+  still see Homebrew, npm, Cargo, Volta, asdf, mise and similar installs.
 
 Known gaps / current quirks:
 
 - The git backend refuses auto-commit, rollback, and commit rename on
   `main`/`master`.
-- `project::search_files` is registered and reachable; it is exposed through
-  `lib.rs` under the command name `search_prompt_files` (see `lib.rs:699,704,1285`),
-  not under its own function name. The naming mismatch is cosmetic, not a gap.
-- `.agents/settings.json` may still mention `cli-continues`; current
-  `handoff.rs` no longer depends on it.
-- The README is user-facing and partly stale. Prefer source files and this
-  AGENTS.md when resolving conflicts.
+- Text streams per content block (not per token) for most agents; agy streams
+  real deltas.
+- OpenCode, Droid and Grok headless parsers were written from docs; re-record
+  fixtures when authenticated. Real Claude ACP prompt/resume is checked locally;
+  Cursor authenticated ACP checks depend on that CLI's own credential readiness.
+- The dev app (`npm run tauri dev`) shares `preferences.json` with an installed
+  build (same bundle identifier).
+- The README is user-facing; prefer source files and this AGENTS.md when they
+  disagree.
 
 ## Build And Checks
 
@@ -97,7 +116,10 @@ npm run tauri dev
 npm run build
 npm run tauri build
 npx tsc --noEmit
+npm run test:chat
+npm run prepare:agents
 cargo check
+cargo test --lib
 ```
 
 Notes:
@@ -106,6 +128,16 @@ Notes:
   `cargo check` works from the repo root. `cd src-tauri && cargo check` is also
   fine.
 - `npm run dev` starts only Vite. Use `npm run tauri dev` for the desktop app.
+- Desktop hooks run `prepare:agents`: npm installs the locked Claude helper
+  without optional native Claude packages/install scripts, then downloads pinned,
+  checksummed Node 24.22.1 for the target. Installed builds never install helpers
+  or download Node. Developers need Node 22+ (CI uses 24); desktop users only need
+  the installed/authenticated agent CLI. Native Claude requires macOS 13.5+;
+  other app/agent OS support is unchanged.
+- Rust ACP transport tests need `npm run prepare:agents` first. Real-provider
+  tests are opt-in: `cargo test --lib authenticated_claude_prompt_and_resume --
+  --ignored --nocapture` and the corresponding `authenticated_cursor_prompt_and_resume`.
+  They use disposable working directories, existing CLI login and real model calls.
 - For docs-only edits, build checks are usually unnecessary; still inspect the
   diff.
 
@@ -128,148 +160,83 @@ git push origin main
 
 ```text
 src/
-  App.tsx                    thin app shell: title bar, tabs, layout, native
-                             menu routing, workspace persistence/restore
-  App.css                    global UI styles
-  index.tsx                  Solid entry point
-  lib/ipc.ts                 typed Tauri invoke/listen wrappers
-  lib/store.ts               Solid store, tab/session helpers, review state,
-                             single-window project-tab snapshot/restore
-                             (beginProjectTab / switchToProject / closeProjectTab)
-  lib/orchestrator.ts        single source of truth for the multi-agent flow
-                             canvas: nodes/edges, per-project persistence, PTY
-                             output/exit monitors that drive heuristic step
-                             status, step firing, gate release, tuning apply,
-                             and worktree spawn wiring
-  lib/agentMeta.tsx          agent visual identity (colors, letters, AgentLogo)
-                             and per-agent mode-cycle support map
-  lib/appPrefs.ts            durable preferences.json store (tauri-plugin-store)
-                             with one-time migration helpers off legacy
-                             localStorage keys
-  lib/cmTheme.ts             CodeMirror dark theme + highlight style for editor
-                             and diff surfaces
-  lib/markdownLite.ts        tiny in-app markdown renderer (code fences via
-                             highlight.js) used by hover docs and similar
-  lib/native.ts              clipboard + notification wrappers around the
-                             tauri plugins, with permission priming
-  lib/settings.ts            idle-alert timeout (1-60 min) read/write helper
-                             backed by appPrefs
-  lib/updater.ts             Win/Linux auto-update signals (update info,
-                             install state, apply/dismiss) consumed by
-                             UpdateDialog; macOS is gated out
-  lib/useResizable.ts        shared pointer-capture drag-resize hook used by
-                             the terminal panel, editor preview split, and
-                             orchestrator panel
-  lib/constants.ts           PROTECTED_BRANCHES / isProtectedBranch, WORK_BRANCH
-  lib/fileIcons.ts           file extension to icon mapping (getFileIcon)
-  lib/usages.ts              find-usages result model shared by EditorPane/OmniSearch
-  lib/shortcuts.ts           global keyboard shortcut registry, capture-phase
-                             before xterm/CodeMirror
-  lib/terminalCache.ts       module-level cache of live xterm instances keyed
-                             by PTY session id; terminals survive project-tab
-                             switches (scrollback + output intact); disposed on
-                             the tab/project close paths in store.ts
+  App.tsx                    three-column shell (sidebar · session · side pane),
+                             startup restore, native menu routing, updater
+  App.css                    theme tokens (cool blue dark/light) + shell styles
+  lib/ipc.ts                 typed Tauri invoke/listen wrappers (incl. chat_*)
+  lib/chat.ts                single source of truth for sessions: Solid store,
+                             transcript reducer (live + loaded entries share
+                             it), subscribe/send/cancel/queue, startSessionTurn,
+                             onTurnEnd hook, composer prefs
+  lib/store.ts               app-level state: open project, agents, terminals,
+                             git refresh counters, diff review target,
+                             activeCwd/worktree (effectiveRoot)
+  lib/layout.ts              sidebar/side-pane open state, widths, theme pref,
+                             sidebar grouping/filter
+  lib/importer.ts            scan/import CLI sessions state
+  lib/attachments.ts         pending attachments (pick/drop/paste)
+  lib/palette.ts             command palette open state
+  lib/install.ts             install agents via the tool catalog
+  lib/projects.ts            open/pick/forget project, project-created seeding
+  lib/gitStatus.ts           shared git status/sync poll (header badge + Changes)
+  lib/orchestrator.ts        flow canvas on sessions (see Project Snapshot)
+  lib/shortcuts.ts           global shortcuts + SHORTCUT_GROUPS reference
+  lib/agentMeta.tsx          agent colors/logos and model/effort options
+  lib/fileIcons.ts           compact file-category -> Material Symbol mapping
+  lib/markdownLite.ts        dependency-free markdown -> HTML (escaped), with
+                             shared escaping + highlight.js core/languages for
+                             chat and DiffPane; never import the full catalog
+  lib/appPrefs.ts            durable preferences.json (tauri-plugin-store)
+  lib/settings.ts            notify-on-finish preference
+  lib/updater.ts             Win/Linux update signals
+  lib/terminalCache.ts       xterm instances keyed by PTY session id
+  lib/useResizable.ts        pointer-capture drag-resize hook
+  lib/native.ts              clipboard + notification wrappers
   components/
-    AgentBar.tsx             terminal tab strip and new-tab behavior
-    TerminalPane.tsx         hosts a cached xterm instance (lib/terminalCache.ts)
-                             wired to PTY events; per-mount it owns only the
-                             resize observer and focus handling
-    TerminalPanel.tsx        bottom panel hosting run/validate/install TerminalPanes
-    FileTree.tsx             lazy explorer, git status badges, review entry
-    PromptComposer.tsx       bottom prompt input, PTY send / auto-commit path
-    DiffPane.tsx             native unified/split diff overlay
-    EditorPane.tsx           CodeMirror editor, tabs, and preview split host
-    PreviewPanel.tsx         UI preview side panel (live iframe / snapshot grid)
-    OmniSearch.tsx           file/text search command palette and find-usages
-    RunButton.tsx            detect run targets, launch/stop project run in a PTY
-    ValidationButton.tsx     detect and launch project validation/test targets
-    BranchIndicator.tsx      recent branches, switch, create work branch,
-                             protected-branch guard (extracted from App.tsx)
-    ProjectTabStrip.tsx      single-window project-tab strip rendered below the
-                             title bar (only when >1 project open); switch/close
-                             tabs; dormant tabs spawn agents on first switch
-    YoloButton.tsx           autonomous-mode toggle and confirm/kill flow
-                             (extracted from App.tsx)
-    AgentWorkspace.tsx       active agent pane plus "Continue on..." handoff menu
-                             (extracted from App.tsx)
-    AgentTaskDialog.tsx      ad-hoc one-shot task modal with @path context
-                             chips, seeded into the active or spawned agent
-    NewProjectWizard.tsx     5-step guided project creation (category, stack,
-                             details, name, folder) that seeds a prompt brief
-    ProjectPicker.tsx        recents modal opened from the title-bar project
-                             button; surfaces store.recentProjects
-    SettingsPanel.tsx        user-facing prefs modal: auto-toggle sidebars,
-                             idle-alert timeout, format-on-save
-    ShortcutHelp.tsx         keyboard-shortcut reference modal (`?`)
-    UpdateDialog.tsx         Win/Linux update flow driven by lib/updater.ts
-    ui.tsx                   shared UI kit: Spinner, toast, and other primitives
-    flow/                    multi-agent orchestrator view layer (state lives in
-                             lib/orchestrator.ts); components are pure views
-                             over the flow store
-      OrchestratorPanel.tsx  resizable bottom host (split + maximize) for the
-                             canvas; owns viewport pan/zoom and panel sizing
-      FlowCanvas.tsx         pannable/zoomable canvas; lays out node cards,
-                             edges, the add-step menu, and inline step editor
-      FlowNodeCard.tsx       per-agent lane card: status, prompt preview,
-                             per-step model/effort selectors, branch chip and
-                             "Merge back" action for worktree-isolated steps
-      FlowEdges.tsx          SVG edges between nodes; renders gate / carry
-                             badges and the edge context menu
-      AddStepMenu.tsx        add-step popover and inline step editor (agent,
-                             prompt, model, effort, gate, carry, worktree)
-    git/
-      GitPanel.tsx           tab shell for sync/changes/history, status polling
-      ChangesTab.tsx         staged/unstaged list, stage/unstage/discard/stash
-      HistoryTab.tsx         commit log, rollback, rename, checkout by sha
-      SyncHeader.tsx         fetch/pull/push, ahead/behind, conflict/squash entry
-      SquashPushDialog.tsx   squash-and-push with AI-generated commit message
-      ConflictFixDialog.tsx  merge-conflict resolution handoff to an agent
+    shell/                   Sidebar, SessionHeader, Icon, CommandPalette
+    chat/                    AgentInteraction (live native request cards),
+                             Transcript, MessageItem, ToolCallRow, InlineDiff,
+                             Markdown, Composer, EmptyState, AttachmentChip
+    side/                    SidePane (CSS-toggled tabs), ChangesView,
+                             PreviewView, TerminalView, FlowView
+    flow/                    FlowCanvas, FlowNodeCard, FlowEdges, AddStepMenu
+    git/                     SyncHeader, ChangesTab, HistoryTab, dialogs
+                             (squash-push, conflict fix, worktree merge/discard)
+    DiffPane.tsx             native unified/split diff (lazy, hosted in Changes)
+    TerminalPane.tsx         xterm for shell PTYs (theme-aware)
+    RunButton / ValidationButton / BranchIndicator / ProjectPicker /
+    NewProjectWizard / SettingsPanel / ImportDialog / ShortcutHelp /
+    UpdateDialog / ui.tsx
 
 src-tauri/src/
-  lib.rs                     Tauri builder, command registry, event bridge
-  main.rs                    native entry point
-  pty.rs                     portable-pty session lifecycle and shell commands
-  lsp.rs                     LSP session manager: completions, diagnostics,
-                             navigation, code actions, rename, formatting
-  agents.rs                  static agent registry and PATH/version detection
-  project.rs                 AGENTS.md/.agents scaffolding, recents, file tree
-  git.rs                     shell-based status, commit, log, rename, rollback
-  review.rs                  git diff parser for native review pane
-  preview.rs                 UI-preview detection, snapshot matching, image data URLs
-  runner.rs                  run/validation target detection; ProjectFacts
-  editor.rs                  file read/write with in-project path safety
-  tools.rs                   tool catalog, package manager detection, installs
-  handoff.rs                 in-house session parser and handoff launcher
-  worktree.rs                isolated git worktrees for agents: create / status
-                             / commit / merge-back / remove / validate / diff
-                             plus generate_worktree_commit_message. Agents run
-                             with the worktree path as cwd; pure git plumbing,
-                             no Tauri-side coupling to spawn logic.
-  env.rs                     augmented-PATH resolution (login shell + Homebrew,
-                             npm, Cargo, Volta, asdf, mise, and friends) so
-                             GUI-launched builds still find CLI-installed
-                             binaries. Internal infrastructure, not a Tauri
-                             command; agents/tools/LSP should always spawn via
-                             the PATH resolved here.
-  session.rs                 single-window project-tab session (~/.config/flipflopper/session.json):
-                             open-project persistence, restore-on-launch, and
-                             legacy windows.json one-time migration. PTY/LSP
-                             cleanup for a closed project tab happens via the
-                             close_project_tab command; app quit kills all.
+  lib.rs                     Tauri builder, command registry, native menu,
+                             PTY event bridge
+  chat/                      acp.rs (persistent SDK transport/pool/lifecycle),
+                             acp_types.rs (live interaction validation), import.rs (CLI session import), attach.rs
+                             (attachments), mod.rs (ChatManager, send/cancel, changed-file
+                             snapshots), event.rs (ChatEvent), store.rs (sessions
+                             index + JSONL transcripts + digest), adapters/ (one
+                             parser + invocation per agent), fixtures/
+  pty.rs                     portable-pty shell sessions
+  agents.rs                  static agent registry, PATH/version detection,
+                             headless one-shot helper
+  project.rs                 AGENTS.md/.agents scaffolding, recents, skills,
+                             prompt file search
+  git.rs / review.rs         shell-based git ops; diff parser for DiffPane
+  worktree.rs                isolated git worktrees (pure git plumbing)
+  runner.rs                  run/validation target detection
+  tools.rs                   tool catalog and install commands
+  env.rs                     augmented PATH (agents, tools and PTYs must spawn
+                             through it)
 
-public/
-  agents/                    bundled agent logo assets
-  screenshot.png             README/AGENTS screenshot
-
-docs/
-  README.md                  index for human-facing guides; intentionally
-                             sparse. AGENTS.md remains the source of truth
-                             for architecture and contracts until this grows.
-
-.agents/
-  settings.json              dogfooded project settings
-  context.md                 rolling handoff notes
-  handoff.md                 generated, gitignored handoff payload
+src-tauri/agent-runtime/     pinned Claude ACP helper manifest/lockfile
+scripts/prepare-agents.mjs   build-time checksummed Node + helper preparation
+scripts/chat.test.mjs        transcript/runtime regression tests (Node built-ins)
+public/agents/               bundled agent logo assets
+public/icons/LICENSE         Google Material Symbols Apache-2.0 license
+docs/media/                  README screenshots/recordings (not app assets)
+docs/README.md               index for human-facing guides
+.agents/                     dogfooded project settings, rolling context
 ```
 
 Large generated folders may exist locally (`node_modules/`, `dist/`, `target/`,
@@ -282,53 +249,62 @@ requires generated output.
   error text and surface it to the UI rather than silently swallowing it.
 - `lib.rs` is the IPC boundary. When adding a backend capability, update the
   Rust command, `generate_handler!`, and the typed wrapper in `src/lib/ipc.ts`.
-- PTY output is bridged to frontend events named `pty://{session_id}` and
-  `pty-exit://{session_id}`.
-- `pty::kill_session` intentionally kills the child process directly. Do not
-  regress this to only dropping PTY handles.
+- Chat turns: `chat_send` spawns the agent process and returns once it is
+  running; everything else arrives as `Entry` JSON on `chat://{session_id}`
+  (`{kind: "user" | "divider" | "event"}`) and is also appended to the session's
+  JSONL transcript. Add event kinds additively; the frontend reducer and the
+  persisted transcripts both depend on the shape.
+- ACP requests must validate session, turn, request and the original option
+  IDs/schema on the backend. Keep responders out of SDK dispatch callbacks so
+  cancellation and streaming continue while waiting for the user. On reload,
+  only `chat_runtime_state` can reactivate a request; persisted cards alone cannot.
+  Native image data and elicitation answers/credentials are not persisted as
+  protocol traffic; interaction history records the offered request and outcome.
+- Headless agents must be spawned with stdin closed (or piped and then closed)
+  and through `env::augmented_path_string()`. Codex hangs on an open stdin.
+  Cancel kills the whole process group (`kill_tree`); do not regress it to
+  killing only the child.
+- Adapter parsers must be tolerant: ignore unknown lines, never panic. New
+  adapters need a fixture recorded from the real CLI where possible
+  (`chat/fixtures/`) and a test against it.
+- `Entry::User.attachments` is additive (`serde(default)`); old transcripts
+  must keep loading. Tests that point `FLIPFLOPPER_DATA_DIR` at a temp dir
+  must hold `store::ENV_LOCK` (the variable is process-wide).
+- Imported sessions must carry `native_ids[agent]` so resume works; skip
+  sessions already imported (match on `native_ids`).
+- Shell PTYs: output is bridged to `pty://{session_id}` and
+  `pty-exit://{session_id}`. `pty::kill_session` kills the child directly; do
+  not regress this to only dropping PTY handles.
 - `project::scaffold` must be idempotent and must not overwrite user-created
   `AGENTS.md`, `.agents/settings.json`, or `.agents/context.md`.
-- `review.rs` shells out to `git diff` and parses unified diff text into
-  structured data. Keep parsing tolerant; malformed lines should not panic.
-- `handoff.rs` is best-effort. Missing session stores should fall back to git
-  context, not fail the handoff.
-- Handoff has structured readers for Claude Code, Codex, agy/Gemini, Qwen,
-  OpenCode, Droid, Grok, Cline, and Kimi Code. Aider, Cursor CLI, Goose, and
-  Plandex currently fall back to git-only context.
-- `worktree.rs` is pure git plumbing. It does not know how agents are spawned;
-  the frontend spawns the agent with the resolved `worktree_path` as cwd.
-  Keep it that way: new spawn-side concerns belong in `pty.rs` / the frontend,
-  not in worktree commands.
-- `env.rs` resolves an augmented PATH at startup and exposes it via a single
-  getter. Agents, tool probes, LSP servers, and PTY shells must all spawn
-  through that resolved PATH, otherwise GUI-launched (Finder/Homebrew) builds
-  will silently miss CLI-installed binaries.
+- `review.rs` shells out to `git diff` and parses unified diff text; keep it
+  tolerant of malformed lines.
+- `worktree.rs` is pure git plumbing and does not know how agents run. The
+  chat engine takes the worktree path as the session cwd.
+- `env.rs` resolves the augmented PATH once at startup; agents, tool probes and
+  PTY shells must all spawn through it or GUI-launched builds miss
+  CLI-installed binaries.
 
 ## Frontend Contracts
 
 - Match the current SolidJS style: small components, typed IPC calls, Solid
-  store helpers, and mostly inline styles with shared global CSS in `App.css`.
-- `store.review` controls the diff overlay. Use `openReview()` and
-  `closeReview()` rather than local duplicate state.
-- Terminal lifecycle is split: `lib/terminalCache.ts` owns the xterm
-  `Terminal`, its DOM container, and the PTY output/exit listeners per session
-  id so they survive the keyed workspace remount on project switch (no dropped
-  output, scrollback intact). `TerminalPane` re-appends the cached container
-  and owns only the per-mount resize observer and focus handling. Never
-  dispose the terminal on unmount; disposal belongs to the tab/project close
-  paths in `store.ts` (`disposeCachedTerminal`).
-- `FileTree` fetches one directory level at a time via `get_file_tree`; keep it
-  lazy for large repositories.
-- `components/git/*` and `FileTree` should open native review diffs, not spawn
-  an external preview server.
-- Orchestrator state lives in `lib/orchestrator.ts` as the single source of
-  truth: nodes, edges, per-project persistence, PTY output/exit monitors, and
-  step firing. `components/flow/*` are pure views over that store; do not
-  duplicate flow state into component-local signals. Step status is detected
-  by heuristically sniffing PTY output, so keep that detection tolerant of
-  unrelated agent chatter.
-- Keep UI text compact and operational. This is a desktop workbench, not a
-  marketing page.
+  store helpers, and inline styles plus the shell classes in `App.css`.
+- `lib/chat.ts` owns sessions. Do not duplicate transcript or running state in
+  component signals. Live events and loaded transcripts must go through the
+  same reducer (`applyEntry`).
+- The active checkout for git/run/terminal features is `effectiveRoot()`
+  (`store.activeCwd`, which is the session's worktree when it has one).
+- Diffs open through `openReview()` / `closeReview()`, which show `DiffPane`
+  inside the Changes tab.
+- Side-pane tabs stay mounted after first visit (CSS toggled) so terminals and
+  the preview frame keep state. Never dispose an xterm on unmount; disposal
+  belongs to `removeTerminal` (`disposeCachedTerminal`).
+- `lib/orchestrator.ts` is the only owner of flow state; `components/flow/*`
+  are pure views. Do not give flow nodes their own status: derive it.
+- Keep UI text compact and operational. Preserve the sessions/transcript,
+  docked composer and retained side-pane layout. The current palette is cool
+  blue; the independent Circuit palette and expanded motion in the UI/UX plan
+  are planned work. Do not restore the superseded warm Claude Desktop styling.
 
 ## Git And Commit Rules
 
@@ -351,8 +327,14 @@ git status --short
 
 - Do not add new files, crates, or npm packages without discussing it first.
 - Prefer existing dependencies and local patterns:
-  `portable-pty`, `which`, `ignore`, `dirs`, `rusqlite`, Tauri plugins,
-  `@xterm/xterm`, `@xterm/addon-fit`, `highlight.js`, and SolidJS.
+  `portable-pty`, `which`, `ignore`, `dirs`, `base64`, Tauri plugins,
+  `@xterm/xterm`, `@xterm/addon-fit`, `highlight.js`, SolidJS, and the approved
+  ACP SDK/async-process/futures transport. Keep the Claude helper and Node pinned
+  with their lockfile/checksums; do not add a second Claude/Cursor integration.
+- UI and file-category icons use `@material-symbols/svg-400` through the shared
+  `Icon` component (rounded, weight 400). Add explicit SVG imports there; keep
+  icons local/offline and preserve real agent logos. Do not vendor another
+  editor icon theme or hand-copy icon paths into individual components.
 - If a dependency change is approved, update the relevant lockfile and run the
   matching checks.
 

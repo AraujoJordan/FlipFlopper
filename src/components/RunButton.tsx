@@ -1,3 +1,4 @@
+import { Icon } from "./shell/Icon";
 import { Component, For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import {
   bootAndroidEmulator,
@@ -28,34 +29,6 @@ import {
   writeRunTarget,
 } from "../lib/store";
 import { Menu, MenuItem, MenuLabel, Spinner, toast } from "./ui";
-
-const PlayIcon: Component<{ color?: string }> = (props) => (
-  <svg width="13" height="13" viewBox="0 0 24 24" style={{ color: props.color ?? "currentColor", flex: "0 0 auto" }}>
-    <path d="M8 5v14l11-7z" fill="currentColor" />
-  </svg>
-);
-
-const StopIcon: Component<{ pulse?: boolean }> = (props) => (
-  <svg
-    class={props.pulse ? "running-pulse" : undefined}
-    width="12" height="12" viewBox="0 0 24 24" style={{ color: "var(--status-del)", flex: "0 0 auto" }}
-  >
-    <path d="M7 7h10v10H7z" fill="currentColor" />
-  </svg>
-);
-
-const ChevronIcon: Component<{ open?: boolean }> = (props) => (
-  <svg
-    width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"
-    style={{
-      flex: "0 0 auto",
-      transform: props.open ? "rotate(180deg)" : "rotate(0deg)",
-      transition: "transform var(--dur-base) var(--ease-standard)",
-    }}
-  >
-    <path d="M6 9l6 6 6-6" />
-  </svg>
-);
 
 const shortLabel = (target: RunTarget) => target.label.split(" - ")[0] || target.id;
 
@@ -477,10 +450,10 @@ const RunButton: Component = () => {
               <Spinner size={12} color="var(--status-add)" />
             </span>
             <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && !running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <PlayIcon />
+              <Icon name="play" size={13} />
             </span>
             <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <StopIcon pulse />
+              <Icon name="stop" size={12} class="running-pulse" style={{ color: "var(--status-del)" }} />
             </span>
           </div>
         </button>
@@ -512,7 +485,7 @@ const RunButton: Component = () => {
             cursor: projectPath() && !running() && !starting() ? "pointer" : "default",
           }}
         >
-          <ChevronIcon open={menuOpen()} />
+          <Icon name="chevronDown" size={10} style={{ transform: menuOpen() ? "rotate(180deg)" : "none", transition: "transform var(--dur-base) var(--ease-standard)" }} />
         </button>
       </div>
 
@@ -758,7 +731,7 @@ const RunButton: Component = () => {
                   background: selected() ? "var(--surface-4)" : undefined,
                 }}
               >
-                <PlayIcon color={selected() ? "var(--status-add)" : "var(--fg-muted)"} />
+                <Icon name="play" size={13} style={{ color: selected() ? "var(--status-add)" : "var(--fg-muted)" }} />
                 <div style={{ flex: "1", "min-width": 0 }}>
                   <div style={{
                     display: "flex",

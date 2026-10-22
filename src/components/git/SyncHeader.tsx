@@ -1,5 +1,6 @@
+import { Icon } from "../shell/Icon";
 import { Component, Show, createSignal } from "solid-js";
-import { store, bumpGitStatus, toggleGitPanelCollapsed, updateCurrentBranch, effectiveRoot } from "../../lib/store";
+import { store, bumpGitStatus, updateCurrentBranch, effectiveRoot } from "../../lib/store";
 import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, commitsAheadOfRemote, type SyncStatus, triggerHaptic } from "../../lib/ipc";
 import { Button, Spinner, toast } from "../ui";
 import { openConflictDialog } from "./ConflictFixDialog";
@@ -139,10 +140,8 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
           </div>
         }
       >
-        <button
-          type="button"
-          title="Collapse Source Control"
-          onclick={toggleGitPanelCollapsed}
+        <span
+          title="Current branch"
           style={{
             "font-family": "var(--font-mono)", "font-size": "11px",
             color: "var(--fg-default)", "font-weight": "600",
@@ -150,7 +149,7 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
           }}
         >
           {s()?.branch || "no branch"}
-        </button>
+        </span>
         <Show
           when={upstream()}
           fallback={
@@ -186,9 +185,7 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
           title="Fetch (prune deleted remote branches)"
         >
           <Show when={busyOp() === "fetch"} fallback={
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12a9 9 0 11-2.64-6.36M21 4v6h-6" />
-            </svg>
+            <Icon name="refresh" size={12} />
           }>
             <Spinner size={11} />
           </Show>
@@ -200,9 +197,7 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
           title="Pull (fast-forwards when possible, merges otherwise)"
         >
           <Show when={busyOp() === "pull"} fallback={
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 5v14M5 12l7 7 7-7" />
-            </svg>
+            <Icon name="arrowDown" size={12} />
           }>
             <Spinner size={11} />
           </Show>
@@ -215,9 +210,7 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
           classList={{ "success-flash": pushFlash() }}
         >
           <Show when={busyOp() === "push"} fallback={
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 19V5M5 12l7-7 7 7" />
-            </svg>
+            <Icon name="arrowUp" size={12} />
           }>
             <Spinner size={11} />
           </Show>

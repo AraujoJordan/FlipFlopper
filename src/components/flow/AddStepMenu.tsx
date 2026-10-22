@@ -1,8 +1,10 @@
+import { Icon } from "../shell/Icon";
 import { Component, For, Show, createSignal, createMemo, createEffect } from "solid-js";
 import { Menu, MenuLabel } from "../ui";
 import { store } from "../../lib/store";
 import { addStepNode, updateStepNode, flow, type FlowNode } from "../../lib/orchestrator";
-import { AgentLogo, agentColor, agentTuning } from "../../lib/agentMeta";
+import { AgentLogo, agentColor } from "../../lib/agentMeta";
+import { agentTuning } from "../../lib/chat";
 
 interface Props {
   open: boolean;
@@ -136,9 +138,7 @@ const AddStepMenu: Component<Props> = (props) => {
                   {agent.name}
                 </span>
                 <Show when={selected()}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={color()} stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M20 6L9 17l-5-5" />
-                  </svg>
+                  <Icon name="check" size={13} style={{ color: color() }} />
                 </Show>
               </button>
             );

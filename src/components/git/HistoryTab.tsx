@@ -1,6 +1,8 @@
+import { Icon } from "../shell/Icon";
 import { Component, createResource, createSignal, For, Show } from "solid-js";
 import type { Accessor } from "solid-js";
 import { store, openReview, bumpGitStatus, clearHistoryFilter, updateCurrentBranch, effectiveRoot } from "../../lib/store";
+import { headlessAgents } from "../../lib/chat";
 import { getGitLog, gitRollback, renameCommit, gitCheckoutCommit } from "../../lib/ipc";
 import { agentColor, agentLetter } from "../../lib/agentMeta";
 import { Button, Spinner, confirmDialog, toast } from "../ui";
@@ -47,10 +49,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
   const [renameValue, setRenameValue] = createSignal("");
   const [busySha, setBusySha] = createSignal<string | null>(null);
 
-  const activeAgentId = () => {
-    const tab = store.tabs.find((t) => t.sessionId === store.activeTabId);
-    return tab?.agentId ?? "claude";
-  };
+  const activeAgentId = () => headlessAgents()[0]?.id ?? "claude";
 
   function startRename(sha: string, message: string) {
     setRenamingSha(sha);
@@ -260,10 +259,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         aria-label={`Copy full SHA for ${commit.short_sha}`}
                         style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                          <rect x="9" y="9" width="13" height="13" rx="2" />
-                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                        </svg>
+                        <Icon name="copy" size={11} />
                       </button>
                       <button
                         class="icon-btn press"
@@ -272,10 +268,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         aria-label={`Checkout ${commit.short_sha} (detached HEAD)`}
                         style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                          <circle cx="12" cy="12" r="3" />
-                          <path d="M12 3v6M12 15v6" stroke-linecap="round" />
-                        </svg>
+                        <Icon name="commit" size={11} />
                       </button>
                       <button
                         class="icon-btn press"
@@ -284,10 +277,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         aria-label={`Rename commit message for ${commit.short_sha}`}
                         style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4Z" />
-                        </svg>
+                        <Icon name="pencil" size={11} />
                       </button>
                       <button
                         class="icon-btn-danger press"
@@ -296,9 +286,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
                         aria-label={`Roll back to ${commit.short_sha}`}
                         style={{ display: "flex", "align-items": "center", padding: "2px" }}
                       >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                          <path d="M3 12a9 9 0 1 0 3-6.7M3 12V5m0 7h7" />
-                        </svg>
+                        <Icon name="history" size={11} />
                       </button>
                     </span>
                     <span

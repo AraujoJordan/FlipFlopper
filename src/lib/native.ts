@@ -3,10 +3,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import {
-  readText as readClipboardTextRaw,
-  writeText as writeClipboardTextRaw,
-} from "@tauri-apps/plugin-clipboard-manager";
+import { writeText as writeClipboardTextRaw } from "@tauri-apps/plugin-clipboard-manager";
 
 let notificationPermissionPrimed = false;
 
@@ -40,8 +37,4 @@ export async function sendNativeNotification(title: string, body?: string): Prom
 
 export async function writeClipboardText(text: string, label?: string): Promise<void> {
   await writeClipboardTextRaw(text, label ? { label } : undefined);
-}
-
-export async function readClipboardText(): Promise<string> {
-  return readClipboardTextRaw();
 }

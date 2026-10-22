@@ -1,0 +1,957 @@
+import { batch, createSignal } from "solid-js";
+import { createStore, produce } from "solid-js/store";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import {
+  chatCancel,
+  chatRuntimeState,
+  chatRespond,
+  type AgentRuntimeState,
+  type AgentInteraction,
+  type InteractionResponse,
+  chatCreateSession,
+  chatDeleteSession,
+  chatListSessions,
+  chatLoadTranscript,
+  chatSend,
+  chatUpdateSession,
+  createWorktree,
+  removeWorktree,
+  onChatEntry,
+  openProject,
+  type Attachment,
+  type ChangedFile,
+  type ChatEntry,
+  type ChatEvent,
+  type PermissionMode,
+  type SessionMeta,
+  type ToolKind,
+  type TurnStatus,
+  type WorktreeRef,
+} from "./ipc";
+import { readPref, writePref } from "./appPrefs";
+import { notifyOnFinish } from "./settings";
+import { requestNotificationPermissionIfNeeded, sendNativeNotification } from "./native";
+import { bumpGitStatus, setStore, store } from "./store";
+import { toast, confirmDialog } from "../components/ui";
+import { AGENT_TUNING, type AgentTuning } from "./agentMeta";
+
+// ── View model ───────────────────────────────────────────────────────────────
+
+export interface TextBlock { kind: "text"; text: string }
+export interface ThinkingBlock { kind: "thinking"; text: string; startedAt: number; endedAt?: number }
+export interface ToolBlock {
+  kind: "tool";
+  id: string;
+  toolKind: ToolKind;
+  title: string;
+  input: unknown;
+  status: "running" | "ok" | "error";
+  output?: string;
+}
+export interface InteractionBlock { kind: "interaction"; request: AgentInteraction; outcome?: string }
+export type Block = TextBlock | ThinkingBlock | ToolBlock | InteractionBlock;
+
+export interface UserMessage { id: string; role: "user"; text: string; agentId: string; ts: number; attachments: Attachment[] }
+export interface DividerMessage { id: string; role: "divider"; from: string; to: string; ts: number }
+export interface AssistantMessage {
+  id: string;
+  role: "assistant";
+  agentId: string;
+  model?: string;
+  blocks: Block[];
+  status: "running" | TurnStatus;
+  changedFiles: ChangedFile[];
+  contextUsage?: { used: number; size: number; cost: number | null };
+  usage?: { input: number; output: number; cost: number | null };
+  error?: string;
+  startedAt: number;
+  endedAt?: number;
+}
+export type Message = UserMessage | DividerMessage | AssistantMessage;
+
+export interface SessionView {
+  runtime?: AgentRuntimeState;
+  messages: Message[];
+  loaded: boolean;
+  running: boolean;
+}
+
+export interface ComposerPrefs {
+  agentId: string;
+  model: string | null;
+  effort: string | null;
+  mode: PermissionMode;
+  /** Run new sessions in an isolated git worktree. */
+  worktree: boolean;
+}
+
+/** A follow-up typed while a turn was running. */
+export interface QueuedMessage { text: string; attachments: Attachment[] }
+
+interface ChatState {
+  /** Newest activity first. */
+  sessions: SessionMeta[];
+  views: Record<string, SessionView>;
+  /** `null` → the "new session" screen. */
+  activeId: string | null;
+  /** Project the next new session will be created in. */
+  draftProject: string | null;
+  /** Sessions with a finished turn the user hasn't looked at. */
+  attention: Record<string, boolean>;
+  composer: ComposerPrefs;
+  /** Follow-ups typed while a turn was running, sent in order afterwards. */
+  queued: Record<string, QueuedMessage[]>;
+  ready: boolean;
+}
+
+const COMPOSER_KEY = "flipflopper:chat-composer";
+const ACTIVE_KEY = "flipflopper:chat-active-session";
+
+const DEFAULT_COMPOSER: ComposerPrefs = {
+  agentId: "claude",
+  model: null,
+  effort: null,
+  mode: "auto_edit",
+  worktree: false,
+};
+
+export const [chat, setChat] = createStore<ChatState>({
+  sessions: [],
+  views: {},
+  activeId: null,
+  draftProject: null,
+  attention: {},
+  composer: { ...DEFAULT_COMPOSER },
+  queued: {},
+  ready: false,
+});
+
+// ── Selectors ────────────────────────────────────────────────────────────────
+
+export const activeSession = (): SessionMeta | undefined =>
+  chat.sessions.find((s) => s.id === chat.activeId);
+
+export const activeView = (): SessionView | undefined =>
+  chat.activeId ? chat.views[chat.activeId] : undefined;
+
+export const isRunning = (id: string): boolean => chat.views[id]?.running ?? false;
+
+export function projectName(path: string): string {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
+export interface SessionGroup {
+  key: string;
+  label: string;
+  /** Set for project groups (enables the per-group "+" button). */
+  projectPath?: string;
+  sessions: SessionMeta[];
+}
+
+function dateBucket(ts: number): { key: string; label: string; order: number } {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const day = 86_400_000;
+  if (ts >= start.getTime()) return { key: "today", label: "Today", order: 0 };
+  if (ts >= start.getTime() - day) return { key: "yesterday", label: "Yesterday", order: 1 };
+  if (ts >= start.getTime() - 7 * day) return { key: "week", label: "Previous 7 days", order: 2 };
+  return { key: "older", label: "Older", order: 3 };
+}
+
+/** Sidebar groups: pinned sessions first, then by project or by recency.
+ *  `filter` limits to one project; `query` matches titles and project names. */
+export function sessionGroups(opts: {
+  includeArchived: boolean;
+  query: string;
+  group: "project" | "date";
+  filter: string | null;
+}): SessionGroup[] {
+  const q = opts.query.trim().toLowerCase();
+  const visible = chat.sessions.filter((s) => {
+    if (s.archived && !opts.includeArchived) return false;
+    if (opts.filter && s.project_path !== opts.filter) return false;
+    return !q || s.title.toLowerCase().includes(q) || projectName(s.project_path).toLowerCase().includes(q);
+  });
+  const groups: SessionGroup[] = [];
+  const pinned = visible.filter((s) => s.pinned);
+  if (pinned.length > 0) groups.push({ key: "pinned", label: "Pinned", sessions: pinned });
+  const rest = visible.filter((s) => !s.pinned);
+
+  if (opts.group === "date") {
+    const buckets = new Map<string, { order: number; group: SessionGroup }>();
+    for (const s of rest) {
+      const b = dateBucket(s.updated_at);
+      let entry = buckets.get(b.key);
+      if (!entry) { entry = { order: b.order, group: { key: b.key, label: b.label, sessions: [] } }; buckets.set(b.key, entry); }
+      entry.group.sessions.push(s);
+    }
+    groups.push(...[...buckets.values()].sort((a, b) => a.order - b.order).map((e) => e.group));
+  } else {
+    const byProject = new Map<string, SessionGroup>();
+    for (const s of rest) {
+      let g = byProject.get(s.project_path);
+      if (!g) {
+        g = { key: s.project_path, label: projectName(s.project_path), projectPath: s.project_path, sessions: [] };
+        byProject.set(s.project_path, g);
+      }
+      g.sessions.push(s);
+    }
+    groups.push(...byProject.values());
+  }
+  return groups;
+}
+
+/** Distinct projects that have sessions, for the sidebar filter. */
+export function sessionProjects(): { path: string; name: string }[] {
+  const seen = new Map<string, string>();
+  for (const s of chat.sessions) if (!seen.has(s.project_path)) seen.set(s.project_path, projectName(s.project_path));
+  return [...seen].map(([path, name]) => ({ path, name })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// ── Reducer: transcript entries → messages ───────────────────────────────────
+
+function lastAssistant(view: SessionView): AssistantMessage | undefined {
+  for (let i = view.messages.length - 1; i >= 0; i--) {
+    const m = view.messages[i];
+    if (m.role === "assistant") return m;
+  }
+  return undefined;
+}
+
+function applyEvent(view: SessionView, ev: ChatEvent, ts: number) {
+  if (ev.type === "turn_started") {
+    view.messages.push({
+      id: ev.turn_id,
+      role: "assistant",
+      agentId: ev.agent_id,
+      blocks: [],
+      status: "running",
+      changedFiles: [],
+      startedAt: ts,
+    });
+    view.running = true;
+    return;
+  }
+  if (ev.type === "runtime_updated") { view.runtime = ev.state; return; }
+  const a = lastAssistant(view);
+  if (!a) return;
+  // Anything but more thinking ends a thinking block.
+  if (ev.type !== "thinking") {
+    const tail = a.blocks[a.blocks.length - 1];
+    if (tail && tail.kind === "thinking" && tail.endedAt === undefined) tail.endedAt = ts;
+  }
+  switch (ev.type) {
+    case "text": {
+      const tail = a.blocks[a.blocks.length - 1];
+      if (tail && tail.kind === "text") tail.text += ev.delta;
+      else a.blocks.push({ kind: "text", text: ev.delta });
+      break;
+    }
+    case "thinking": {
+      const tail = a.blocks[a.blocks.length - 1];
+      if (tail && tail.kind === "thinking") tail.text += ev.delta;
+      else a.blocks.push({ kind: "thinking", text: ev.delta, startedAt: ts });
+      break;
+    }
+    case "tool_call":
+      a.blocks.push({
+        kind: "tool", id: ev.id, toolKind: ev.kind, title: ev.title, input: ev.input, status: "running",
+      });
+      break;
+    case "interaction_requested":
+      a.blocks.push({ kind: "interaction", request: ev.request });
+      break;
+    case "interaction_resolved": {
+      const block = a.blocks.find((b): b is InteractionBlock => b.kind === "interaction" && b.request.id === ev.id);
+      if (block) block.outcome = ev.outcome;
+      if (view.runtime) view.runtime.pending = view.runtime.pending.filter((p) => p.id !== ev.id);
+      break;
+    }
+    case "tool_updated": {
+      const block = a.blocks.find((b): b is ToolBlock => b.kind === "tool" && b.id === ev.id);
+      if (block) { if (ev.title !== null) block.title = ev.title; if (ev.input !== null) block.input = ev.input; if (ev.kind) block.toolKind = ev.kind; }
+      break;
+    }
+    case "tool_result": {
+      const block = a.blocks.find((b): b is ToolBlock => b.kind === "tool" && b.id === ev.id);
+      if (block) {
+        block.status = ev.ok ? "ok" : "error";
+        block.output = ev.output;
+      }
+      break;
+    }
+    case "model":
+      a.model = ev.name;
+      break;
+    case "context_usage":
+      a.contextUsage = { used: ev.used, size: ev.size, cost: ev.cost_usd };
+      break;
+    case "usage":
+      a.usage = { input: ev.input_tokens, output: ev.output_tokens, cost: ev.cost_usd };
+      break;
+    case "error":
+      a.error = a.error ? `${a.error}\n${ev.message}` : ev.message;
+      break;
+    case "turn_ended":
+      a.status = ev.status;
+      a.changedFiles = ev.changed_files;
+      a.endedAt = ts;
+      for (const b of a.blocks) {
+        if (b.kind === "tool" && b.status === "running") b.status = ev.status === "done" ? "ok" : "error";
+      }
+      view.running = false;
+      if (view.runtime) { view.runtime.pending = []; view.runtime.active_turn_id = null; }
+      break;
+    default:
+      break;
+  }
+}
+
+export function applyEntry(view: SessionView, entry: ChatEntry) {
+  switch (entry.kind) {
+    case "user":
+      view.messages.push({ id: `u-${entry.ts}-${view.messages.length}`, role: "user", text: entry.text, agentId: entry.agent_id, ts: entry.ts, attachments: entry.attachments ?? [] });
+      break;
+    case "divider":
+      view.messages.push({ id: `d-${entry.ts}-${view.messages.length}`, role: "divider", from: entry.from, to: entry.to, ts: entry.ts });
+      break;
+    case "event":
+      applyEvent(view, entry.event, entry.ts);
+      break;
+  }
+}
+
+/** Fold a whole transcript into messages (used when opening a session). */
+export function reduceTranscript(entries: ChatEntry[], runtime?: AgentRuntimeState): SessionView {
+  const view: SessionView = { messages: [], loaded: true, running: false };
+  for (const e of entries) applyEntry(view, e);
+  const a = lastAssistant(view);
+  // A webview reload can reconnect to a still-running native process. The
+  // persisted request alone is never authority to reactivate a responder.
+  if (runtime?.connected && runtime.active_turn_id === a?.id && a?.status === "running") {
+    view.runtime = runtime;
+    return view;
+  }
+  // A transcript that ends mid-turn without a live process is interrupted.
+  if (a && a.status === "running") {
+    a.status = "cancelled";
+    for (const b of a.blocks) if (b.kind === "tool" && b.status === "running") b.status = "error";
+  }
+  view.running = false;
+  view.runtime = runtime ?? view.runtime;
+  if (view.runtime) { view.runtime.pending = []; view.runtime.active_turn_id = null; }
+  return view;
+}
+
+// ── Subscriptions ────────────────────────────────────────────────────────────
+
+type TurnEndHandler = (sessionId: string, status: TurnStatus) => void;
+const turnEndHandlers = new Set<TurnEndHandler>();
+
+/** Be told whenever any session finishes a turn (used by the orchestrator). */
+export function onTurnEnd(handler: TurnEndHandler): () => void {
+  turnEndHandlers.add(handler);
+  return () => turnEndHandlers.delete(handler);
+}
+
+const unlisteners = new Map<string, UnlistenFn>();
+const subscribing = new Map<string, Promise<void>>();
+
+function subscribe(id: string): Promise<void> {
+  if (unlisteners.has(id)) return Promise.resolve();
+  const pending = subscribing.get(id);
+  if (pending) return pending;
+  const p = onChatEntry(id, (entry) => handleLiveEntry(id, entry))
+    .then((un) => { unlisteners.set(id, un); })
+    .finally(() => { subscribing.delete(id); });
+  subscribing.set(id, p);
+  return p;
+}
+
+function unsubscribe(id: string) {
+  unlisteners.get(id)?.();
+  unlisteners.delete(id);
+}
+
+// Streams like agy's emit many tiny deltas; applying them one by one re-renders
+// the transcript per delta. Buffer per session and flush once per frame.
+const pendingEntries = new Map<string, ChatEntry[]>();
+let flushScheduled = false;
+let flushFrame: number | undefined;
+let flushTimer: ReturnType<typeof setTimeout> | undefined;
+
+const loadingEntries = new Map<string, ChatEntry[]>();
+function handleLiveEntry(id: string, entry: ChatEntry) {
+  const loading = loadingEntries.get(id);
+  if (loading) { loading.push(entry); return; }
+  if (!chat.views[id]) return;
+  const queue = pendingEntries.get(id);
+  if (queue) queue.push(entry);
+  else pendingEntries.set(id, [entry]);
+  if (!flushScheduled) {
+    flushScheduled = true;
+    flushFrame = requestAnimationFrame(flushLiveEntries);
+    // WKWebView can suspend paint frames while its window is occluded. Turn
+    // completion, queues and requests must keep progressing in the background.
+    flushTimer = setTimeout(flushLiveEntries, 50);
+  }
+}
+
+function flushLiveEntries() {
+  if (!flushScheduled) return;
+  flushScheduled = false;
+  if (flushFrame !== undefined) cancelAnimationFrame(flushFrame);
+  clearTimeout(flushTimer);
+  flushFrame = undefined; flushTimer = undefined;
+  const batches = [...pendingEntries];
+  pendingEntries.clear();
+  for (const [id, entries] of batches) {
+    if (!chat.views[id]) continue;
+    batch(() => {
+      setChat("views", id, produce((view) => { for (const e of entries) applyEntry(view, e); }));
+      const last = entries[entries.length - 1];
+      setChat("sessions", (s) => s.id === id, "updated_at", last.kind === "event" ? last.ts : Date.now());
+    });
+    for (const e of entries) {
+      if (e.kind !== "event") continue;
+      if (e.event.type === "turn_ended") void onTurnEnded(id, e.event.status);
+      if (e.event.type === "runtime_updated") {
+        const nativeMode = e.event.state.current_mode;
+        const mode: PermissionMode | undefined = nativeMode === "plan" ? "plan" : nativeMode === "bypassPermissions" ? "full" : ["acceptEdits", "agent", "code"].includes(nativeMode ?? "") ? "auto_edit" : undefined;
+        // Cursor Full access uses agent mode with app-managed permission
+        // responses. Preserve that explicit policy unless a plan was approved.
+        if (mode && !(mode === "auto_edit" && chat.composer.mode === "full")) {
+          setChat("sessions", (s) => s.id === id, "mode", mode);
+          if (chat.activeId === id) setChat("composer", "mode", mode);
+        }
+      }
+    }
+  }
+}
+
+async function onTurnEnded(id: string, status: TurnStatus) {
+  await refreshSessions();
+  bumpGitStatus();
+  for (const handler of turnEndHandlers) handler(id, status);
+
+  const meta = chat.sessions.find((s) => s.id === id);
+  if (status !== "cancelled" && (chat.activeId !== id || !document.hasFocus())) {
+    setChat("attention", id, true);
+    if (notifyOnFinish() && (await requestNotificationPermissionIfNeeded())) {
+      const verb = status === "error" ? "hit an error" : "finished";
+      void sendNativeNotification(`${meta?.title || "Session"} ${verb}`, meta ? projectName(meta.project_path) : undefined);
+    }
+  }
+
+  const next = chat.queued[id]?.[0];
+  if (next && status === "done") {
+    setChat("queued", id, (q) => q.slice(1));
+    await sendTurn(id, next.text, next.attachments);
+  }
+  // After a failed or cancelled turn the queue is kept, not auto-sent: the
+  // transcript offers each follow-up as a chip to send or discard.
+}
+
+/** Send a queued follow-up right now (after a failed/cancelled turn). */
+export async function sendQueuedNow(id: string, index: number) {
+  const item = chat.queued[id]?.[index];
+  if (!item || isRunning(id)) return;
+  setChat("queued", id, (q) => q.filter((_, i) => i !== index));
+  await sendTurn(id, item.text, item.attachments);
+}
+
+// ── Loading ──────────────────────────────────────────────────────────────────
+
+export async function refreshSessions() {
+  try {
+    const list = await chatListSessions();
+    // The backend reports "idle" for sessions it can't see running; trust the
+    // live view for those that are.
+    setChat("sessions", list.map((s) => (isRunning(s.id) ? { ...s, status: "running" } : s)));
+  } catch (e) {
+    console.error("Failed to list chat sessions:", e);
+  }
+}
+
+async function ensureLoaded(id: string) {
+  if (chat.views[id]?.loaded) {
+    await subscribe(id);
+    return;
+  }
+  loadingEntries.set(id, []);
+  let entries: ChatEntry[];
+  try {
+    await subscribe(id);
+    entries = await chatLoadTranscript(id);
+    const runtime = await chatRuntimeState(id);
+    // The subscription overlaps both snapshots. Consume matching entries by
+    // count so identical chunks within one millisecond remain distinct.
+    const earlier = new Map<string, number>();
+    for (const entry of entries) { const key = JSON.stringify(entry); earlier.set(key, (earlier.get(key) ?? 0) + 1); }
+    for (const entry of loadingEntries.get(id) ?? []) {
+      const key = JSON.stringify(entry), count = earlier.get(key) ?? 0;
+      if (count) earlier.set(key, count - 1); else entries.push(entry);
+    }
+    setChat("views", id, reduceTranscript(entries, runtime));
+  } finally { loadingEntries.delete(id); }
+}
+
+export async function initChat() {
+  const [composer, activeId] = await Promise.all([
+    readPref<ComposerPrefs>(COMPOSER_KEY, DEFAULT_COMPOSER, () => DEFAULT_COMPOSER),
+    readPref<string | null>(ACTIVE_KEY, null, () => null),
+  ]);
+  setChat("composer", { ...DEFAULT_COMPOSER, ...composer });
+  await refreshSessions();
+  setChat("ready", true);
+  if (activeId && chat.sessions.some((s) => s.id === activeId)) {
+    await selectSession(activeId);
+  } else if (store.currentProject) {
+    setChat("draftProject", store.currentProject.path);
+  }
+}
+
+// ── Navigation ───────────────────────────────────────────────────────────────
+
+function syncStoreToSession(meta: SessionMeta | undefined) {
+  setStore("activeCwd", meta?.cwd ?? null);
+  setStore(
+    "activeSessionWorktree",
+    meta?.worktree
+      ? { path: meta.worktree.path, branch: meta.worktree.branch, sourceBranch: meta.worktree.source_branch }
+      : undefined,
+  );
+}
+
+export async function selectSession(id: string) {
+  const meta = chat.sessions.find((s) => s.id === id);
+  if (!meta) return;
+  setChat({ activeId: id, draftProject: null });
+  setChat("attention", id, false);
+  writePref(ACTIVE_KEY, id);
+  pushNav(id);
+  syncStoreToSession(meta);
+  setChat("composer", {
+    agentId: meta.agent_id,
+    model: meta.model,
+    effort: meta.effort,
+    mode: meta.mode,
+  });
+  setStore("review", null);
+  try {
+    if (store.currentProject?.path !== meta.project_path) {
+      const info = await openProject(meta.project_path);
+      setStore("currentProject", info);
+    }
+    await ensureLoaded(id);
+  } catch (e) {
+    toast(`Couldn't open session: ${String(e)}`, "error");
+  }
+}
+
+/** Show the "new session" screen, optionally bound to a project. */
+export function startNewSession(projectPath?: string) {
+  setChat({ activeId: null, draftProject: projectPath ?? chat.draftProject ?? store.currentProject?.path ?? null });
+  writePref(ACTIVE_KEY, null);
+  pushNav(null);
+  syncStoreToSession(undefined);
+  setStore("review", null);
+  const path = chat.draftProject;
+  if (path && store.currentProject?.path !== path) {
+    void openProject(path)
+      .then((info) => {
+        setStore("currentProject", info);
+      })
+      .catch((e) => toast(`Couldn't open project: ${String(e)}`, "error"));
+  }
+}
+
+/** Point the next new session at a (possibly just-opened) project. */
+export function setDraftProject(project: { path: string }) {
+  setChat("draftProject", project.path);
+  if (chat.activeId) startNewSession(project.path);
+  else syncStoreToSession(undefined);
+}
+
+// ── Composer preferences ─────────────────────────────────────────────────────
+
+export function setComposer(patch: Partial<ComposerPrefs>) {
+  setChat("composer", patch);
+  const id = chat.activeId;
+  if (id) {
+    const sessionPatch: { model?: string | null; effort?: string | null; mode?: PermissionMode; agent_id?: string } = {};
+    if ("model" in patch) sessionPatch.model = patch.model ?? null;
+    if ("effort" in patch) sessionPatch.effort = patch.effort ?? null;
+    if (patch.mode) sessionPatch.mode = patch.mode;
+    if (patch.agentId) sessionPatch.agent_id = patch.agentId;
+    if (Object.keys(sessionPatch).length > 0) {
+      void chatUpdateSession(id, sessionPatch).then((meta) => setChat("sessions", (s) => s.id === id, meta)).catch(() => {});
+    }
+  } else {
+    writePref(COMPOSER_KEY, { ...chat.composer });
+  }
+}
+
+/** Switch the agent; its model/effort overrides don't carry across agents. */
+export function setComposerAgent(agentId: string) {
+  if (chat.composer.agentId === agentId) return;
+  setComposer({ agentId, model: null, effort: null });
+}
+
+// ── Sending ──────────────────────────────────────────────────────────────────
+
+async function sendTurn(sessionId: string, text: string, attachments: Attachment[] = [], recoverContext = false): Promise<boolean> {
+  const c = chat.composer;
+  try {
+    await chatSend({
+      session_id: sessionId,
+      recover_context: recoverContext,
+      prompt: text,
+      agent_id: c.agentId,
+      model: c.model,
+      effort: c.effort,
+      mode: c.mode,
+      attachments,
+    });
+    void refreshSessions();
+    return true;
+  } catch (e) {
+    const runtime = await chatRuntimeState(sessionId).catch(() => undefined);
+    if (runtime) setChat("views", sessionId, "runtime", runtime);
+    if (!recoverContext && String(e).includes("NATIVE_SESSION_UNAVAILABLE") && await confirmDialog("The CLI cannot load its saved session. Continue in a new native conversation with this transcript as context?", "Continue from transcript")) {
+      return sendTurn(sessionId, text, attachments, true);
+    }
+    toast(String(e), "error");
+    return false;
+  }
+}
+
+/** Re-run the last user prompt of a session, on the agent that handled it. */
+export async function retryLastTurn(sessionId: string) {
+  if (isRunning(sessionId)) return;
+  const view = chat.views[sessionId];
+  if (!view) return;
+  const messages = view.messages;
+  let prompt: string | undefined;
+  let agentId: string | undefined;
+  let attachments: Attachment[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "user") { prompt = m.text; attachments = [...m.attachments]; break; }
+    if (m.role === "assistant" && !agentId) agentId = m.agentId;
+  }
+  if (!prompt) return;
+  if (agentId && agentId !== chat.composer.agentId) setComposerAgent(agentId);
+  await sendTurn(sessionId, prompt, attachments);
+}
+
+/** Send from the composer: creates the session on first use. Returns false if
+ *  nothing was sent (the composer keeps its text). */
+export async function submitPrompt(text: string, attachments: Attachment[] = []): Promise<boolean> {
+  const prompt = text.trim();
+  if (!prompt && attachments.length === 0) return false;
+  const c = chat.composer;
+
+  let id = chat.activeId;
+  if (id) {
+    if (isRunning(id)) {
+      setChat("queued", id, (q) => [...(q ?? []), { text: prompt, attachments }]);
+      toast("Queued — it will send when the current turn finishes");
+      return true;
+    }
+    return sendTurn(id, prompt, attachments);
+  }
+
+  const projectPath = chat.draftProject ?? store.currentProject?.path;
+  if (!projectPath) {
+    toast("Choose a project first", "error");
+    return false;
+  }
+  let worktree: WorktreeRef | undefined;
+  if (c.worktree) {
+    try {
+      const info = await createWorktree(projectPath, c.agentId);
+      worktree = { path: info.worktree_path, branch: info.branch, source_branch: info.source_branch };
+    } catch (e) {
+      toast(`Couldn't create worktree: ${String(e)}`, "error");
+      return false;
+    }
+  }
+  try {
+    await startSessionTurn({
+      projectPath,
+      worktree,
+      agentId: c.agentId,
+      model: c.model,
+      effort: c.effort,
+      mode: c.mode,
+      prompt,
+      attachments,
+      activate: true,
+    });
+    writePref(COMPOSER_KEY, { ...chat.composer });
+    return true;
+  } catch (e) {
+    if (worktree && !chat.sessions.some((s) => s.worktree?.path === worktree.path)) void removeWorktree(projectPath, worktree.path, worktree.branch, true).catch(() => {});
+    toast(`Couldn't start session: ${String(e)}`, "error");
+    return false;
+  }
+}
+
+export interface StartTurnOptions {
+  projectPath: string;
+  worktree?: WorktreeRef;
+  agentId: string;
+  model?: string | null;
+  effort?: string | null;
+  mode: PermissionMode;
+  prompt: string;
+  parentId?: string;
+  /** Carry another session's conversation into the first turn. */
+  contextFrom?: string;
+  attachments?: Attachment[];
+  title?: string;
+  /** Switch the UI to the new session. */
+  activate?: boolean;
+}
+
+/** Create a session and run its first turn. Throws on failure; the session is
+ *  left in place (with the error in its transcript) if only the send fails. */
+export async function startSessionTurn(o: StartTurnOptions): Promise<SessionMeta> {
+  const meta = await chatCreateSession({
+    project_path: o.projectPath,
+    cwd: o.worktree?.path ?? o.projectPath,
+    worktree: o.worktree,
+    agent_id: o.agentId,
+    model: o.model,
+    effort: o.effort,
+    mode: o.mode,
+    parent_id: o.parentId,
+    title: o.title,
+  });
+  setChat("sessions", (s) => [meta, ...s]);
+  setChat("views", meta.id, { messages: [], loaded: true, running: false });
+  await subscribe(meta.id);
+  if (o.activate) {
+    setChat({ activeId: meta.id, draftProject: null });
+    writePref(ACTIVE_KEY, meta.id);
+    pushNav(meta.id);
+    syncStoreToSession(meta);
+  }
+  try {
+    await chatSend({
+      session_id: meta.id,
+      prompt: o.prompt,
+      agent_id: o.agentId,
+      model: o.model,
+      effort: o.effort,
+      mode: o.mode,
+      context_from: o.contextFrom,
+      attachments: o.attachments,
+    });
+  } catch (e) {
+    const runtime = await chatRuntimeState(meta.id).catch(() => undefined);
+    // Keep a prepared native session so invalid picker values can be corrected
+    // using its advertised catalog without creating another CLI conversation.
+    if (runtime?.connected) {
+      setChat("views", meta.id, "runtime", runtime);
+      void refreshSessions();
+      throw e;
+    }
+    // The first turn never started: don't leave an empty session behind.
+    unsubscribe(meta.id);
+    await chatDeleteSession(meta.id).catch(() => {});
+    setChat("sessions", (s) => s.filter((x) => x.id !== meta.id));
+    setChat("views", produce((v) => { delete v[meta.id]; }));
+    if (o.activate) startNewSession(o.projectPath);
+    throw e;
+  }
+  void refreshSessions();
+  return meta;
+}
+
+export function cancelTurn() {
+  const id = chat.activeId;
+  if (id) void chatCancel(id);
+}
+
+export function dropQueued(id: string, index: number) {
+  setChat("queued", id, (q) => (q ?? []).filter((_, i) => i !== index));
+}
+
+// ── Session management ───────────────────────────────────────────────────────
+
+export async function renameSession(id: string, title: string) {
+  const next = title.trim();
+  if (!next) return;
+  try {
+    const meta = await chatUpdateSession(id, { title: next });
+    setChat("sessions", (s) => s.id === id, meta);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+export async function archiveSession(id: string, archived: boolean) {
+  try {
+    const meta = await chatUpdateSession(id, { archived });
+    setChat("sessions", (s) => s.id === id, meta);
+    if (archived && chat.activeId === id) startNewSession(meta.project_path);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+export async function deleteSession(id: string) {
+  try {
+    await chatDeleteSession(id);
+  } catch (e) {
+    toast(String(e), "error");
+    return;
+  }
+  unsubscribe(id);
+  const wasActive = chat.activeId === id;
+  const project = chat.sessions.find((s) => s.id === id)?.project_path;
+  setChat("sessions", (s) => s.filter((x) => x.id !== id));
+  setChat("views", produce((v) => { delete v[id]; }));
+  setChat("queued", produce((q) => { delete q[id]; }));
+  if (wasActive) startNewSession(project);
+}
+
+/** After a worktree is merged or discarded: point the session back at the
+ *  project checkout. */
+export async function detachWorktree(id: string) {
+  const meta = chat.sessions.find((s) => s.id === id);
+  if (!meta) return;
+  try {
+    const updated = await chatUpdateSession(id, { cwd: meta.project_path, worktree: null });
+    setChat("sessions", (s) => s.id === id, updated);
+    if (chat.activeId === id) syncStoreToSession(updated);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+/** Stop the running turn of a specific session. */
+export function cancelSession(id: string, force = false): Promise<void> {
+  return chatCancel(id, force);
+}
+
+/** Sessions with a turn in flight. */
+export function runningSessionCount(): number {
+  return chat.sessions.filter((s) => isRunning(s.id)).length;
+}
+
+/** Installed agents that support one-shot headless prompts (commit messages
+ *  and the like), the composer's current agent first. */
+export function headlessAgents() {
+  return store.agents
+    .filter((a) => a.installed && a.headless_supported)
+    .sort((a, b) => Number(b.id === chat.composer.agentId) - Number(a.id === chat.composer.agentId));
+}
+
+/** Order sessions so flow-spawned children follow their parent; `depth` is 1
+ *  for a child whose parent is in the same list. */
+export function nestSessions(list: SessionMeta[]): { session: SessionMeta; depth: number }[] {
+  const ids = new Set(list.map((s) => s.id));
+  const children = new Map<string, SessionMeta[]>();
+  const roots: SessionMeta[] = [];
+  for (const s of list) {
+    if (s.parent_id && ids.has(s.parent_id)) {
+      children.set(s.parent_id, [...(children.get(s.parent_id) ?? []), s]);
+    } else {
+      roots.push(s);
+    }
+  }
+  const out: { session: SessionMeta; depth: number }[] = [];
+  const walk = (s: SessionMeta, depth: number) => {
+    out.push({ session: s, depth });
+    for (const c of children.get(s.id) ?? []) walk(c, 1);
+  };
+  roots.forEach((r) => walk(r, 0));
+  return out;
+}
+
+export async function pinSession(id: string, pinned: boolean) {
+  try {
+    const meta = await chatUpdateSession(id, { pinned });
+    setChat("sessions", (s) => s.id === id, meta);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+// ── Back / forward history ───────────────────────────────────────────────────
+
+const navStack: (string | null)[] = [];
+let navIndex = -1;
+let navigating = false;
+const [navState, setNavState] = createSignal({ back: false, forward: false });
+export { navState };
+
+function syncNavState() {
+  setNavState({ back: navIndex > 0, forward: navIndex >= 0 && navIndex < navStack.length - 1 });
+}
+
+/** Record a visit (a session id, or `null` for the new-session screen). */
+function pushNav(id: string | null) {
+  if (navigating || navStack[navIndex] === id) return;
+  navStack.splice(navIndex + 1);
+  navStack.push(id);
+  if (navStack.length > 100) navStack.shift();
+  navIndex = navStack.length - 1;
+  syncNavState();
+}
+
+async function navGo(dir: 1 | -1) {
+  let i = navIndex + dir;
+  // Skip sessions that were deleted since.
+  while (i >= 0 && i < navStack.length) {
+    const id = navStack[i];
+    if (id === null || chat.sessions.some((s) => s.id === id)) break;
+    i += dir;
+  }
+  if (i < 0 || i >= navStack.length) return;
+  navIndex = i;
+  navigating = true;
+  try {
+    const id = navStack[i];
+    if (id) await selectSession(id);
+    else startNewSession();
+  } finally {
+    navigating = false;
+    syncNavState();
+  }
+}
+
+export const navBack = () => void navGo(-1);
+export const navForward = () => void navGo(1);
+
+export function pendingInputCount(sessionId: string): number {
+  const runtime = chat.views[sessionId]?.runtime;
+  return runtime?.connected ? runtime.pending.length : 0;
+}
+export function interactionIsLive(sessionId: string, requestId: string): boolean {
+  const view = chat.views[sessionId];
+  return !!view?.running && !!view.runtime?.connected && view.runtime.pending.some((p) => p.id === requestId);
+}
+export async function respondToAgent(sessionId: string, request: AgentInteraction, response: InteractionResponse): Promise<boolean> {
+  try {
+    await chatRespond(sessionId, request.turn_id, request.id, response);
+    return true;
+  } catch (error) { toast(String(error), "error"); return false; }
+}
+export function agentTuning(agentId: string): AgentTuning | undefined {
+  if (agentId !== "claude" && agentId !== "cursor") return AGENT_TUNING[agentId];
+  const active = chat.activeId ? chat.views[chat.activeId]?.runtime : undefined;
+  const runtime = active?.agent_id === agentId ? active : Object.values(chat.views).map((v) => v.runtime).find((r) => r?.agent_id === agentId && r.config_options.length > 0);
+  const choices = (category: string) => {
+    const c = runtime?.config_options.find((c) => c.category === category || c.id === category || (category === "thought_level" && c.id === "effort"));
+    return (c?.options ?? []).flatMap((o) => o.options ?? (o.value ? [{ value: o.value, name: o.name ?? o.value }] : [])).map((o) => ({ id: o.value, label: o.name }));
+  };
+  return { models: choices("model"), efforts: choices("thought_level") };
+}
+export function nativeCommands(): { name: string; description: string }[] {
+  const runtime = chat.activeId ? chat.views[chat.activeId]?.runtime : undefined;
+  return runtime?.agent_id === chat.composer.agentId ? runtime.commands : [];
+}

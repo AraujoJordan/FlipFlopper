@@ -1,5 +1,7 @@
+import { Icon } from "../shell/Icon";
 import { Component, For, Show, createSignal, createEffect } from "solid-js";
-import { store, bumpGitStatus, rankContinueCandidates, updateCurrentBranch, effectiveRoot } from "../../lib/store";
+import { store, bumpGitStatus, updateCurrentBranch, effectiveRoot } from "../../lib/store";
+import { headlessAgents } from "../../lib/chat";
 import {
   gitPush, squashUnpushed, generateCommitMessage,
   type AgentInfo, type CommitEntry,
@@ -21,17 +23,6 @@ export function openSquashPushDialog(s: SquashPushState) {
   setState(s);
 }
 
-/** Sparkle mark for the AI generate action. */
-const SparkleIcon: Component<{ size?: number }> = (props) => (
-  <svg
-    width={props.size ?? 13} height={props.size ?? 13} viewBox="0 0 24 24"
-    fill="currentColor" style={{ "flex-shrink": "0" }}
-  >
-    <path d="M9 3l1.4 3.9L14.3 8.3l-3.9 1.4L9 13.6 7.6 9.7 3.7 8.3l3.9-1.4z" />
-    <path d="M17.5 13l.85 2.35L20.7 16.2l-2.35.85L17.5 19.4l-.85-2.35L14.3 16.2l2.35-.85z" />
-  </svg>
-);
-
 export const SquashPushDialogHost: Component = () => {
   const [name, setName] = createSignal("");
   const [pickerOpen, setPickerOpen] = createSignal(false);
@@ -47,9 +38,7 @@ export const SquashPushDialogHost: Component = () => {
     if (s) setName(s.commits[0]?.message ?? "");
   });
 
-  const candidates = (): AgentInfo[] =>
-    rankContinueCandidates(effectiveRoot() ?? "", "", store.agents, false)
-      .filter((agent) => agent.headless_supported);
+  const candidates = (): AgentInfo[] => headlessAgents();
 
   const selectedAgent = (): AgentInfo | undefined => {
     const id = selectedAgentId();
@@ -155,9 +144,7 @@ export const SquashPushDialogHost: Component = () => {
                 "border-radius": "var(--radius-md)",
                 background: "var(--surface-4)", color: "var(--accent)",
               }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M12 19V5M5 12l7-7 7 7" />
-                </svg>
+                <Icon name="arrowUp" size={14} />
               </div>
               <div style={{ "font-size": "14px", color: "var(--fg-default)", "font-weight": "600" }}>
                 {s().isPublish ? "Publish branch to origin" : "Push to origin"}
@@ -241,9 +228,7 @@ export const SquashPushDialogHost: Component = () => {
                     <Show when={selectedAgent()}>
                       {(agent) => <AgentLogo agentId={agent().id} icon={agent().icon} name={agent().name} size={15} radius={4} />}
                     </Show>
-                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="var(--fg-subtle)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M6 9l6 6 6-6" />
-                    </svg>
+                    <Icon name="chevronDown" size={9} style={{ color: "var(--fg-subtle)" }} />
                   </button>
 
                   <button
@@ -257,7 +242,7 @@ export const SquashPushDialogHost: Component = () => {
                       cursor: canGenerate() ? "pointer" : "default",
                     }}
                   >
-                    <Show when={generating()} fallback={<SparkleIcon />}>
+                    <Show when={generating()} fallback={<Icon name="sparkle" size={13} />}>
                       <Spinner size={12} />
                     </Show>
                     {generating() ? "Generating…" : "Generate with AI"}
@@ -271,9 +256,7 @@ export const SquashPushDialogHost: Component = () => {
                         <AgentLogo agentId={agent.id} icon={agent.icon} name={agent.name} size={16} radius={4} />
                         <span style={{ flex: "1", "font-size": "12.5px" }}>{agent.name}</span>
                         <Show when={selectedAgent()?.id === agent.id}>
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M20 6L9 17l-5-5" />
-                          </svg>
+                          <Icon name="check" size={13} style={{ color: "var(--accent)" }} />
                         </Show>
                       </MenuItem>
                     )}

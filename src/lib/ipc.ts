@@ -11,8 +11,9 @@ export interface AgentInfo {
   installed: boolean;
   version: string | null;
   binary_path: string | null;
-  yolo_supported: boolean;
   headless_supported: boolean;
+  /** Can run as a chat session (see `chat` in the Rust backend). */
+  chat_supported: boolean;
 }
 
 export interface ProjectInfo {
@@ -28,24 +29,11 @@ export interface FileEntry {
   is_dir: boolean;
 }
 
-export interface TextMatch {
-  rel_path: string;
-  line: number;
-  text: string;
-  col: number;
-  len: number;
-}
-
 export interface PromptSkill {
   name: string;
   path: string;
   source: string;
   description: string | null;
-}
-
-export interface FileStatus {
-  path: string;
-  status: string;
 }
 
 export interface StatusEntry {
@@ -174,15 +162,6 @@ export interface SingleInstancePayload {
 
 // ── PTY ──────────────────────────────────────────────────────────────────────
 
-export const spawnAgent = (
-  agentId: string,
-  projectPath: string,
-  yolo = false,
-  extraArgs?: string[],
-  cwd?: string,
-): Promise<string> =>
-  invoke("spawn_agent", { agentId, projectPath, yolo, extraArgs: extraArgs ?? null, cwd: cwd ?? null });
-
 export const ptyInput = (sessionId: string, data: string): Promise<void> =>
   invoke("pty_input", { sessionId, data });
 
@@ -242,9 +221,6 @@ export const getRecentProjects = (): Promise<ProjectInfo[]> =>
 export const removeRecentProject = (projectPath: string): Promise<void> =>
   invoke("remove_recent_project", { projectPath });
 
-export const getFileTree = (path: string): Promise<FileEntry[]> =>
-  invoke("get_file_tree", { path });
-
 export const searchPromptFiles = (
   projectPath: string,
   query: string,
@@ -252,44 +228,11 @@ export const searchPromptFiles = (
 ): Promise<FileEntry[]> =>
   invoke("search_prompt_files", { projectPath, query, limit });
 
-export const searchProjectText = (
-  projectPath: string,
-  query: string,
-  useRegex: boolean,
-  caseSensitive: boolean,
-  limit: number,
-): Promise<TextMatch[]> =>
-  invoke("search_project_text", { projectPath, query, useRegex, caseSensitive, limit });
-
 export const listPromptSkills = (projectPath: string | null): Promise<PromptSkill[]> =>
   invoke("list_prompt_skills", { projectPath });
 
-export const injectFileRefs = (sessionId: string, paths: string[]): Promise<void> =>
-  invoke("inject_file_refs", { sessionId, paths });
-
-export const createEntry = (parentPath: string, name: string, isDir: boolean): Promise<FileEntry> =>
-  invoke("create_entry", { parentPath, name, isDir });
-
-export const renameEntry = (path: string, newName: string): Promise<FileEntry> =>
-  invoke("rename_entry", { path, newName });
-
-export const deleteEntry = (path: string): Promise<void> =>
-  invoke("delete_entry", { path });
-
-export const duplicateEntry = (path: string): Promise<FileEntry> =>
-  invoke("duplicate_entry", { path });
-
-export const copyEntry = (srcPath: string, destDir: string): Promise<FileEntry> =>
-  invoke("copy_entry", { srcPath, destDir });
-
-export const moveEntry = (srcPath: string, destDir: string): Promise<FileEntry> =>
-  invoke("move_entry", { srcPath, destDir });
-
 export const pickProjectFolder = (): Promise<string | null> =>
   invoke("pick_project_folder");
-
-export const pickPromptFile = (projectPath: string | null, imageOnly = false): Promise<string | null> =>
-  invoke("pick_prompt_file", { projectPath, imageOnly });
 
 export const triggerHaptic = (pattern: "generic" | "alignment" | "level-change" | "levelChange"): Promise<void> =>
   invoke<void>("trigger_haptic", { pattern }).catch((error) => {
@@ -300,249 +243,7 @@ export const triggerHaptic = (pattern: "generic" | "alignment" | "level-change" 
 
 
 
-// ── Editor ───────────────────────────────────────────────────────────────────
-
-export interface FileContent {
-  content: string;
-  is_binary: boolean;
-  too_large: boolean;
-  size: number;
-  modified_ms: number;
-}
-
-export const readFileText = (projectPath: string, relPath: string): Promise<FileContent> =>
-  invoke("read_file_text", { projectPath, relPath });
-
-export const writeFileText = (projectPath: string, relPath: string, content: string): Promise<number> =>
-  invoke("write_file_text", { projectPath, relPath, content });
-
-export const statFile = (projectPath: string, relPath: string): Promise<number> =>
-  invoke("stat_file", { projectPath, relPath });
-
-export interface LspStatus {
-  available: boolean;
-  server: string | null;
-  message: string;
-  tool_id: string | null;
-  completion_trigger_characters: string[];
-  signature_trigger_characters: string[];
-  resolve_provider: boolean;
-  code_action_provider: boolean;
-  code_action_resolve_provider: boolean;
-  rename_provider: boolean;
-  prepare_rename_provider: boolean;
-  formatting_provider: boolean;
-}
-
-export interface LspPosition {
-  line: number;
-  character: number;
-}
-
-export interface LspRange {
-  start: LspPosition;
-  end: LspPosition;
-}
-
-export interface LspCompletion {
-  label: string;
-  detail: string | null;
-  kind: number | null;
-  insert_text: string;
-  sort_text: string | null;
-  filter_text: string | null;
-  documentation: string | null;
-  replace_start: LspPosition | null;
-  replace_range: LspRange | null;
-  insert_text_format: number;
-  additional_text_edits: LspTextEdit[];
-  command: unknown | null;
-  raw: unknown;
-}
-
-export interface LspCompletionDetail {
-  detail: string | null;
-  documentation: string | null;
-  completion: LspCompletion | null;
-}
-
-export interface LspTextEdit {
-  range: LspRange;
-  new_text: string;
-}
-
-export interface LspFileEdit {
-  path: string;
-  edits: LspTextEdit[];
-}
-
-export interface LspWorkspaceEdit {
-  files: LspFileEdit[];
-}
-
-export interface LspCodeAction {
-  title: string;
-  kind: string | null;
-  is_preferred: boolean;
-  disabled_reason: string | null;
-  raw: unknown;
-}
-
-export interface LspPrepareRename {
-  range: LspRange;
-  placeholder: string | null;
-}
-
-export interface LspSignatureParameter {
-  label: string;
-  documentation: string | null;
-}
-
-export interface LspSignature {
-  label: string;
-  documentation: string | null;
-  parameters: LspSignatureParameter[];
-}
-
-export interface LspSignatureHelp {
-  signatures: LspSignature[];
-  active_signature: number;
-  active_parameter: number;
-}
-
-export interface LspDiagnostic {
-  range: LspRange;
-  severity: number | null;
-  message: string;
-}
-
-export interface LspDefinition {
-  path: string;
-  line: number;
-  character: number;
-}
-
-export const lspStatus = (projectPath: string, relPath: string): Promise<LspStatus> =>
-  invoke("lsp_status", { projectPath, relPath });
-
-export const lspOpenDocument = (
-  projectPath: string,
-  relPath: string,
-  content: string,
-): Promise<LspStatus> =>
-  invoke("lsp_open_document", { projectPath, relPath, content });
-
-export const lspChangeDocument = (
-  projectPath: string,
-  relPath: string,
-  content: string,
-): Promise<LspStatus> =>
-  invoke("lsp_change_document", { projectPath, relPath, content });
-
-export const lspCloseDocument = (projectPath: string, relPath: string): Promise<void> =>
-  invoke("lsp_close_document", { projectPath, relPath });
-
-export const lspCompletion = (
-  projectPath: string,
-  relPath: string,
-  line: number,
-  character: number,
-  triggerCharacter?: string,
-): Promise<LspCompletion[]> =>
-  invoke("lsp_completion", { projectPath, relPath, line, character, triggerCharacter: triggerCharacter ?? null });
-
-export const lspCompletionResolve = (
-  projectPath: string,
-  relPath: string,
-  item: unknown,
-): Promise<LspCompletionDetail> =>
-  invoke("lsp_completion_resolve", { projectPath, relPath, item });
-
-export const lspSignatureHelp = (
-  projectPath: string,
-  relPath: string,
-  line: number,
-  character: number,
-): Promise<LspSignatureHelp | null> =>
-  invoke("lsp_signature_help", { projectPath, relPath, line, character });
-
-export const lspHover = (
-  projectPath: string,
-  relPath: string,
-  line: number,
-  character: number,
-): Promise<string | null> =>
-  invoke("lsp_hover", { projectPath, relPath, line, character });
-
-export const lspDefinition = (
-  projectPath: string,
-  relPath: string,
-  line: number,
-  character: number,
-): Promise<LspDefinition | null> =>
-  invoke("lsp_definition", { projectPath, relPath, line, character });
-
-export const lspReferences = (
-  projectPath: string,
-  relPath: string,
-  line: number,
-  character: number,
-): Promise<LspDefinition[]> =>
-  invoke("lsp_references", { projectPath, relPath, line, character });
-
-export const lspCodeActions = (
-  projectPath: string,
-  relPath: string,
-  range: LspRange,
-  diagnostics: LspDiagnostic[],
-): Promise<LspCodeAction[]> =>
-  invoke("lsp_code_actions", { projectPath, relPath, range, diagnostics });
-
-export const lspResolveCodeAction = (
-  projectPath: string,
-  relPath: string,
-  action: unknown,
-): Promise<LspWorkspaceEdit> =>
-  invoke("lsp_resolve_code_action", { projectPath, relPath, action });
-
-export const lspPrepareRename = (
-  projectPath: string,
-  relPath: string,
-  line: number,
-  character: number,
-): Promise<LspPrepareRename | null> =>
-  invoke("lsp_prepare_rename", { projectPath, relPath, line, character });
-
-export const lspRename = (
-  projectPath: string,
-  relPath: string,
-  line: number,
-  character: number,
-  newName: string,
-): Promise<LspWorkspaceEdit> =>
-  invoke("lsp_rename", { projectPath, relPath, line, character, newName });
-
-export const lspFormatDocument = (
-  projectPath: string,
-  relPath: string,
-  tabSize: number,
-  insertSpaces: boolean,
-): Promise<LspWorkspaceEdit> =>
-  invoke("lsp_format_document", { projectPath, relPath, tabSize, insertSpaces });
-
-export const lspDiagnostics = (
-  projectPath: string,
-  relPath: string,
-): Promise<LspDiagnostic[]> =>
-  invoke("lsp_diagnostics", { projectPath, relPath });
-
-export const lspShutdownProject = (projectPath: string): Promise<void> =>
-  invoke("lsp_shutdown_project", { projectPath });
-
 // ── Git ──────────────────────────────────────────────────────────────────────
-
-export const getGitStatus = (projectPath: string): Promise<FileStatus[]> =>
-  invoke("get_git_status", { projectPath });
 
 export const getGitStatusV2 = (projectPath: string): Promise<StatusEntry[]> =>
   invoke("get_git_status_v2", { projectPath });
@@ -633,9 +334,6 @@ export const mergeWorktreeBranch = (projectPath: string, branch: string): Promis
 
 export const removeWorktree = (projectPath: string, worktreePath: string, branch: string, deleteBranch: boolean): Promise<void> =>
   invoke("remove_worktree", { projectPath, worktreePath, branch, deleteBranch });
-
-export const validateWorktree = (projectPath: string, worktreePath: string, branch: string): Promise<boolean> =>
-  invoke("validate_worktree", { projectPath, worktreePath, branch });
 
 export const generateWorktreeCommitMessage = (worktreePath: string, sourceBranch: string, agentId: string): Promise<string> =>
   invoke("generate_worktree_commit_message", { worktreePath, sourceBranch, agentId });
@@ -760,66 +458,7 @@ export const detectValidationTargets = (projectPath: string): Promise<Validation
 export const validateProject = (projectPath: string, targetId?: string): Promise<string> =>
   invoke("validate_project", { projectPath, targetId: targetId ?? null });
 
-// ── Preview ──────────────────────────────────────────────────────────────────
-
-export interface PreviewTarget {
-  name: string;
-  line: number;
-  label: string | null;
-}
-
-export interface PreviewImage {
-  rel_path: string;
-  label: string;
-  target_name: string | null;
-  modified_ms: number;
-  size: number;
-}
-
-export interface LivePreviewSpec {
-  id: string;
-  label: string;
-  /** null → the frontend reuses the existing Run flow (web dev server). */
-  command: string | null;
-}
-
-export interface RecordAction {
-  id: string;
-  label: string;
-  command: string;
-}
-
-export interface ComposeState {
-  module_rel: string;
-  target: "android" | "desktop" | "multiplatform" | "compose";
-  screenshot_setup: "paparazzi" | "roborazzi" | "compose-screenshot" | null;
-  setup_url: string | null;
-  package: string | null;
-}
-
-export interface PreviewInfo {
-  /** "compose" | "swift" | "flutter" | "react-native" | "web" | "generic" | "none" */
-  kind: string;
-  targets: PreviewTarget[];
-  images: PreviewImage[];
-  live: LivePreviewSpec | null;
-  record: RecordAction | null;
-  verify: RecordAction | null;
-  compose: ComposeState | null;
-}
-
-export const detectPreview = (projectPath: string, relPath: string): Promise<PreviewInfo> =>
-  invoke("detect_preview", { projectPath, relPath });
-
-export const readPreviewImage = (projectPath: string, relPath: string): Promise<string> =>
-  invoke("read_preview_image", { projectPath, relPath });
-
-export const startPreviewSession = (
-  projectPath: string,
-  relPath: string,
-  previewId: string,
-): Promise<string> =>
-  invoke("start_preview_session", { projectPath, relPath, previewId });
+// ── Preview / dev-server URL capture ─────────────────────────────────────────
 
 export const getSessionUrl = (sessionId: string): Promise<string | null> =>
   invoke("get_session_url", { sessionId });
@@ -827,23 +466,228 @@ export const getSessionUrl = (sessionId: string): Promise<string | null> =>
 export const onPreviewUrl = (sessionId: string, cb: (url: string) => void): Promise<UnlistenFn> =>
   listen<string>(`preview-url://${sessionId}`, (e) => cb(e.payload));
 
-// ── Handoff ──────────────────────────────────────────────────────────────────
+// ── Chat sessions ────────────────────────────────────────────────────────────
 
-export const continueAgent = (projectPath: string, fromAgent: string, toAgent: string, yolo = false): Promise<string> =>
-  invoke("continue_agent", { projectPath, fromAgent, toAgent, yolo });
+export type PermissionMode = "plan" | "auto_edit" | "full";
+export type ToolKind = "read" | "edit" | "write" | "bash" | "search" | "web" | "todo" | "other";
+export type TurnStatus = "done" | "error" | "cancelled";
+
+export interface ChangedFile {
+  path: string;
+  /** "added" | "modified" | "deleted" */
+  status: string;
+}
+
+export interface AgentOption {
+  id: string; name: string; category?: string; type: string;
+  currentValue?: string | boolean;
+  options?: { value?: string; name?: string; options?: { value: string; name: string }[] }[];
+}
+export interface FormField {
+  type: "string" | "boolean" | "number" | "integer" | "array";
+  title?: string; description?: string; default?: unknown;
+  enum?: string[]; enumNames?: string[]; oneOf?: { const: string; title?: string }[];
+  items?: { type?: string; enum?: string[]; enumNames?: string[]; anyOf?: { const: string; title?: string; description?: string }[] };
+  minimum?: number; maximum?: number; minLength?: number; maxLength?: number; minItems?: number; maxItems?: number;
+}
+export interface AgentInteraction {
+  id: string; turn_id: string; kind: "permission" | "form" | "question" | "plan" | "url"; title: string;
+  payload: {
+    message?: string; url?: string; plan?: string; overview?: string;
+    options?: { optionId: string; name: string; kind: string }[];
+    toolCall?: { title?: string; kind?: string; rawInput?: unknown };
+    requestedSchema?: { type: string; properties: Record<string, FormField>; required?: string[] };
+    questions?: { id: string; prompt: string; options: { id: string; label: string }[]; allowMultiple?: boolean }[];
+  };
+}
+export type InteractionResponse =
+  | { kind: "permission"; option_id: string | null }
+  | { kind: "form"; action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> }
+  | { kind: "question"; action: "accept" | "decline" | "cancel"; answers?: { questionId: string; selectedOptionIds: string[] }[] }
+  | { kind: "plan"; accepted: boolean; reason: string | null; cancelled?: boolean }
+  | { kind: "url"; action: "accept" | "decline" | "cancel" };
+export interface AgentRuntimeState {
+  connected: boolean; active_turn_id?: string | null; agent_id: string; native_session_id: string | null; agent_version: string | null;
+  capabilities: Record<string, unknown> | null; config_options: AgentOption[];
+  modes: { id: string; name: string; description?: string }[];
+  current_mode: string | null; commands: { name: string; description: string }[]; pending: AgentInteraction[];
+}
+export interface AgentRuntimeInfo { available: boolean; detail: string; protocol: string; node_version: string | null; helper_version: string | null }
+
+export type ChatEvent =
+  | { type: "turn_started"; turn_id: string; agent_id: string }
+  | { type: "native_session"; id: string }
+  | { type: "model"; name: string }
+  | { type: "text"; delta: string }
+  | { type: "thinking"; delta: string }
+  | { type: "tool_call"; id: string; kind: ToolKind; title: string; input: unknown }
+  | { type: "runtime_updated"; state: AgentRuntimeState }
+  | { type: "interaction_requested"; request: AgentInteraction }
+  | { type: "interaction_resolved"; id: string; outcome: string }
+  | { type: "tool_updated"; id: string; title: string | null; input: unknown | null; kind?: ToolKind | null }
+  | { type: "tool_result"; id: string; ok: boolean; output: string }
+  | { type: "context_usage"; used: number; size: number; cost_usd: number | null }
+  | { type: "usage"; input_tokens: number; output_tokens: number; cost_usd: number | null }
+  | { type: "turn_ended"; turn_id: string; status: TurnStatus; changed_files: ChangedFile[] }
+  | { type: "error"; message: string };
+
+/** One transcript line; also the payload of the live `chat://{id}` event. */
+export interface Attachment {
+  path: string;
+  name: string;
+  /** "file" | "image" */
+  kind: "file" | "image";
+}
+
+export type ChatEntry =
+  | { kind: "user"; text: string; agent_id: string; ts: number; attachments?: Attachment[] }
+  | { kind: "divider"; from: string; to: string; ts: number }
+  | { kind: "event"; event: ChatEvent; ts: number };
+
+export interface WorktreeRef {
+  path: string;
+  branch: string;
+  source_branch: string;
+}
+
+export interface SessionMeta {
+  id: string;
+  project_path: string;
+  /** Directory agents run in: the project, or the worktree path. */
+  cwd: string;
+  worktree: WorktreeRef | null;
+  title: string;
+  agent_id: string;
+  model: string | null;
+  effort: string | null;
+  mode: PermissionMode;
+  native_ids: Record<string, string>;
+  acp_sessions?: Record<string, { session_id: string; cwd: string }>;
+  entry_count: number;
+  /** "idle" | "running" | "error" */
+  status: string;
+  archived: boolean;
+  pinned: boolean;
+  parent_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NewSessionArgs {
+  project_path: string;
+  cwd?: string;
+  worktree?: WorktreeRef;
+  agent_id: string;
+  model?: string | null;
+  effort?: string | null;
+  mode: PermissionMode;
+  parent_id?: string;
+  title?: string;
+}
+
+export interface SessionPatch {
+  title?: string;
+  archived?: boolean;
+  pinned?: boolean;
+  agent_id?: string;
+  /** `null` clears the model/effort override. */
+  model?: string | null;
+  effort?: string | null;
+  mode?: PermissionMode;
+  cwd?: string;
+  /** `null` detaches the session from its worktree. */
+  worktree?: WorktreeRef | null;
+}
+
+export interface SendArgs {
+  recover_context?: boolean;
+  session_id: string;
+  prompt: string;
+  agent_id: string;
+  model?: string | null;
+  effort?: string | null;
+  mode: PermissionMode;
+  /** First turn only: seed the prompt with another session's conversation. */
+  context_from?: string;
+  attachments?: Attachment[];
+}
+
+export const chatCreateSession = (args: NewSessionArgs): Promise<SessionMeta> =>
+  invoke("chat_create_session", { args });
+
+export const chatListSessions = (): Promise<SessionMeta[]> => invoke("chat_list_sessions");
+
+export const chatLoadTranscript = (sessionId: string): Promise<ChatEntry[]> =>
+  invoke("chat_load_transcript", { sessionId });
+
+/** Starts a turn; resolves with the turn id once the agent process is running.
+ *  Progress arrives via `onChatEntry`. */
+export const chatSend = (args: SendArgs): Promise<string> => invoke("chat_send", { args });
+
+export const chatCancel = (sessionId: string, force = false): Promise<void> => invoke("chat_cancel", { sessionId, force });
+
+export const chatUpdateSession = (sessionId: string, patch: SessionPatch): Promise<SessionMeta> =>
+  invoke("chat_update_session", { sessionId, patch });
+
+export const chatDeleteSession = (sessionId: string): Promise<void> =>
+  invoke("chat_delete_session", { sessionId });
+
+export interface ChatSearchHit {
+  session_id: string;
+  title: string;
+  project_path: string;
+  snippet: string;
+  /** "user" | "assistant" */
+  role: string;
+  ts: number;
+}
+
+/** Store a pasted file (base64 body, no data: prefix) and get its attachment. */
+export const savePastedAttachment = (dataBase64: string, ext: string): Promise<Attachment> =>
+  invoke("save_attachment", { dataBase64, ext });
+
+/** `data:` URL for a small image, or null. */
+export const readImageThumbnail = (path: string): Promise<string | null> =>
+  invoke("read_image_thumbnail", { path });
+
+/** Native multi-file picker. */
+export const pickFiles = (): Promise<Attachment[]> => invoke("pick_files");
+
+export const chatSearch = (query: string, limit: number): Promise<ChatSearchHit[]> =>
+  invoke("chat_search", { query, limit });
+
+/** A CLI session on disk that can be imported as a FlipFlopper session. */
+export interface ImportCandidate {
+  agent_id: string;
+  native_id: string;
+  path: string;
+  cwd: string;
+  title: string;
+  updated_at: number;
+  size: number;
+}
+
+export const chatImportScan = (projectPaths: string[]): Promise<ImportCandidate[]> =>
+  invoke("chat_import_scan", { projectPaths });
+
+export const chatImport = (requests: Omit<ImportCandidate, "size">[]): Promise<SessionMeta[]> =>
+  invoke("chat_import", { requests });
+
+export const onChatEntry = (sessionId: string, cb: (entry: ChatEntry) => void): Promise<UnlistenFn> =>
+  listen<ChatEntry>(`chat://${sessionId}`, (e) => cb(e.payload));
+
+// ── Handoff ──────────────────────────────────────────────────────────────────
 
 // ── Native menu ──────────────────────────────────────────────────────────────
 
 export interface NativeMenuState {
   hasProject: boolean;
-  hasActiveAgent: boolean;
-  workspaceMode: "code" | "review" | "agent";
-  yoloMode: boolean;
-  explorerCollapsed: boolean;
-  gitPanelCollapsed: boolean;
-  terminalPanelOpen: boolean;
-  autoToggleSidebars: boolean;
-  gitPanelTab: "changes" | "history";
+  hasSession: boolean;
+  running: boolean;
+  fullAccess: boolean;
+  sidebarOpen: boolean;
+  sidePaneOpen: boolean;
+  sideTab: "changes" | "preview" | "terminal" | "flow";
 }
 
 export const syncNativeMenuState = (state: NativeMenuState): Promise<void> =>
@@ -854,36 +698,9 @@ export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenF
 
 // ── Project tabs (single-window session) ─────────────────────────────────────
 
-export interface PersistedAgentTabDto {
-  agent_id: string;
-  flow_node_id: string | null;
-  worktree_path: string | null;
-  worktree_branch: string | null;
-  worktree_source_branch: string | null;
-}
 
-export interface PersistedProjectTabDto {
-  id: string;
-  project_path: string;
-  tabs: PersistedAgentTabDto[];
-  active_index: number;
-}
-
-export interface SessionStateDto {
-  active_id: string | null;
-  tabs: PersistedProjectTabDto[];
-}
-
-/** The persisted single-window session (every open project tab + active id),
- *  or `null` on a true first run — caller falls back to the legacy
- *  single-slot localStorage workspace. */
-export const getSessionTabs = (): Promise<SessionStateDto | null> =>
-  invoke("get_session_tabs");
-
-/** Persist the full session (every project tab + active id). */
-export const updateSessionTabs = (state: SessionStateDto): Promise<void> =>
-  invoke("update_session_tabs", { state });
-
-/** Tear down a project tab: kill its PTY sessions and shut down its LSPs. */
-export const closeProjectTabBackend = (projectPath: string): Promise<void> =>
-  invoke("close_project_tab", { projectPath });
+export const chatDetachNative = (sessionId: string): Promise<void> => invoke("chat_detach_native", { sessionId });
+export const chatRuntimeState = (sessionId: string): Promise<AgentRuntimeState> => invoke("chat_runtime_state", { sessionId });
+export const chatRespond = (sessionId: string, turnId: string, requestId: string, response: InteractionResponse): Promise<void> =>
+  invoke("chat_respond", { sessionId, turnId, requestId, response });
+export const agentRuntimeInfo = (agentId: string): Promise<AgentRuntimeInfo> => invoke("agent_runtime_info", { agentId });

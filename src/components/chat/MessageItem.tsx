@@ -1,0 +1,312 @@
+import {
+  Component, For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup,
+} from "solid-js";
+import {
+  cancelTurn, retryLastTurn, setComposerAgent, chat,
+  pendingInputCount, type InteractionBlock, type AssistantMessage, type Block, type DividerMessage, type ThinkingBlock, type ToolBlock, type UserMessage,
+} from "../../lib/chat";
+import { store, setPendingPromptSeed } from "../../lib/store";
+import { writeClipboardText } from "../../lib/native";
+import { runAction } from "../../lib/shortcuts";
+import { agentLabel } from "./agentLabel";
+import { AgentLogo } from "../../lib/agentMeta";
+import { openSide } from "../../lib/layout";
+import { Menu, MenuItem, MenuLabel, Spinner } from "../ui";
+import { Icon } from "../shell/Icon";
+import Markdown from "./Markdown";
+import ToolCallRow from "./ToolCallRow";
+import AttachmentChip from "./AttachmentChip";
+import AgentInteraction from "./AgentInteraction";
+
+const agentIcon = (id: string) => store.agents.find((a) => a.id === id)?.icon ?? null;
+
+// ── Small pieces ─────────────────────────────────────────────────────────────
+
+const ActionButton: Component<{ icon: Parameters<typeof Icon>[0]["name"]; label: string; onClick: () => void }> = (props) => (
+  <button type="button" class="msg-action" title={props.label} aria-label={props.label} onClick={props.onClick}>
+    <Icon name={props.icon} size={14} />
+  </button>
+);
+
+function formatElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function formatTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n);
+}
+
+// ── User / divider ───────────────────────────────────────────────────────────
+
+export const UserBubble: Component<{ message: UserMessage }> = (props) => (
+  <div class="msg-user">
+    <div class="msg-user-stack">
+      <Show when={props.message.attachments.length > 0}>
+        <div class="msg-attachments">
+          <For each={props.message.attachments}>{(a) => <AttachmentChip attachment={a} />}</For>
+        </div>
+      </Show>
+      <Show when={props.message.text}><div class="msg-user-body">{props.message.text}</div></Show>
+    </div>
+    <div class="msg-actions">
+      <ActionButton icon="copy" label="Copy" onClick={() => void writeClipboardText(props.message.text, "message")} />
+      <ActionButton
+        icon="pencil"
+        label="Edit in composer"
+        onClick={() => { setPendingPromptSeed({ text: props.message.text }); runAction("focus-prompt"); }}
+      />
+    </div>
+  </div>
+);
+
+export const Divider: Component<{ message: DividerMessage }> = (props) => (
+  <div class="msg-divider">
+    <span class="msg-divider-line" />
+    <span class="msg-divider-label">
+      <AgentLogo agentId={props.message.to} icon={agentIcon(props.message.to)} size={14} radius={4} />
+      Continued with {agentLabel(props.message.to)} · conversation carried over
+    </span>
+    <span class="msg-divider-line" />
+  </div>
+);
+
+// ── Assistant blocks ─────────────────────────────────────────────────────────
+
+const Thinking: Component<{ block: ThinkingBlock; live: boolean }> = (props) => {
+  const [open, setOpen] = createSignal(false);
+  const label = () => {
+    if (props.live) return "Thinking…";
+    const end = props.block.endedAt;
+    return end ? `Thought for ${Math.max(1, Math.round((end - props.block.startedAt) / 1000))}s` : "Thought process";
+  };
+  return (
+    <div class="thinking">
+      <button type="button" class="thinking-head" onClick={() => setOpen((v) => !v)} aria-expanded={open()}>
+        <Icon name="sparkle" size={13} />
+        <span>{label()}</span>
+        <Icon name="chevronRight" size={12} style={{ transform: open() ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast)" }} />
+      </button>
+      <Show when={open()}>
+        <div class="thinking-body">{props.block.text}</div>
+      </Show>
+    </div>
+  );
+};
+
+/** Four or more consecutive tool calls collapse into one expandable row. */
+const GROUP_MIN = 4;
+interface ToolGroup { isGroup: true; first: ToolBlock }
+const groupCache = new WeakMap<object, ToolGroup>();
+type Item = Block | ToolGroup;
+
+function buildItems(blocks: Block[]): Item[] {
+  const out: Item[] = [];
+  let i = 0;
+  while (i < blocks.length) {
+    const b = blocks[i];
+    if (b.kind !== "tool") { out.push(b); i += 1; continue; }
+    let j = i;
+    while (j < blocks.length && blocks[j].kind === "tool") j += 1;
+    if (j - i >= GROUP_MIN) {
+      // Keyed by the run's first block so the group keeps its open state as it grows.
+      let g = groupCache.get(b);
+      if (!g) { g = { isGroup: true, first: b as ToolBlock }; groupCache.set(b, g); }
+      out.push(g);
+    } else {
+      for (let k = i; k < j; k++) out.push(blocks[k]);
+    }
+    i = j;
+  }
+  return out;
+}
+
+const ToolGroupRow: Component<{ group: ToolGroup; blocks: () => Block[] }> = (props) => {
+  const [open, setOpen] = createSignal(false);
+  const tools = createMemo(() => {
+    const blocks = props.blocks();
+    const start = blocks.findIndex((b) => b === props.group.first);
+    const run: ToolBlock[] = [];
+    for (let i = Math.max(0, start); i < blocks.length && blocks[i].kind === "tool"; i++) run.push(blocks[i] as ToolBlock);
+    return run;
+  });
+  const running = () => tools().some((t) => t.status === "running");
+  const failed = () => tools().filter((t) => t.status === "error").length;
+  return (
+    <div class="tool-group">
+      <button type="button" class="tool-group-head" onClick={() => setOpen((v) => !v)} aria-expanded={open()}>
+        <Show when={running()} fallback={<Icon name="wrench" size={14} />}><Spinner size={12} /></Show>
+        <span class="tool-group-title">
+          {running() ? "Working" : "Ran"} {tools().length} tools
+        </span>
+        <Show when={failed() > 0}><span class="tool-group-failed">{failed()} failed</span></Show>
+        <Show when={!open()}><span class="tool-group-last">{tools()[tools().length - 1]?.title}</span></Show>
+        <Icon name="chevronRight" size={13} style={{ transform: open() ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast)" }} />
+      </button>
+      <Show when={open()}>
+        <div class="tool-group-body">
+          <For each={tools()}>{(t) => <ToolCallRow block={t} />}</For>
+        </div>
+      </Show>
+    </div>
+  );
+};
+
+// ── Assistant message ────────────────────────────────────────────────────────
+
+export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boolean; sessionId: string }> = (props) => {
+  const running = () => props.message.status === "running";
+  const lastBlock = (): Block | undefined => props.message.blocks[props.message.blocks.length - 1];
+  const showPulse = () => running() && !pendingInputCount(props.sessionId) && lastBlock()?.kind !== "text";
+  const items = createMemo(() => buildItems(props.message.blocks));
+
+  const [now, setNow] = createSignal(Date.now());
+  createEffect(() => {
+    if (!running()) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    onCleanup(() => clearInterval(timer));
+  });
+  const activity = () => {
+    if (pendingInputCount(props.sessionId)) return "Needs input";
+    const b = lastBlock();
+    if (!b) return "Starting";
+    if (b.kind === "tool" && b.status === "running") return b.title;
+    if (b.kind === "thinking") return "Thinking";
+    return b.kind === "text" ? "Writing" : "Working";
+  };
+
+  const fullText = () =>
+    props.message.blocks.filter((b): b is Extract<Block, { kind: "text" }> => b.kind === "text").map((b) => b.text).join("\n\n");
+
+  const [flipOpen, setFlipOpen] = createSignal(false);
+  let flipAnchor: HTMLButtonElement | undefined;
+  const flipTargets = () =>
+    store.agents.filter((a) => a.installed && a.chat_supported && a.id !== props.message.agentId);
+
+  return (
+    <div class="msg-assistant">
+      <div class="msg-assistant-head">
+        <AgentLogo agentId={props.message.agentId} icon={agentIcon(props.message.agentId)} size={18} radius={5} />
+        <span class="msg-assistant-name">{agentLabel(props.message.agentId)}</span>
+        <Show when={props.message.model}>
+          <span class="msg-assistant-model">{props.message.model}</span>
+        </Show>
+        <Show when={running()}>
+          <span class="msg-live">
+            <span class="msg-live-activity">{activity()}</span>
+            <span class="msg-live-time">{formatElapsed(now() - props.message.startedAt)}</span>
+            <Show when={chat.activeId}>
+              <button type="button" class="msg-live-stop" onClick={cancelTurn} title="Stop (Esc)" aria-label="Stop">
+                <Icon name="stop" size={11} />
+                Stop
+              </button>
+            </Show>
+          </span>
+        </Show>
+      </div>
+
+      <For each={items()}>
+        {(item) => (
+          <Switch>
+            <Match when={"isGroup" in item && (item as ToolGroup)}>
+              {(g) => <ToolGroupRow group={g()} blocks={() => props.message.blocks} />}
+            </Match>
+            <Match when={!("isGroup" in item) && (item as Block).kind === "text" && (item as Block)}>
+              {(b) => <Markdown text={(b() as Extract<Block, { kind: "text" }>).text} />}
+            </Match>
+            <Match when={!("isGroup" in item) && (item as Block).kind === "thinking" && (item as Block)}>
+              {(b) => (
+                <Thinking
+                  block={b() as ThinkingBlock}
+                  live={running() && (b() as Block) === lastBlock()}
+                />
+              )}
+            </Match>
+            <Match when={!("isGroup" in item) && (item as Block).kind === "interaction" && (item as Block)}>
+              {(b) => <AgentInteraction block={b() as InteractionBlock} sessionId={props.sessionId} />}
+            </Match>
+            <Match when={!("isGroup" in item) && (item as Block).kind === "tool" && (item as Block)}>
+              {(b) => <ToolCallRow block={b() as ToolBlock} />}
+            </Match>
+          </Switch>
+        )}
+      </For>
+
+      <Show when={showPulse()}>
+        <div class="typing-dots" aria-label="Working"><span /><span /><span /></div>
+      </Show>
+
+      <Show when={props.message.error}>
+        <div class="msg-error">
+          <Icon name="alert" size={15} />
+          <span>{props.message.error}</span>
+          <Show when={props.isLast && !running() && chat.activeId}>
+            <button type="button" class="msg-error-retry" onClick={() => void retryLastTurn(chat.activeId!)}>Retry</button>
+          </Show>
+        </div>
+      </Show>
+
+      <Show when={props.message.status === "cancelled"}>
+        <div class="msg-note">Stopped</div>
+      </Show>
+
+      <Show when={!running() && props.message.changedFiles.length > 0}>
+        <button type="button" class="turn-changes" onClick={() => openSide("changes")}>
+          <Icon name="diff" size={14} />
+          <span>
+            Changed {props.message.changedFiles.length} file{props.message.changedFiles.length === 1 ? "" : "s"}
+          </span>
+          <span class="turn-changes-files">
+            {props.message.changedFiles.slice(0, 3).map((f) => f.path.split("/").pop()).join(", ")}
+            {props.message.changedFiles.length > 3 ? ` +${props.message.changedFiles.length - 3}` : ""}
+          </span>
+          <span class="turn-changes-cta">Review</span>
+        </button>
+      </Show>
+
+      <Show when={!running()}>
+        <div class="msg-footer">
+          <div class="msg-actions msg-actions-inline">
+            <ActionButton icon="copy" label="Copy response" onClick={() => void writeClipboardText(fullText(), "response")} />
+            <Show when={props.isLast && chat.activeId}>
+              <ActionButton icon="refresh" label="Retry" onClick={() => void retryLastTurn(chat.activeId!)} />
+            </Show>
+            <Show when={props.isLast && flipTargets().length > 0}>
+              <button
+                ref={flipAnchor}
+                type="button"
+                class="msg-action msg-action-text"
+                onClick={() => setFlipOpen((v) => !v)}
+                title="Continue this conversation with another agent"
+              >
+                <Icon name="merge" size={14} />
+                Continue with
+                <Icon name="chevronDown" size={11} />
+              </button>
+              <Menu open={flipOpen()} onClose={() => setFlipOpen(false)} anchorRef={flipAnchor} width={240}>
+                <MenuLabel>Continue with</MenuLabel>
+                <For each={flipTargets()}>
+                  {(a) => (
+                    <MenuItem onSelect={() => { setFlipOpen(false); setComposerAgent(a.id); runAction("focus-prompt"); }}>
+                      <AgentLogo agentId={a.id} icon={a.icon} size={18} radius={5} />
+                      <span style={{ flex: 1 }}>{a.name}</span>
+                    </MenuItem>
+                  )}
+                </For>
+              </Menu>
+            </Show>
+          </div>
+          <Show when={props.message.contextUsage}>{(usage) => <span class="msg-usage">{usage().used.toLocaleString()} / {usage().size.toLocaleString()} context tokens<Show when={usage().cost != null}> · ${usage().cost!.toFixed(3)}</Show></span>}</Show>
+          <Show when={props.message.usage}>
+            {(u) => (
+              <span class="msg-usage">
+                {formatTokens(u().input)} in · {formatTokens(u().output)} out
+                <Show when={u().cost != null && u().cost! > 0}> · ${u().cost!.toFixed(3)}</Show>
+              </span>
+            )}
+          </Show>
+        </div>
+      </Show>
+    </div>
+  );
+};

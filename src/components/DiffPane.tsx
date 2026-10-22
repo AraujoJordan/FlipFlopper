@@ -1,12 +1,12 @@
 import {
   Component, createEffect, createResource, createSignal, For, Show, createMemo,
 } from "solid-js";
-import hljs from "highlight.js";
-import "highlight.js/styles/github-dark.css";
-import { store, closeReview, openReview, openEditorFile, effectiveRoot } from "../lib/store";
+import { escapeHtml, highlightCode } from "../lib/markdownLite";
+import { store, closeReview, openReview, effectiveRoot } from "../lib/store";
 import { getReviewDiff, type FileDiff, type DiffLine } from "../lib/ipc";
 import { getFileIcon } from "../lib/fileIcons";
 import { Button, Spinner } from "./ui";
+import { Icon } from "./shell/Icon";
 
 // ── Layout toggle ────────────────────────────────────────────────────────────
 type LayoutMode = "unified" | "split";
@@ -18,7 +18,7 @@ const ADD_SIGN = "var(--status-add)";
 const DEL_SIGN = "var(--status-del)";
 const CTX_BG   = "transparent";
 
-// ── Status pill colours — mirrors FileTree.tsx ───────────────────────────────
+// ── Status pill colours ──────────────────────────────────────────────────────
 const STATUS_COLORS: Record<string, { color: string; label: string }> = {
   added:    { color: "var(--status-add)", label: "A" },
   modified: { color: "var(--status-mod)", label: "M" },
@@ -57,22 +57,6 @@ function langForPath(p: string | null | undefined): string | null {
   return EXT_TO_LANG[ext] ?? null;
 }
 
-function highlight(content: string, lang: string | null): string {
-  if (!lang) return escapeHtml(content);
-  try {
-    return hljs.highlight(content, { language: lang }).value;
-  } catch {
-    return escapeHtml(content);
-  }
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
 // ── Shared styles ─────────────────────────────────────────────────────────────
 const MONO: string = "'JetBrains Mono', 'Fira Mono', monospace";
 const LINENO_STYLE = {
@@ -91,7 +75,6 @@ const UnifiedRow: Component<{
   line: DiffLine;
   lang: string | null;
   lineCount: number;
-  onLineClick: (lineNo: number) => void;
 }> = (props) => {
   const bg = () =>
     props.line.kind === "add" ? ADD_BG :
@@ -108,18 +91,12 @@ const UnifiedRow: Component<{
 
   const html = () =>
     props.lineCount <= MAX_HIGHLIGHT_LINES
-      ? highlight(props.line.content, props.lang)
+      ? highlightCode(props.line.content, props.lang)
       : escapeHtml(props.line.content);
-
-  const lineNo = () => props.line.new_lineno ?? props.line.old_lineno;
 
   return (
     <div
       class="diff-row"
-      onclick={() => {
-        const ln = lineNo();
-        if (ln != null) props.onLineClick(ln);
-      }}
       style={{
         display: "flex", "align-items": "flex-start",
         background: bg(),
@@ -193,7 +170,6 @@ const SplitCell: Component<{
   lang: string | null;
   lineCount: number;
   side: "left" | "right";
-  onLineClick: (lineNo: number) => void;
 }> = (props) => {
   const bg = () =>
     !props.line ? CTX_BG :
@@ -209,23 +185,12 @@ const SplitCell: Component<{
   const html = () => {
     if (!props.line) return "";
     if (props.lineCount > MAX_HIGHLIGHT_LINES) return escapeHtml(props.line.content);
-    return highlight(props.line.content, props.lang);
-  };
-
-  const lineNo = () => {
-    if (!props.line) return null;
-    return props.side === "left"
-      ? (props.line.old_lineno ?? props.line.new_lineno)
-      : (props.line.new_lineno ?? props.line.old_lineno);
+    return highlightCode(props.line.content, props.lang);
   };
 
   return (
     <div
       class={props.line ? "diff-row" : ""}
-      onclick={() => {
-        const ln = lineNo();
-        if (ln != null) props.onLineClick(ln);
-      }}
       style={{
         flex: "1", "min-width": "0",
         display: "flex", "align-items": "flex-start",
@@ -249,13 +214,6 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
   const lang = createMemo(() => langForPath(props.file.new_path ?? props.file.old_path));
   const st = () => STATUS_COLORS[props.file.status] ?? STATUS_COLORS.modified;
   const displayPath = () => props.file.new_path ?? props.file.old_path ?? "(unknown)";
-
-  const handleLineClick = (lineNo: number) => {
-    const relPath = props.file.new_path ?? props.file.old_path;
-    if (!relPath) return;
-    const name = relPath.split("/").pop() ?? "";
-    openEditorFile(relPath, name, lineNo);
-  };
 
   return (
     <div
@@ -306,11 +264,7 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         </span>
 
         {/* File icon */}
-        <img
-          src={getFileIcon(displayPath().split("/").pop() ?? displayPath())}
-          alt=""
-          style={{ width: "14px", height: "14px", "flex-shrink": "0" }}
-        />
+        <Icon name={getFileIcon(displayPath())} size={14} />
 
         {/* Path */}
         <span style={{
@@ -375,7 +329,6 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
                           line={line}
                           lang={lang()}
                           lineCount={props.totalLines}
-                          onLineClick={handleLineClick}
                         />
                       )}
                     </For>
@@ -389,14 +342,12 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
                             lang={lang()}
                             lineCount={props.totalLines}
                             side="left"
-                            onLineClick={handleLineClick}
                           />
                           <SplitCell
                             line={pair.right}
                             lang={lang()}
                             lineCount={props.totalLines}
                             side="right"
-                            onLineClick={handleLineClick}
                           />
                         </div>
                       )}
@@ -545,11 +496,7 @@ const DiffPane: Component = () => {
     }}>
       {/* ── Header ── */}
       <div style={headerStyle}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
-          <path d="M14 3v5h5" />
-          <path d="M9 15l2 2 4-5" />
-        </svg>
+        <Icon name="fileCheck" size={14} style={{ color: "var(--accent)" }} />
         <span style={{ "font-size": "12px", color: "var(--fg-body)", "font-weight": "500" }}>
           Code Review
         </span>
@@ -572,9 +519,7 @@ const DiffPane: Component = () => {
                 aria-pressed={sidebarOpen()}
                 style={segBtnStyle(sidebarOpen())}
               >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style={{ "vertical-align": "-1px" }}>
-                  <path d="M3 6h18M3 12h18M3 18h18" />
-                </svg>
+                <Icon name="list" size={11} style={{ "vertical-align": "-1px" }} />
               </button>
             </Show>
 
@@ -597,16 +542,12 @@ const DiffPane: Component = () => {
             </div>
 
             <Button variant="ghost" size="sm" onClick={() => refetch()} title="Reload diff" style={{ border: "1px solid var(--border-default)" }}>
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 12a9 9 0 11-2.64-6.36M21 4v6h-6" />
-              </svg>
+              <Icon name="refresh" size={11} />
               Reload
             </Button>
 
             <button class="icon-btn press" onclick={closeReview} title="Close review pane" style={closeBtnStyle}>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M18 6L6 18M6 6l12 12" />
-              </svg>
+              <Icon name="x" size={13} />
             </button>
           </div>
         </Show>
@@ -626,11 +567,7 @@ const DiffPane: Component = () => {
               onClick={() => openReview(undefined, "Working changes")}
               disabled={!store.currentProject}
             >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
-                <path d="M14 3v5h5" />
-                <path d="M9 15l2 2 4-5" />
-              </svg>
+              <Icon name="fileCheck" size={13} />
               Review working changes
             </Button>
           </div>
@@ -664,7 +601,7 @@ const DiffPane: Component = () => {
                       }}>
                         {st.label}
                       </span>
-                      <img src={getFileIcon(path.split("/").pop() ?? path)} alt="" style={{ width: "12px", height: "12px", "flex-shrink": "0" }} />
+                      <Icon name={getFileIcon(path)} size={12} />
                       <span style={{
                         "font-family": MONO, "font-size": "11px", color: "var(--fg-body)",
                         overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",

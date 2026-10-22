@@ -1,3 +1,4 @@
+import { Icon } from "./shell/Icon";
 import { Component, For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { registerShortcutHandler, SHORTCUT_GROUPS } from "../lib/shortcuts";
 
@@ -68,9 +69,7 @@ const ShortcutHelp: Component = () => {
               aria-label="Close shortcuts reference"
               style={{ display: "flex", "align-items": "center", "justify-content": "center", padding: "3px", color: "var(--fg-subtle)" }}
             >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M18 6L6 18M6 6l12 12" />
-              </svg>
+              <Icon name="x" size={13} />
             </button>
           </div>
 

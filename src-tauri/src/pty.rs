@@ -1,11 +1,9 @@
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{mpsc, Arc, Mutex};
 use uuid::Uuid;
 
-use crate::agents::{find_agent, launch_binary};
 use crate::env::augmented_path_string;
 
 // ────────────────────────────────────────────────
@@ -23,25 +21,15 @@ pub enum PtyEvent {
     Exit,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub agent_id: String,
-    pub project_path: String,
-}
-
 /// Live state for one PTY session.
 pub struct PtySession {
-    pub id: String,
-    pub agent_id: String,
-    pub project_path: String,
     /// Write-end of the PTY (keyboard input)
     pub(crate) writer: Box<dyn Write + Send>,
     /// The PTY master (used for resize)
     pub(crate) master: Box<dyn MasterPty + Send>,
     /// The spawned child process — kept so `kill_session` can terminate it
     /// directly. Dropping the master FD alone (the previous approach) sends
-    /// SIGHUP, but children that ignore it (e.g. the diffx Node server)
+    /// SIGHUP, but children that ignore it (e.g. dev servers)
     /// survive as orphaned, port-holding zombies.
     pub(crate) child: Box<dyn Child + Send + Sync>,
 }
@@ -144,102 +132,6 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<PtyEve
 // Public API
 // ────────────────────────────────────────────────
 
-/// Spawn a new PTY session running the given agent inside `project_path`.
-///
-/// Returns `(session_id, receiver)`.  The caller should store the receiver and
-/// drain it on the UI thread (e.g. via `EventLoop::on_tick` / `run_delay`).
-pub fn spawn_session(
-    manager: &PtyManager,
-    agent_id: &str,
-    project_path: &str,
-    yolo: bool,
-    extra_args: &[String],
-    cwd: Option<&str>,
-) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
-    let def = find_agent(agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
-    if yolo && !def.yolo_supported() {
-        return Err(format!("Agent '{}' does not support YOLO mode.", def.name));
-    }
-    let binary = launch_binary(def).ok_or_else(|| {
-        format!(
-            "Agent '{}' binary not found on PATH. Install it first.",
-            def.name
-        )
-    })?;
-
-    let session_id = Uuid::new_v4().to_string();
-    let (tx, rx) = mpsc::channel::<PtyEvent>();
-
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("Failed to open PTY: {e}"))?;
-
-    let mut cmd = CommandBuilder::new(&binary);
-    for arg in def.launch_args {
-        cmd.arg(arg);
-    }
-    if yolo {
-        for arg in def.yolo_launch_args {
-            cmd.arg(arg);
-        }
-        for (key, value) in def.yolo_env {
-            cmd.env(key, value);
-        }
-    }
-    // Per-launch tuning (e.g. `-m <model>`) appended by the orchestrator.
-    for arg in extra_args {
-        cmd.arg(arg);
-    }
-    cmd.cwd(cwd.unwrap_or(project_path));
-    cmd.env("PATH", augmented_path_string());
-    // Match a real terminal's environment so TUI agents (Bubble Tea, ratatui,
-    // Textual, …) render correctly even when the desktop app was launched
-    // from Finder/Homebrew with no shell environment. TERM is read by most
-    // TUIs before they send capability queries; COLORTERM enables truecolor.
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("Failed to spawn {binary}: {e}"))?;
-
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("Failed to clone PTY reader: {e}"))?;
-
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("Failed to take PTY writer: {e}"))?;
-
-    spawn_reader_thread(reader, tx);
-
-    let session = PtySession {
-        id: session_id.clone(),
-        agent_id: agent_id.to_string(),
-        project_path: project_path.to_string(),
-        writer,
-        master: pair.master,
-        child,
-    };
-
-    manager
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(session_id.clone(), session);
-
-    Ok((session_id, rx))
-}
-
 /// Send keyboard input to a running session.
 pub fn send_input(manager: &PtyManager, session_id: &str, data: &str) -> Result<(), String> {
     let mut sessions = manager.sessions.lock().unwrap();
@@ -255,16 +147,6 @@ pub fn send_input(manager: &PtyManager, session_id: &str, data: &str) -> Result<
         .flush()
         .map_err(|e| format!("Flush error: {e}"))?;
     Ok(())
-}
-
-/// Inject `@path` file references directly into the session's stdin.
-pub fn inject_refs(manager: &PtyManager, session_id: &str, paths: &[String]) -> Result<(), String> {
-    let refs: String = paths
-        .iter()
-        .map(|p| format!("@{p}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    send_input(manager, session_id, &format!("{refs} "))
 }
 
 /// Resize the terminal.
@@ -296,30 +178,10 @@ pub fn kill_session(manager: &PtyManager, session_id: &str) -> Result<(), String
     let mut session = sessions
         .remove(session_id)
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
-    // Kill the child directly — some processes (e.g. the diffx Node server)
+    // Kill the child directly — some processes (e.g. dev servers)
     // ignore the SIGHUP that dropping the master FD would otherwise send.
     let _ = session.child.kill();
     Ok(())
-}
-
-/// Kill every live session belonging to `project_path` (used when a project
-/// tab closes). Same direct `child.kill()` semantics as `kill_session` —
-/// dropping the master FD alone is not enough. Returns the ids of the sessions
-/// that were killed, so callers can purge them from other session-keyed maps
-/// (`SessionUrls`, `PendingBridges`).
-pub fn kill_sessions_for_project(manager: &PtyManager, project_path: &str) -> Vec<String> {
-    let mut sessions = manager.sessions.lock().unwrap();
-    let ids: Vec<String> = sessions
-        .iter()
-        .filter(|(_, s)| s.project_path == project_path)
-        .map(|(id, _)| id.clone())
-        .collect();
-    for id in &ids {
-        if let Some(mut session) = sessions.remove(id) {
-            let _ = session.child.kill();
-        }
-    }
-    ids
 }
 
 /// Kill every live PTY session (used on app quit). Returns the ids killed so
@@ -335,24 +197,13 @@ pub fn kill_all_sessions(manager: &PtyManager) -> Vec<String> {
     ids
 }
 
-/// Spawn a one-off shell command (e.g. a tool installer or handoff) in a new PTY.
+/// Spawn a run target, validation command, or tool installer in a new PTY.
 ///
 /// Returns `(session_id, receiver)`.
 pub fn spawn_shell_command(
     manager: &PtyManager,
-    label: &str,
     command: &str,
     project_path: &str,
-) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
-    spawn_shell_command_with_env(manager, label, command, project_path, &[])
-}
-
-pub fn spawn_shell_command_with_env(
-    manager: &PtyManager,
-    label: &str,
-    command: &str,
-    project_path: &str,
-    env: &[(&str, &str)],
 ) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
     let session_id = Uuid::new_v4().to_string();
     let (tx, rx) = mpsc::channel::<PtyEvent>();
@@ -383,9 +234,6 @@ pub fn spawn_shell_command_with_env(
     cmd.arg(command);
     cmd.cwd(project_path);
     cmd.env("PATH", augmented_path_string());
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
 
     let child = pair
         .slave
@@ -404,9 +252,6 @@ pub fn spawn_shell_command_with_env(
     spawn_reader_thread(reader, tx);
 
     let session = PtySession {
-        id: session_id.clone(),
-        agent_id: label.to_string(),
-        project_path: project_path.to_string(),
         writer,
         master: pair.master,
         child,
@@ -476,9 +321,6 @@ pub fn spawn_interactive_shell(
     spawn_reader_thread(reader, tx);
 
     let session = PtySession {
-        id: session_id.clone(),
-        agent_id: "shell".to_string(),
-        project_path: project_path.to_string(),
         writer,
         master: pair.master,
         child,
@@ -491,21 +333,6 @@ pub fn spawn_interactive_shell(
         .insert(session_id.clone(), session);
 
     Ok((session_id, rx))
-}
-
-/// List active sessions.
-pub fn list_sessions(manager: &PtyManager) -> Vec<SessionInfo> {
-    manager
-        .sessions
-        .lock()
-        .unwrap()
-        .values()
-        .map(|s| SessionInfo {
-            id: s.id.clone(),
-            agent_id: s.agent_id.clone(),
-            project_path: s.project_path.clone(),
-        })
-        .collect()
 }
 
 #[cfg(test)]

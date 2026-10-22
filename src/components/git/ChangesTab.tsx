@@ -1,3 +1,4 @@
+import { Icon } from "../shell/Icon";
 import { Component, For, Show, createSignal } from "solid-js";
 import { store, openReview, bumpGitStatus, effectiveRoot } from "../../lib/store";
 import {
@@ -134,21 +135,15 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
       <span class="git-row-actions" style={{ display: "flex", "align-items": "center", gap: "3px" }}>
         <Show when={props.group === "unstaged"}>
           <button class="icon-btn-danger press" onclick={discard} title="Discard" aria-label={`Discard changes to ${displayName()}`} style={iconBtnStyle}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6" />
-            </svg>
+            <Icon name="trash" size={11} />
           </button>
           <button class="icon-btn press" onclick={stage} title="Stage" aria-label={`Stage ${displayName()}`} style={iconBtnStyle}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
+            <Icon name="plus" size={12} />
           </button>
         </Show>
         <Show when={props.group === "staged"}>
           <button class="icon-btn press" onclick={unstage} title="Unstage" aria-label={`Unstage ${displayName()}`} style={iconBtnStyle}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M5 12h14" />
-            </svg>
+            <Icon name="remove" size={12} />
           </button>
         </Show>
       </span>

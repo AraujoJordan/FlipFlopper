@@ -1,41 +1,21 @@
-/** User-adjustable preferences that don't belong in the reactive Solid store
- *  (nothing renders differently while these are being read — TerminalPane
- *  just reads the current value each time it resets its idle timer). Kept
- *  separate from the many other `localStorage`-backed keys in store.ts,
- *  which are mostly per-project cached selections rather than settings a
- *  user would browse or reset from a Settings panel. */
-import { readLegacyNumber, readPref, writePref } from "./appPrefs";
+/** User-adjustable preferences that don't belong in the reactive Solid store.
+ *  Kept separate from the per-project cached selections in store.ts, which are
+ *  not settings a user would browse or reset. */
+import { createSignal } from "solid-js";
+import { readLegacyBool, readPref, writePref } from "./appPrefs";
 
-const IDLE_TIMEOUT_MINUTES_KEY = "flipflopper:idle-timeout-minutes";
-export const DEFAULT_IDLE_TIMEOUT_MINUTES = 5;
-export const MIN_IDLE_TIMEOUT_MINUTES = 1;
-export const MAX_IDLE_TIMEOUT_MINUTES = 60;
+const NOTIFY_KEY = "flipflopper:notify-on-finish";
 
-let idleTimeoutMinutes = clampIdleTimeout(readLegacyNumber(
-  IDLE_TIMEOUT_MINUTES_KEY,
-  DEFAULT_IDLE_TIMEOUT_MINUTES,
-));
+const [notifyOnFinishSignal, setNotifyOnFinishSignal] = createSignal(readLegacyBool(NOTIFY_KEY, true));
 
-function clampIdleTimeout(minutes: number): number {
-  return Math.min(
-    Math.max(Math.round(minutes), MIN_IDLE_TIMEOUT_MINUTES),
-    MAX_IDLE_TIMEOUT_MINUTES,
-  );
-}
+/** Send a native notification when a session finishes while it isn't in view. */
+export const notifyOnFinish = notifyOnFinishSignal;
 
-export function getIdleTimeoutMinutes(): number {
-  return idleTimeoutMinutes;
-}
-
-export function setIdleTimeoutMinutes(minutes: number) {
-  idleTimeoutMinutes = clampIdleTimeout(minutes);
-  writePref(IDLE_TIMEOUT_MINUTES_KEY, idleTimeoutMinutes);
+export function setNotifyOnFinish(enabled: boolean) {
+  setNotifyOnFinishSignal(enabled);
+  writePref(NOTIFY_KEY, enabled);
 }
 
 export async function hydrateSettings() {
-  idleTimeoutMinutes = clampIdleTimeout(await readPref(
-    IDLE_TIMEOUT_MINUTES_KEY,
-    idleTimeoutMinutes,
-    () => idleTimeoutMinutes,
-  ));
+  setNotifyOnFinishSignal(await readPref(NOTIFY_KEY, notifyOnFinishSignal(), () => notifyOnFinishSignal()));
 }

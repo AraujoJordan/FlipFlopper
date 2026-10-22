@@ -9,7 +9,6 @@ use std::{
 };
 
 use crate::env::resolve_executable;
-use crate::preview;
 use crate::tools;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2055,7 +2054,7 @@ pub fn detect_validation_targets(project_path: &str) -> Result<Vec<ValidationTar
                 "build",
             );
             if let Some(setup) = android_module_screenshot_setup(&facts, &module_dir) {
-                if let Some((_, verify_task)) = preview::android_screenshot_task_names(&setup) {
+                if let Some((_, verify_task)) = android_screenshot_task_names(&setup) {
                     push_validation_target(
                         &mut candidates,
                         &mut seen,
@@ -3153,7 +3152,7 @@ fn android_module_screenshot_setup(facts: &ProjectFacts, module_dir: &Path) -> O
             text.push_str(&extra_text);
         }
     }
-    preview::android_screenshot_setup_from_text(&text)
+    android_screenshot_setup_from_text(&text)
 }
 
 fn kmp_modules(facts: &ProjectFacts) -> Vec<(String, PathBuf)> {
@@ -3762,6 +3761,35 @@ fn open_file_command(path: &Path) -> String {
         "macos" => format!("open {path_q}"),
         "windows" => format!("cmd /c start \"\" {path_q}"),
         _ => format!("xdg-open {path_q}"),
+    }
+}
+
+fn android_screenshot_setup_from_text(gradle_text: &str) -> Option<String> {
+    let lower = gradle_text.to_ascii_lowercase();
+    if lower.contains("paparazzi")
+        || lower.contains("app.cash.paparazzi")
+        || lower.contains("recordpaparazzi")
+    {
+        Some("paparazzi".into())
+    } else if lower.contains("roborazzi") {
+        Some("roborazzi".into())
+    } else if lower.contains("com.android.compose.screenshot")
+        || lower.contains("android-screenshot")
+        || lower.contains("android.screenshot")
+        || lower.contains("screenshot-validation-api")
+    {
+        Some("compose-screenshot".into())
+    } else {
+        None
+    }
+}
+
+fn android_screenshot_task_names(setup: &str) -> Option<(&'static str, &'static str)> {
+    match setup {
+        "paparazzi" => Some(("recordPaparazziDebug", "verifyPaparazziDebug")),
+        "roborazzi" => Some(("recordRoborazziDebug", "verifyRoborazziDebug")),
+        "compose-screenshot" => Some(("updateDebugScreenshotTest", "validateDebugScreenshotTest")),
+        _ => None,
     }
 }
 

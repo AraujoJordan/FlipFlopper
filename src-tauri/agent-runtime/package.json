@@ -1,0 +1,10 @@
+{
+  "name": "flipflopper-agent-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.94.0"
+  }
+}

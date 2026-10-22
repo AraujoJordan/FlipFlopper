@@ -23,3 +23,7 @@ Thumbs.db
 # Rust workspace build output
 target
 session-ses_*.md
+
+# Prepared, checksummed agent runtime binaries and generated license copy
+src-tauri/binaries
+src-tauri/agent-runtime/NODE-LICENSE

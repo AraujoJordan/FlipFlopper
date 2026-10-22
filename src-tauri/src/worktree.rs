@@ -177,18 +177,6 @@ pub fn remove_worktree(
     Ok(())
 }
 
-pub fn validate_worktree(project_path: &str, worktree_path: &str, _branch: &str) -> bool {
-    if !Path::new(worktree_path).is_dir() {
-        return false;
-    }
-    git(project_path, &["worktree", "list", "--porcelain"])
-        .map(|out| {
-            out.lines()
-                .any(|line| line.strip_prefix("worktree ") == Some(worktree_path))
-        })
-        .unwrap_or(false)
-}
-
 pub fn worktree_change_diff(worktree_path: &str, source_branch: &str) -> Result<String, String> {
     // Intent-to-add makes untracked files visible to `git diff` without
     // staging their contents; the later commit still performs a normal add -A.
@@ -231,11 +219,7 @@ mod tests {
         run(&project, &["commit", "-m", "base"]);
 
         let info = create_worktree(project.to_str().unwrap(), "codex").unwrap();
-        assert!(validate_worktree(
-            project.to_str().unwrap(),
-            &info.worktree_path,
-            &info.branch
-        ));
+        assert!(Path::new(&info.worktree_path).is_dir());
         fs::write(Path::new(&info.worktree_path).join("agent.txt"), "agent\n").unwrap();
         assert!(worktree_status(&info.worktree_path, &info.source_branch).dirty);
         assert!(

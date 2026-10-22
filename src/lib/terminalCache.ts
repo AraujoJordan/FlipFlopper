@@ -1,9 +1,7 @@
 // Module-level cache of live xterm instances keyed by PTY session id. A
-// project switch remounts the whole workspace (keyed <Show> in App.tsx), but
-// the Terminal, its DOM container, and its pty:// listeners live here so a
-// backgrounded project's terminal keeps receiving output and its scrollback
-// survives the round-trip. TerminalPane re-appends the cached container on
-// remount; disposal happens on the tab/project close paths in store.ts.
+// TerminalPane re-appends the cached container on remount so its scrollback
+// and pty:// listeners survive pane changes. Disposal belongs to
+// removeTerminal in store.ts, not component unmount.
 //
 // Imports are type-only so store.ts can import the dispose helpers without
 // pulling @xterm/xterm out of the lazily loaded TerminalPane chunk.
@@ -37,11 +35,5 @@ export function disposeCachedTerminal(sessionId: string): void {
     entry.dispose();
   } catch (e) {
     console.error("terminalCache: dispose failed for", sessionId, e);
-  }
-}
-
-export function disposeCachedTerminals(ids: Iterable<string | null | undefined>): void {
-  for (const id of ids) {
-    if (id) disposeCachedTerminal(id);
   }
 }

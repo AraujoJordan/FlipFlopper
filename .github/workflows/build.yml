@@ -18,13 +18,16 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Install frontend dependencies
         run: npm ci
 
       - name: TypeScript typecheck
         run: npx tsc --noEmit
+
+      - name: Test transcript and native runtime state
+        run: npm run test:chat
 
   build:
     needs: typecheck
@@ -87,7 +90,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -102,10 +105,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Prepare agent runtime for tests
+        if: matrix.platform == 'ubuntu-22.04'
+        run: npm run prepare:agents
+
+      - name: Test backend and ACP lifecycle
+        if: matrix.platform == 'ubuntu-22.04'
+        run: cargo test --lib
+
       - name: Build the app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNTIME_TARGET: ${{ matrix.target }}
         with:
           args: ${{ matrix.args }}
 
@@ -114,6 +126,10 @@ jobs:
         run: |
           mkdir -p artifacts/binary
           cp "${{ matrix.binary }}" artifacts/binary/
+          mkdir -p artifacts/binary/agent-runtime
+          cp -R src-tauri/agent-runtime/node_modules artifacts/binary/agent-runtime/
+          cp src-tauri/agent-runtime/NODE-LICENSE artifacts/binary/agent-runtime/
+          node scripts/package-agent-runtime.mjs "${{ matrix.binary }}" artifacts/binary
           tar -czf "artifacts/${{ matrix.archive }}" -C artifacts/binary .
 
       - name: Upload binary

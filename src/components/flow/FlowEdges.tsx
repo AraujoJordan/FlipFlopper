@@ -1,3 +1,4 @@
+import { Icon } from "../shell/Icon";
 import { Component, For, Show, createSignal } from "solid-js";
 import { flow, releaseGate, toggleEdgeGate, removeEdge, toggleEdgeCarry } from "../../lib/orchestrator";
 import { agentColor } from "../../lib/agentMeta";
@@ -194,9 +195,7 @@ const FlowEdges: Component<Props> = (props) => {
                           "box-shadow": `0 0 0 3px ${stroke}44`,
                         }}
                       >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M5 3l14 9-14 9V3z" />
-                        </svg>
+                        <Icon name="play" size={11} />
                       </button>
                     </Show>
                     <Show when={edge.gate && !edge.gatePending}>
@@ -225,9 +224,7 @@ const FlowEdges: Component<Props> = (props) => {
                           opacity: "0.8",
                         }}
                       >
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                          <path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3z" />
-                        </svg>
+                        <Icon name="shield" size={10} />
                       </button>
                     </Show>
                   </div>
@@ -249,7 +246,7 @@ const FlowEdges: Component<Props> = (props) => {
           setMenuPos(null);
           if (id) toggleEdgeGate(id);
         }}>
-          <ContextIcon path="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3z" />
+          <Icon name="shield" size={14} />
           Toggle gate
         </MenuItem>
         <MenuItem onSelect={() => {
@@ -257,7 +254,7 @@ const FlowEdges: Component<Props> = (props) => {
           setMenuPos(null);
           if (id) toggleEdgeCarry(id);
         }}>
-          <ContextIcon path="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6L12 2 8 6M12 2v13" />
+          <Icon name="upload" size={14} />
           Toggle carry context
         </MenuItem>
         <MenuDivider />
@@ -269,18 +266,12 @@ const FlowEdges: Component<Props> = (props) => {
           }}
           style={{ color: "var(--status-del)" }}
         >
-          <ContextIcon path="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+          <Icon name="trash" size={14} />
           Delete edge
         </MenuItem>
       </ContextMenu>
     </>
   );
 };
-
-const ContextIcon: Component<{ path: string }> = (props) => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ flex: "0 0 auto" }}>
-    <path d={props.path} />
-  </svg>
-);
 
 export default FlowEdges;
