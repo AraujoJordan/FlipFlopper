@@ -311,9 +311,7 @@ const App: Component = () => {
               <Composer onOpenProjects={() => setPickerOpen(true)} />
             </div>
           </section>
-          <Show when={layout.sideOpen}>
-            <SidePane />
-          </Show>
+          <SidePane />
         </div>
       </main>
 

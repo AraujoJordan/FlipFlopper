@@ -331,11 +331,21 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
         ],
     )?;
 
-    let view_menu = tauri::menu::Submenu::with_id_and_items(
-        handle,
-        "view-menu",
-        "View",
-        true,
+    // macOS's default View menu owns the native fullscreen action. Extend it
+    // instead of adding a second View menu beside it.
+    let existing_view = menu.items()?.into_iter().find_map(|item| match item {
+        tauri::menu::MenuItemKind::Submenu(submenu)
+            if submenu.text().is_ok_and(|text| text == "View") => Some(submenu),
+        _ => None,
+    });
+    let has_view_menu = existing_view.is_some();
+    let view_menu = if let Some(view) = existing_view {
+        view.append(&separator(handle)?)?;
+        view
+    } else {
+        tauri::menu::Submenu::with_id(handle, "view-menu", "View", true)?
+    };
+    view_menu.append_items(
         &[
             &check_menu_item(handle, MENU_TOGGLE_SIDEBAR, "Sidebar", true, Some("CmdOrCtrl+B"))?,
             &check_menu_item(handle, MENU_TOGGLE_SIDE_PANE, "Side Pane", false, Some("CmdOrCtrl+Alt+B"))?,
@@ -353,13 +363,19 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
     #[cfg(target_os = "macos")]
     {
         menu.insert(&session_menu, 2)?;
-        menu.insert(&view_menu, 4)?;
+        if !has_view_menu {
+            menu.insert(&view_menu, 4)?;
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        menu.insert(&session_menu, 1)?;
-        menu.insert(&view_menu, 3)?;
+        // Tauri's Linux menu has no File submenu; keep Session before Edit
+        // and View before the native Window menu on both platforms.
+        menu.insert(&session_menu, if cfg!(target_os = "windows") { 1 } else { 0 })?;
+        if !has_view_menu {
+            menu.insert(&view_menu, if cfg!(target_os = "windows") { 3 } else { 2 })?;
+        }
     }
 
     if let Some(tauri::menu::MenuItemKind::Submenu(help_menu)) =

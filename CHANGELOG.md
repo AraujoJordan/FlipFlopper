@@ -10,6 +10,7 @@
 - Native menu and keyboard shortcuts were rebuilt around sessions and panes (`⌘N` new session, `⌘⇧N` new project, `⌘B` sidebar, `⌘⌥B` side pane, `⌘J` terminal, `⌘.` stop).
 - Restore standard native title bars on macOS, Windows and Linux, with system window controls, resizing, dragging and window-menu behavior; remove custom controls and title-bar double-click overrides.
 - Ignore legacy saved decoration state when restoring windows so an older `decorated: false` preference cannot hide the native title bar after upgrading; keep saved geometry and other window state.
+- Extend macOS's native View menu instead of duplicating it, preserving the system fullscreen command. Keep visited side-pane tabs mounted when the pane closes so previews and terminal state survive reopening.
 - Standardize UI and file-category icons on locally bundled Google Material Symbols; replace the generated editor icon mapping and vendored SVG theme.
 - Share the registered Highlight.js languages between chat and diffs, avoiding the full language catalog in the diff bundle. Move README media out of public app assets.
 - Use the standard Base64 crate for attachments and the existing Tauri opener for preview links; remove unused SQLite and narrow the direct Tokio feature set. Apply compatible npm security fixes.

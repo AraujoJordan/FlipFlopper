@@ -18,8 +18,9 @@ const TITLES: Record<SideTab, string> = {
 /** Right-hand pane. Each tab stays mounted after its first visit, so terminals
  *  and the preview iframe keep their state while you look at something else. */
 const SidePane: Component = () => {
-  const [visited, setVisited] = createSignal<Set<SideTab>>(new Set([layout.sideTab]));
+  const [visited, setVisited] = createSignal<Set<SideTab>>(new Set());
   createEffect(() => {
+    if (!layout.sideOpen) return;
     const tab = layout.sideTab;
     if (!visited().has(tab)) setVisited((v) => new Set(v).add(tab));
   });
@@ -34,7 +35,7 @@ const SidePane: Component = () => {
   const width = createMemo(() => Math.max(SIDE_MIN, layout.sideWidth));
 
   return (
-    <aside class="side-pane" style={{ width: `${width()}px` }}>
+    <aside class="side-pane" hidden={!layout.sideOpen} style={{ width: `${width()}px` }}>
       <div
         class="side-resize"
         classList={{ "side-resize-active": dragging() }}
