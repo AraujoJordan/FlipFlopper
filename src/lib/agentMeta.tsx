@@ -159,7 +159,7 @@ export const AgentLogo: Component<{
       <Show when={props.icon && !imageFailed()} fallback={
         <span style={{
           color: "var(--fg-default)",
-          "font-family": "'JetBrains Mono', monospace",
+          "font-family": "var(--font-mono)",
           "font-weight": "700", "font-size": `${Math.max(10, Math.round(size() * 0.52))}px`,
           "line-height": "1",
         }}>

@@ -684,3 +684,12 @@ test('presentation hints are live-only, do not replay text deltas, and unsubscri
   await new Promise((resolve)=>setTimeout(resolve,70));
   assert.equal(batches.length,1);
 });
+
+test('spinner and running indicator animations are enabled in standard motion', () => {
+  const css = readFileSync(new URL("../src/App.css", import.meta.url), "utf8");
+  assert.match(css, /\.ui-spinner\s*\{[^}]*animation:\s*spin/);
+  assert.doesNotMatch(css, /\.sidebar\s+\.ui-spinner[^{]*\{\s*animation:\s*none/);
+  assert.doesNotMatch(css, /\.tool-row\s+\.ui-spinner[^{]*\{\s*animation:\s*none/);
+  assert.doesNotMatch(css, /(^|\n)\.session-header-live[^{]*\{\s*animation:\s*none/);
+  assert.doesNotMatch(css, /(^|\n)\.flow-gate-pulse\s*\{\s*animation:\s*none/);
+});

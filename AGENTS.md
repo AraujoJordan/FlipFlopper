@@ -205,6 +205,7 @@ src/
   lib/projects.ts            open/pick/forget project, project-created seeding
   lib/gitStatus.ts           shared git status/sync poll (header badge + Changes)
   lib/orchestrator.ts        flow canvas on sessions (see Project Snapshot)
+  lib/explain.ts             Explain tab state: provider choice, per-session text
   lib/shortcuts.ts           global shortcuts + SHORTCUT_GROUPS reference
   lib/agentMeta.tsx          agent colors/logos and model/effort options
   lib/fileIcons.ts           compact file-category -> Material Symbol mapping
@@ -223,7 +224,7 @@ src/
                              Transcript, MessageItem, ToolCallRow, InlineDiff,
                              Markdown, Composer, EmptyState, AttachmentChip
     side/                    SidePane (CSS-toggled tabs), ChangesView,
-                             PreviewView, TerminalView, FlowView
+                             PreviewView, TerminalView, FlowView, ExplainView
     flow/                    FlowCanvas, FlowNodeCard, FlowEdges, AddStepMenu
     git/                     SyncHeader, ChangesTab, HistoryTab, dialogs
                              (squash-push, conflict fix, worktree merge/discard)
@@ -336,11 +337,15 @@ requires generated output.
   jade/graphite (Circuit), with porcelain light mode and iris handoffs. Do not
   restore the superseded Claude Desktop styling.
 
-- `lib/layout.ts` owns durable `system | reduced | off` motion preferences and
-  live OS/visibility resolution. Shared cancellable WAAPI/presence/list helpers
-  live in `components/ui.tsx`; settle pending work when preferences change.
-  Reduced allows only short opacity feedback; Off is immediate. Theme token
-  pairs swap atomically, including cached-terminal themes.
+- `lib/layout.ts` owns durable `system | reduced | off` motion preferences,
+  live OS/visibility resolution, and persistent interface zoom (`50%`–`200%` via
+  `⌘/Ctrl` + `+`/`=`/`-`/`0`, `⌘/Ctrl + Scroll`, native View menu and Settings).
+  Shared cancellable WAAPI/presence/list helpers live in `components/ui.tsx`;
+  settle pending work when preferences change. Reduced allows only short opacity
+  feedback; Off is immediate. Theme token pairs swap atomically, including
+  cached-terminal themes. Typography pairs `CaskaydiaCove Nerd Font Propo`
+  (`--font-sans`, `--font-display`) with `CaskaydiaCove Nerd Font Mono`
+  (`--font-mono`) using local `@font-face` weight/italic mappings.
 - `onLivePresentation` in `lib/chat.ts` emits transient hints after live reduction.
   History/import/replay must never produce message entrances. Keep the reducer
   pure, later text deltas immediate, and backend outcomes independent of motion.

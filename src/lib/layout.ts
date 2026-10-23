@@ -1,12 +1,17 @@
 import { createStore, produce } from "solid-js/store";
 import { batch, createSignal } from "solid-js";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { readPref, writePref } from "./appPrefs";
 
-export type SideTab = "changes" | "preview" | "terminal" | "flow";
+export type SideTab = "changes" | "preview" | "terminal" | "flow" | "explain";
 export type ThemePref = "system" | "light" | "dark";
 export type MotionPref = "system" | "reduced" | "off";
 export type ResolvedMotion = "full" | "reduced" | "off";
 export const MOTION_EVENT = "flipflopper:motion-changed";
+export const ZOOM_EVENT = "flipflopper:zoom-changed";
+export const ZOOM_STEPS = [0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.33, 1.5, 1.75, 2.0] as const;
+export const ZOOM_MIN = ZOOM_STEPS[0];
+export const ZOOM_MAX = ZOOM_STEPS[ZOOM_STEPS.length - 1];
 const [motionReady, setMotionReady] = createSignal(false);
 const [osReduced, setOsReduced] = createSignal(false);
 const [foreground, setForeground] = createSignal(true);
@@ -61,6 +66,7 @@ interface LayoutState {
   sideWidth: number;
   theme: ThemePref;
   motion: MotionPref;
+  zoom: number;
   /** Sidebar grouping: by project, or by recency. */
   sidebarGroup: "project" | "date";
   /** Project path the sidebar is filtered to, or null for all. */
@@ -80,6 +86,7 @@ const DEFAULTS: LayoutState = {
   sideWidth: 480,
   theme: "system",
   motion: "system",
+  zoom: 1,
   sidebarGroup: "project",
   projectFilter: null,
   projectOrder: [],
@@ -110,6 +117,55 @@ export function applyTheme(theme: ThemePref) {
   window.dispatchEvent(new Event("flipflopper:theme-changed"));
 }
 
+function clampZoom(value: unknown): number {
+  const num = typeof value === "number" && Number.isFinite(value) ? value : 1;
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(num * 100) / 100));
+}
+
+export function applyZoom(zoom: number) {
+  const level = clampZoom(zoom);
+  const style = typeof document !== "undefined" ? document.documentElement?.style : undefined;
+  const hasTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (hasTauri) {
+    style?.removeProperty?.("zoom");
+    void getCurrentWebview().setZoom(level).catch(() => {
+      if (style) style.zoom = level === 1 ? "" : String(level);
+    });
+  } else if (style) {
+    style.zoom = level === 1 ? "" : String(level);
+  }
+  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+    window.dispatchEvent(new Event(ZOOM_EVENT));
+  }
+}
+
+export function setZoomLevel(zoom: number) {
+  const next = clampZoom(zoom);
+  if (layout.zoom === next) return;
+  setLayout("zoom", next);
+  applyZoom(next);
+  persist();
+}
+
+export function stepZoom(dir: 1 | -1) {
+  const current = clampZoom(layout.zoom);
+  if (dir === 1) {
+    const next = ZOOM_STEPS.find((s) => s > current + 0.005) ?? ZOOM_MAX;
+    setZoomLevel(next);
+  } else {
+    let prev: number = ZOOM_MIN;
+    for (const s of ZOOM_STEPS) {
+      if (s < current - 0.005) prev = s;
+      else break;
+    }
+    setZoomLevel(prev);
+  }
+}
+
+export function resetZoom() {
+  setZoomLevel(1);
+}
+
 export async function hydrateLayout() {
   const persisted = await readPref<Partial<LayoutState>>(KEY, {}, () => ({}));
   const saved = persisted && typeof persisted === "object" && !Array.isArray(persisted) ? persisted : {};
@@ -117,9 +173,10 @@ export async function hydrateLayout() {
   const names = saved.projectNames;
   const projectNames = Object.fromEntries(names && typeof names === "object" && !Array.isArray(names)
     ? Object.entries(names).filter((entry): entry is [string, string] => typeof entry[1] === "string" && !!entry[1].trim()).map(([path, name]) => [path, name.trim().slice(0, 80)]) : []);
-  setLayout({ ...DEFAULTS, ...saved, projectNames, projectOrder: paths(saved.projectOrder), hiddenProjects: paths(saved.hiddenProjects) });
+  setLayout({ ...DEFAULTS, ...saved, zoom: clampZoom(saved.zoom), projectNames, projectOrder: paths(saved.projectOrder), hiddenProjects: paths(saved.hiddenProjects) });
   if (!["system", "reduced", "off"].includes(layout.motion)) setLayout("motion", "system");
   applyTheme(layout.theme);
+  applyZoom(layout.zoom);
   setMotionReady(true);
   applyMotion();
 }

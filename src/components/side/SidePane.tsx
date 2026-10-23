@@ -6,6 +6,7 @@ import { usePresence, useValueMotion } from "../ui";
 import ChangesView from "./ChangesView";
 import PreviewView from "./PreviewView";
 import TerminalView from "./TerminalView";
+import ExplainView from "./ExplainView";
 
 const FlowView = lazy(() => import("./FlowView"));
 
@@ -14,6 +15,7 @@ const TITLES: Record<SideTab, string> = {
   preview: "Preview",
   terminal: "Terminal",
   flow: "Flow",
+  explain: "Explain",
 };
 
 /** Right-hand pane. Each tab stays mounted after its first visit, so terminals
@@ -96,6 +98,9 @@ const SidePane: Component = () => {
         </div>
         <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "flow" }}>
           <Show when={seen("flow")}><FlowView /></Show>
+        </div>
+        <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "explain" }}>
+          <Show when={seen("explain")}><ExplainView /></Show>
         </div>
       </div>
     </aside>

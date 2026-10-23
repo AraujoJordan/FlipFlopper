@@ -320,6 +320,15 @@ export const commitsAheadOfRemote = (projectPath: string): Promise<CommitEntry[]
 export const squashUnpushed = (projectPath: string, message: string): Promise<void> =>
   invoke("squash_unpushed", { projectPath, message });
 
+export type ExplainProvider =
+  | { kind: "agent"; agent_id: string; model?: string | null }
+  | { kind: "ollama"; model: string };
+export interface ExplainResult { text: string; source: string }
+
+export const chatExplain = (sessionId: string, provider: ExplainProvider, language: string): Promise<ExplainResult> =>
+  invoke("chat_explain", { sessionId, provider, language });
+export const listOllamaModels = (): Promise<string[]> => invoke("list_ollama_models");
+
 export const generateCommitMessage = (projectPath: string, agentId: string): Promise<string> =>
   invoke("generate_commit_message", { projectPath, agentId });
 
@@ -703,7 +712,7 @@ export interface NativeMenuState {
   fullAccess: boolean;
   sidebarOpen: boolean;
   sidePaneOpen: boolean;
-  sideTab: "changes" | "preview" | "terminal" | "flow";
+  sideTab: "changes" | "preview" | "terminal" | "flow" | "explain";
 }
 
 export const syncNativeMenuState = (state: NativeMenuState): Promise<void> =>

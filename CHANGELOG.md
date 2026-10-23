@@ -1,10 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.13.0 - 2026-10-23
+
+### Added
+
+- Plain-language **Explain** tab in the side pane (`ExplainView`) to summarize the current session and changes using a selectable agent/model provider.
+- **Typography & CaskaydiaCove font stacks**: pair `CaskaydiaCove Nerd Font Propo` for UI and chat prose (`--font-sans`, `--font-display`) with `CaskaydiaCove Nerd Font Mono` (`--font-mono`) for code blocks, inline diffs, `DiffPane` and `TerminalPane`, with explicit `@font-face` local mappings across Light, SemiLight, Regular, SemiBold, Bold and Italic faces.
+- **Browser-convention zoom**: zoom in/out/reset via keyboard (`⌘/Ctrl` + `+`/`=`/`-`/`0`, including numpad), mouse wheel (`⌘/Ctrl + Scroll`), native `View` menu commands, and **Settings → Appearance → Zoom**, persisted across launches with automatic terminal refit.
+- Rich media attachment previews (enlarged image, video and audio dialogs via exact-file asset protocol access), draft attachment removal, and responsive composer chip wrapping.
+- Project sidebar reordering (drag-and-drop and `Alt+↑/↓`), display-name aliases (`F2`), project context menu (`Shift+F10`), and non-destructive project hiding with Undo.
 
 ### Fixed
 
 - Stop creating agent instructions, `.agents/` defaults and Git repositories when opening existing projects. Make agent setup an explicit Settings action, preserve existing/tracked files and exclude only newly generated files through Git's local metadata. New projects also leave agent setup optional.
+- Preserve composer drafts and attachments across slow session startups and failed first turns.
 
 ## 0.12.0 - 2026-10-23
 

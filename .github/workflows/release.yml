@@ -106,18 +106,18 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            Circuit brings graphite/jade dark mode, porcelain light mode and iris
-            handoffs, with expanded motion across chat, panes, Flow and dialogs.
-            Settings offers System / Reduced / Off motion.
+            FlipFlopper 0.13.0 adds the CaskaydiaCove Nerd Font Propo/Mono typography
+            stack with true Regular, SemiBold, Bold and Italic face resolution across
+            chat, diffs and terminals, plus browser-convention zoom (Cmd/Ctrl + +/-/0,
+            Cmd/Ctrl + Scroll, View menu and Appearance settings).
 
-            The one-click YOLO switch converts the current session. Claude/Cursor
-            apply permission changes live, including pending tool approvals.
-            Headless sessions save the change immediately and mark when the running
-            process will apply it on the next turn. Questions/forms remain interactive.
+            Also includes the new Explain side-pane tab for plain-language session
+            summaries, rich image/video/audio attachment previews, project sidebar
+            reordering/renaming/hiding with Undo, and opt-in local agent setup that
+            leaves existing repositories untouched on open.
 
-            Installers include the pinned Node sidecar and Claude ACP helper. Extract
-            portable archives in full. Native Claude requires macOS 13.5+ on a Mac.
-            Cursor's known authenticated ACP limitation remains; see the README.
+            Installers include the pinned Node sidecar and Claude ACP helper. Native
+            Claude requires macOS 13.5+ on a Mac.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'

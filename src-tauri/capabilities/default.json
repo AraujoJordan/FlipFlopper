@@ -18,6 +18,7 @@
     "window-state:default",
     "process:allow-restart",
     "process:allow-exit",
-    "core:window:allow-request-user-attention"
+    "core:window:allow-request-user-attention",
+    "core:webview:allow-set-webview-zoom"
   ]
 }

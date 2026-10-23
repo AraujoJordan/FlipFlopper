@@ -1,6 +1,6 @@
 import { onMount, onCleanup, createEffect, type Component } from "solid-js";
 import { Terminal, type ITheme } from "@xterm/xterm";
-import { MOTION_EVENT, layout, resolvedMotion, motionForeground } from "../lib/layout";
+import { MOTION_EVENT, ZOOM_EVENT, layout, resolvedMotion, motionForeground } from "../lib/layout";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { onPtyOutput, onPtyExit, ptyInput, ptyResize, ptyAttach } from "../lib/ipc";
@@ -55,9 +55,14 @@ function terminalTheme(): ITheme {
 function createCachedTerminal(sessionId: string): CachedTerminal {
   const terminal = new Terminal({
     theme: terminalTheme(),
-    fontFamily: cssVar("--font-mono", "ui-monospace, Menlo, monospace"),
+    fontFamily: cssVar(
+      "--font-mono",
+      '"CaskaydiaCove Nerd Font Mono", "CaskaydiaCove NFM", "CaskaydiaCoveNFM-Regular", ui-monospace, Menlo, monospace',
+    ),
     fontSize: 13,
     lineHeight: 1.0,
+    fontWeight: "400",
+    fontWeightBold: "700",
     cursorBlink: resolvedMotion() === "full" && motionForeground(),
     allowProposedApi: true,
     scrollback: 5000,
@@ -160,6 +165,11 @@ const TerminalPane: Component<Props> = (props) => {
       if (props.active) fitAndResize();
     });
     resizeObserver.observe(wrapperRef);
+    const onZoomChanged = () => {
+      if (props.active) fitAndResize();
+    };
+    window.addEventListener(ZOOM_EVENT, onZoomChanged);
+    onCleanup(() => window.removeEventListener(ZOOM_EVENT, onZoomChanged));
   });
 
   createEffect(() => {

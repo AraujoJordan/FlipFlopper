@@ -14,6 +14,7 @@ const PANE_BUTTONS: { tab: SideTab; icon: IconName; label: string; keys?: string
   { tab: "preview", icon: "globe", label: "Preview" },
   { tab: "terminal", icon: "terminal", label: "Terminal", keys: `${MOD}J` },
   { tab: "flow", icon: "flow", label: "Flow" },
+  { tab: "explain", icon: "help", label: "Explain" },
 ];
 
 /** App toolbar below the native title bar: editable session title, project +

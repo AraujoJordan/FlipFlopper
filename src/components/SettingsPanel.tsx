@@ -1,7 +1,8 @@
 import { Component, For, Show, createSignal, onMount } from "solid-js";
+import { ExplainProviderSelect } from "./side/ExplainView";
 import { getVersion } from "@tauri-apps/api/app";
 import { chat, setComposer } from "../lib/chat";
-import { layout, setTheme, setMotion, type MotionPref, type ThemePref } from "../lib/layout";
+import { layout, resetZoom, setTheme, setMotion, stepZoom, ZOOM_MAX, ZOOM_MIN, type MotionPref, type ThemePref } from "../lib/layout";
 import { notifyOnFinish, setNotifyOnFinish } from "../lib/settings";
 import { SHORTCUT_GROUPS } from "../lib/shortcuts";
 import { store, addTerminal, setStore, effectiveRoot } from "../lib/store";
@@ -195,6 +196,36 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
                   </For>
                 </div>
               </Row>
+              <Row title="Zoom" hint="Scale the interface with Cmd/Ctrl + (+/−/0) or Cmd/Ctrl + Scroll.">
+                <div class="seg" role="group" aria-label="Zoom">
+                  <button
+                    class="seg-btn"
+                    disabled={layout.zoom <= ZOOM_MIN}
+                    onClick={() => stepZoom(-1)}
+                    title="Zoom out"
+                    aria-label="Zoom out"
+                  >
+                    −
+                  </button>
+                  <button
+                    class="seg-btn"
+                    classList={{ "seg-on": Math.round(layout.zoom * 100) === 100 }}
+                    onClick={resetZoom}
+                    title="Reset zoom to 100%"
+                  >
+                    {Math.round(layout.zoom * 100)}%
+                  </button>
+                  <button
+                    class="seg-btn"
+                    disabled={layout.zoom >= ZOOM_MAX}
+                    onClick={() => stepZoom(1)}
+                    title="Zoom in"
+                    aria-label="Zoom in"
+                  >
+                    +
+                  </button>
+                </div>
+              </Row>
             </Show>
 
             <Show when={section() === "agents"}>
@@ -202,6 +233,13 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
               <p class="settings-lead">
                 Claude Code and Cursor use persistent native agent sessions with interactive approvals. Other supported CLIs use their headless mode. Each agent keeps its existing login, MCP servers, rules and settings.
               </p>
+              <div class="settings-row">
+                <div>
+                  <div class="settings-row-title">Explain tab model</div>
+                  <div class="settings-row-hint">Writes the plain-language session summary. Auto uses the cheapest model of the session's agent.</div>
+                </div>
+                <ExplainProviderSelect />
+              </div>
               <button class="ui-btn ui-btn-outline settings-btn" disabled={refreshingAgents()} onClick={() => void refreshAgents()}>{refreshingAgents() ? "Checking…" : "Refresh agent readiness"}</button>
               <div class="agent-list">
                 <For each={store.agents}>

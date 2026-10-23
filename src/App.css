@@ -1,5 +1,131 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Explicit local @font-face mappings so CaskaydiaCove Nerd Font Propo (UI/chat)
+   and CaskaydiaCove Nerd Font Mono (code/diffs/terminal) resolve their genuine
+   Light, SemiLight, Regular, SemiBold, Bold, and Italic faces instead of falling
+   back to synthetic bold/oblique when sub-weights use distinct family names. */
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: normal;
+  font-weight: 300;
+  src: local("CaskaydiaCoveNFP-Light"), local("CaskaydiaCove NFP Light");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: italic;
+  font-weight: 300;
+  src: local("CaskaydiaCoveNFP-LightItalic"), local("CaskaydiaCove NFP Light Italic");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: normal;
+  font-weight: 350;
+  src: local("CaskaydiaCoveNFP-SemiLight"), local("CaskaydiaCove NFP SemiLight");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: italic;
+  font-weight: 350;
+  src: local("CaskaydiaCoveNFP-SemiLightItalic"), local("CaskaydiaCove NFP SemiLight Italic");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: normal;
+  font-weight: 400;
+  src: local("CaskaydiaCoveNFP-Regular"), local("CaskaydiaCove NFP Regular");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: italic;
+  font-weight: 400;
+  src: local("CaskaydiaCoveNFP-Italic"), local("CaskaydiaCove NFP Italic");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: normal;
+  font-weight: 500 650;
+  src: local("CaskaydiaCoveNFP-SemiBold"), local("CaskaydiaCove NFP SemiBold");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: italic;
+  font-weight: 500 650;
+  src: local("CaskaydiaCoveNFP-SemiBoldItalic"), local("CaskaydiaCove NFP SemiBold Italic");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: normal;
+  font-weight: 700;
+  src: local("CaskaydiaCoveNFP-Bold"), local("CaskaydiaCove NFP Bold");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Propo";
+  font-style: italic;
+  font-weight: 700;
+  src: local("CaskaydiaCoveNFP-BoldItalic"), local("CaskaydiaCove NFP Bold Italic");
+}
+
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: normal;
+  font-weight: 300;
+  src: local("CaskaydiaCoveNFM-Light"), local("CaskaydiaCove NFM Light");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: italic;
+  font-weight: 300;
+  src: local("CaskaydiaCoveNFM-LightItalic"), local("CaskaydiaCove NFM Light Italic");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: normal;
+  font-weight: 350;
+  src: local("CaskaydiaCoveNFM-SemiLight"), local("CaskaydiaCove NFM SemiLight");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: italic;
+  font-weight: 350;
+  src: local("CaskaydiaCoveNFM-SemiLightItalic"), local("CaskaydiaCove NFM SemiLight Italic");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: normal;
+  font-weight: 400;
+  src: local("CaskaydiaCoveNFM-Regular"), local("CaskaydiaCove NFM Regular");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: italic;
+  font-weight: 400;
+  src: local("CaskaydiaCoveNFM-Italic"), local("CaskaydiaCove NFM Italic");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: normal;
+  font-weight: 500 650;
+  src: local("CaskaydiaCoveNFM-SemiBold"), local("CaskaydiaCove NFM SemiBold");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: italic;
+  font-weight: 500 650;
+  src: local("CaskaydiaCoveNFM-SemiBoldItalic"), local("CaskaydiaCove NFM SemiBold Italic");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: normal;
+  font-weight: 700;
+  src: local("CaskaydiaCoveNFM-Bold"), local("CaskaydiaCove NFM Bold");
+}
+@font-face {
+  font-family: "CaskaydiaCove Nerd Font Mono";
+  font-style: italic;
+  font-weight: 700;
+  src: local("CaskaydiaCoveNFM-BoldItalic"), local("CaskaydiaCove NFM Bold Italic");
+}
+
 /* Circuit: neutral graphite / porcelain, jade actions and iris handoffs.
    Keep semantic roles stable across shell, syntax and cached terminals. */
 :root {
@@ -53,10 +179,10 @@
   --radius-lg: 12px;
   --radius-xl: 16px;
 
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
-  /* Display face for headings: the system sans, tighter and heavier. */
-  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --font-sans: "CaskaydiaCove Nerd Font Propo", "CaskaydiaCove NFP", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  /* Display face for headings: proportional CaskaydiaCove with system display fallback. */
+  --font-display: "CaskaydiaCove Nerd Font Propo", "CaskaydiaCove NFP", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "CaskaydiaCove Nerd Font Mono", "CaskaydiaCove NFM", "CaskaydiaCoveNFM-Regular", "CaskaydiaCove Nerd Font", "CaskaydiaCove NF", "Cascadia Mono", "Cascadia Code", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 
   --dur-instant: 80ms;
   --dur-feature: 420ms;
@@ -188,6 +314,9 @@ html, body {
   margin: 0;
   padding: 0;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-synthesis: weight style;
 }
 
 #root {
@@ -898,7 +1027,12 @@ input, textarea {
 .md li > ul, .md li > ol { margin: .2em 0 0; }
 .md a { color: var(--accent); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
-.md strong { color: var(--fg-default); font-weight: 650; }
+.md strong, .md b { color: var(--fg-default); font-weight: 650; }
+.md em, .md i { font-style: italic; }
+.md code, .md-code code, .tool-pre, .inline-diff, .diff-row {
+  font-feature-settings: "calt" 1, "liga" 1;
+  font-variant-ligatures: contextual common-ligatures;
+}
 .md code {
   font: 0.88em var(--font-mono); background: var(--surface-3); padding: .12em .38em;
   border-radius: 5px; border: 1px solid var(--border-muted);
@@ -1342,8 +1476,6 @@ input, textarea {
 .motion-selection-marker { position: fixed; z-index: 95; pointer-events: none; border-radius: 3px; background: var(--accent); }
 .motion-menu { transform-origin: center bottom; }
 .ui-spinner { animation: spin .9s linear infinite; }
-.sidebar .ui-spinner, .tool-row .ui-spinner { animation: none; }
-.session-header-live, .running-pulse, .flow-gate-pending { animation: none; }
 .theme-settle { position: fixed; inset: 0 0 auto; height: 100px; z-index: 90; pointer-events: none; background: linear-gradient(to bottom, color-mix(in srgb, var(--accent) 9%, transparent), transparent); }
 
 button, input, textarea, select { -webkit-tap-highlight-color: transparent; }
@@ -1403,7 +1535,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .motion-card-enter { animation: circuit-enter var(--dur-enter) var(--ease-out) both; }
 :root[data-motion="reduced"] { --dur-instant: 80ms; --dur-fast: 80ms; --dur-base: 80ms; --dur-slow: 80ms; --dur-enter: 80ms; --dur-feature: 80ms; --dur-celebrate: 80ms; }
 :root[data-motion="off"] { --dur-instant: 0ms; --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; --dur-enter: 0ms; --dur-feature: 0ms; --dur-celebrate: 0ms; }
-:root:is([data-motion="reduced"], [data-motion="off"]) :is(.ui-spinner, .typing-dots span, .session-header-live, .running-pulse, .flow-gate-pending, .new-project-shell, .new-project-category, .overlay-backdrop-in, .overlay-pop-in, .toast-item, .motion-card-enter) { animation: none !important; }
+:root:is([data-motion="reduced"], [data-motion="off"]) :is(.ui-spinner, .typing-dots span, .session-header-live, .running-pulse, .flow-gate-pending, .flow-gate-pulse, .new-project-shell, .new-project-category, .overlay-backdrop-in, .overlay-pop-in, .toast-item, .motion-card-enter) { animation: none !important; }
 :root:is([data-motion="reduced"], [data-motion="off"]) :is(.ui-btn, .press, .icon-btn, .pill, .pane-toggle, .sidebar-new, .msg-action, .attach-remove, .seg-btn, .queued-send):active { transform: none !important; }
 :root:is([data-motion="reduced"], [data-motion="off"]) :is(.transcript, .palette-list) { scroll-behavior: auto !important; }
 :root[data-motion="off"] :is(.hover-tint, .ui-btn, .press, .icon-btn, .pill, .pane-toggle, .sidebar-new, .msg-action, .attach-remove, .seg-btn, .queued-send, .tool-row-head, .session-row, .settings-nav-item, .palette-item, .side-resize::after, .toast-item, .new-project-progress span) { animation: none !important; transition: none !important; }
@@ -1417,7 +1549,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .handoff-marker { display: block; position: absolute; left: 0; width: 8px; height: 4px; border-radius: 3px; background: var(--accent-2); opacity: 0; }
 .msg-done { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: var(--status-add); font-size: 12px; font-weight: 500; }
 .side-scrim { position: absolute; inset: 0; z-index: 29; background: rgba(3,12,16,.35); }
-.flow-gate-pulse { animation: none; }
 .flow-card { border: 1px solid var(--border-default); }
 .flow-card:hover { border-color: var(--border-strong); }
 .flow-card[data-flow-status="waiting"] { border-top-color: var(--status-mod); }
@@ -1448,3 +1579,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-box, .ui-field, .session-row-input, .session-title-input, .new-project-field input, .new-project-folder-button { border-color: var(--border-strong); }
 
 :root[data-theme-switching="true"] :is(#root, .motion-host, .motion-toasts, [role="menu"]) :is([class], button, input, textarea, select):not(.xterm, .xterm *) { transition: none !important; }
+
+/* Explain tab */
+.explain-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.explain-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border-muted); }
+.explain-select { flex: 1; min-width: 0; font: inherit; font-size: 12.5px; color: var(--fg-default); background: var(--bg-subtle, transparent); border: 1px solid var(--border-default); border-radius: 6px; padding: 5px 8px; }
+.explain-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; font-size: 13.5px; line-height: 1.55; }
+.explain-body h2 { font-size: 13px; margin: 16px 0 6px; color: var(--fg-default); }
+.explain-body h2:first-child { margin-top: 0; }
+.explain-stale { opacity: 0.55; transition: opacity 120ms; }
+.explain-meta { margin-top: 16px; font-size: 11.5px; color: var(--fg-subtle); }
+.explain-note { font-size: 12.5px; color: var(--fg-subtle); margin-bottom: 10px; }
+.explain-error { font-size: 12.5px; color: var(--danger, #f85149); margin-bottom: 10px; white-space: pre-wrap; }

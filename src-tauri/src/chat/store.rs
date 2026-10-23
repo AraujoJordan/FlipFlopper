@@ -318,6 +318,18 @@ const DIGEST_MAX_BYTES: usize = 24 * 1024;
 /// lost) the conversation can continue it. Keeps the most recent content when
 /// over budget. Returns `None` when there is nothing worth replaying.
 pub fn build_digest(entries: &[Entry], agent_names: &HashMap<String, String>) -> Option<String> {
+    digest_body(entries, agent_names, DIGEST_MAX_BYTES).map(|body| {
+        format!(
+            "You are continuing an existing conversation about this repository that was \
+             handled by other coding agents. Their file changes are already in the working tree.\n\n\
+             ## Conversation so far\n{body}"
+        )
+    })
+}
+
+/// The transcript blocks of [`build_digest`] without any framing text, trimmed
+/// to `max_bytes` (newest blocks win).
+pub fn digest_body(entries: &[Entry], agent_names: &HashMap<String, String>, max_bytes: usize) -> Option<String> {
     let name = |id: &str| agent_names.get(id).cloned().unwrap_or_else(|| id.to_string());
     let mut blocks: Vec<String> = Vec::new();
     let mut assistant = String::new();
@@ -378,7 +390,7 @@ pub fn build_digest(entries: &[Entry], agent_names: &HashMap<String, String>) ->
     let mut kept: Vec<&String> = Vec::new();
     let mut size = 0usize;
     for block in blocks.iter().rev() {
-        if size + block.len() > DIGEST_MAX_BYTES && !kept.is_empty() {
+        if size + block.len() > max_bytes && !kept.is_empty() {
             break;
         }
         size += block.len();
@@ -386,16 +398,106 @@ pub fn build_digest(entries: &[Entry], agent_names: &HashMap<String, String>) ->
     }
     kept.reverse();
     let omitted = blocks.len() - kept.len();
-    let mut out = String::from(
-        "You are continuing an existing conversation about this repository that was \
-         handled by other coding agents. Their file changes are already in the working tree.\n\n\
-         ## Conversation so far\n",
-    );
+    let mut out = String::new();
     if omitted > 0 {
         out.push_str(&format!("_({omitted} earlier messages omitted)_\n\n"));
     }
     out.push_str(&kept.iter().map(|b| b.as_str()).collect::<Vec<_>>().join("\n\n"));
     Some(out)
+}
+
+/// Max transcript bytes sent for an explanation (cheap models need less).
+pub const EXPLAIN_MAX_BYTES: usize = 12 * 1024;
+
+/// Scratch directory for explanation runs, so the helper agent does not load
+/// the project's rules, MCP servers or settings.
+pub fn explain_scratch_dir() -> PathBuf {
+    let dir = root_dir().parent().map(|p| p.join("explain")).unwrap_or_else(|| PathBuf::from("."));
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+fn clip(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if text.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
+/// One open agent request as short readable text for the explain prompt.
+fn describe_pending(item: &super::acp_types::Interaction) -> String {
+    let p = &item.payload;
+    let text = |v: &serde_json::Value| v.as_str().map(str::to_string);
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(m) = p.get("message").and_then(text) {
+        parts.push(format!("message: {}", clip(&m, 600)));
+    }
+    if let Some(tool) = p.get("toolCall") {
+        let title = tool.get("title").and_then(text).unwrap_or_default();
+        let input = tool.get("rawInput").filter(|v| !v.is_null()).map(|v| clip(&v.to_string(), 500)).unwrap_or_default();
+        parts.push(format!("tool: {title} {input}").trim().to_string());
+    }
+    if let Some(options) = p.get("options").and_then(|v| v.as_array()) {
+        let names: Vec<String> = options.iter().filter_map(|o| o.get("name").and_then(text)).collect();
+        if !names.is_empty() {
+            parts.push(format!("options: {}", names.join(" | ")));
+        }
+    }
+    if let Some(questions) = p.get("questions").and_then(|v| v.as_array()) {
+        for q in questions {
+            let prompt = q.get("prompt").and_then(text).unwrap_or_default();
+            let labels: Vec<String> = q.get("options").and_then(|v| v.as_array()).into_iter().flatten()
+                .filter_map(|o| o.get("label").and_then(text)).collect();
+            parts.push(format!("question: {} [{}]", clip(&prompt, 400), labels.join(" | ")));
+        }
+    }
+    for key in ["overview", "plan", "url"] {
+        if let Some(v) = p.get(key).and_then(text) {
+            parts.push(format!("{key}: {}", clip(&v, 1200)));
+        }
+    }
+    if let Some(props) = p.get("requestedSchema").and_then(|s| s.get("properties")).and_then(|v| v.as_object()) {
+        let fields: Vec<String> = props.iter()
+            .map(|(k, v)| v.get("title").and_then(text).unwrap_or_else(|| k.clone())).collect();
+        parts.push(format!("form fields: {}", fields.join(", ")));
+    }
+    if parts.is_empty() {
+        parts.push(clip(&p.to_string(), 600));
+    }
+    format!("- {:?}: {} — {}\n", item.kind, item.title, parts.join("; "))
+}
+
+/// Prompt asking a model to explain a session to a non-expert in ASD-STE100
+/// style. `transcript` comes from [`digest_body`]; `pending` are the agent's
+/// open questions/approvals, if any.
+pub fn build_explain_prompt(
+    transcript: Option<&str>,
+    pending: &[super::acp_types::Interaction],
+    language: &str,
+) -> String {
+    let mut out = format!(
+        "You explain a coding-agent session to a user who is not an expert.\n\
+Write in this language: {language}.\n\
+Follow ASD-STE100 (Simplified Technical English) rules, also in other languages: \
+use short, common words; one idea per sentence; active voice; present tense; \
+at most 20 words per sentence; explain any technical term in a few words; \
+do not use idioms.\n\
+Use exactly these markdown headings, translated into the language above:\n\
+## What is happening\n(2 to 4 short bullets: the goal, what is done, what happens now)\n\
+## What the agent asks you\n(only if the section 'Waiting for the user' exists: say what the agent asks, why, \
+and what each answer does. Otherwise write that nothing is needed from the user.)\n\
+Do not add other text. Do not use tools. Do not change any file.\n\n\
+## Session transcript\n"
+    );
+    out.push_str(transcript.unwrap_or("The conversation is empty."));
+    if !pending.is_empty() {
+        out.push_str("\n\n## Waiting for the user\n");
+        for item in pending {
+            out.push_str(&describe_pending(item));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -435,6 +537,39 @@ mod tests {
         assert!(digest.contains("### Assistant (Claude Code)"));
         assert!(digest.contains("Added the button."));
         assert!(digest.contains("edit src/App.tsx"));
+    }
+
+    #[test]
+    fn explain_prompt_has_language_rules_and_pending() {
+        use crate::chat::acp_types::{Interaction, InteractionKind};
+        let pending = vec![Interaction {
+            id: "r1".into(),
+            turn_id: "t".into(),
+            kind: InteractionKind::Permission,
+            title: "Run npm install".into(),
+            payload: serde_json::json!({"toolCall": {"title": "npm install", "rawInput": {"cmd": "npm i"}}, "options": [{"name": "Allow"}, {"name": "Reject"}]}),
+        }];
+        let prompt = build_explain_prompt(Some("digest text"), &pending, "pt-BR");
+        assert!(prompt.contains("pt-BR"));
+        assert!(prompt.contains("ASD-STE100"));
+        assert!(prompt.contains("digest text"));
+        assert!(prompt.contains("## Waiting for the user"));
+        assert!(prompt.contains("Run npm install"));
+        assert!(prompt.contains("options: Allow | Reject"));
+        assert!(prompt.contains("tool: npm install"));
+        assert!(!prompt.contains("continuing"));
+        let none = build_explain_prompt(None, &[], "en");
+        assert!(!none.contains("## Waiting for the user\n-"));
+    }
+
+    #[test]
+    fn digest_body_has_no_framing_and_respects_budget() {
+        let names = HashMap::new();
+        let body = digest_body(&sample(), &names, DIGEST_MAX_BYTES).unwrap();
+        assert!(!body.contains("continuing"));
+        assert!(body.contains("add a button"));
+        let tiny = digest_body(&sample(), &names, 10).unwrap();
+        assert!(tiny.contains("earlier messages omitted"));
     }
 
     #[test]

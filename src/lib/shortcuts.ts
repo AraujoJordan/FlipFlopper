@@ -1,5 +1,5 @@
 import { cancelTurn, chat, navBack, navForward, selectSession, startNewSession } from "./chat";
-import { layout, toggleSide, toggleSidebar } from "./layout";
+import { layout, resetZoom, stepZoom, toggleSide, toggleSidebar } from "./layout";
 import { togglePalette } from "./palette";
 import { closeReview, store } from "./store";
 
@@ -76,6 +76,8 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: `${modKey}${altKey}B`, description: "Toggle side pane" },
       { keys: `${modKey}${shiftKey}G`, description: "Show Changes" },
       { keys: `${modKey}J`, description: "Show Terminal" },
+      { keys: `${modKey}+ / ${modKey}-`, description: "Zoom in / out (or Cmd/Ctrl + Scroll)" },
+      { keys: `${modKey}0`, description: "Actual size (reset zoom)" },
       { keys: `${modKey},`, description: "Settings" },
       { keys: "Escape", description: "Close diff / dismiss menus" },
       { keys: "?", description: "Show this shortcuts reference" },
@@ -153,6 +155,17 @@ export function installGlobalShortcuts(): () => void {
     if (mod && !e.shiftKey && !e.altKey && key === "l") return handle(() => runAction("focus-prompt"));
     if (mod && !e.shiftKey && !e.altKey && e.key === ".") return handle(cancelTurn);
 
+    // Browser-convention zoom: Cmd/Ctrl + (+/=), (-/_), and 0 (including numpad).
+    if (mod && !e.altKey && (e.key === "=" || e.key === "+" || e.code === "Equal" || e.code === "NumpadAdd")) {
+      return handle(() => stepZoom(1));
+    }
+    if (mod && !e.altKey && (e.key === "-" || e.key === "_" || e.code === "Minus" || e.code === "NumpadSubtract")) {
+      return handle(() => stepZoom(-1));
+    }
+    if (mod && !e.shiftKey && !e.altKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
+      return handle(resetZoom);
+    }
+
     if (mod && !e.shiftKey && !e.altKey && e.code === "BracketLeft") return handle(navBack);
     if (mod && !e.shiftKey && !e.altKey && e.code === "BracketRight") return handle(navForward);
     if (mod && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
@@ -180,6 +193,35 @@ export function installGlobalShortcuts(): () => void {
     }
   }
 
+  let wheelAccum = 0;
+  let wheelResetTimer: ReturnType<typeof setTimeout> | undefined;
+  function handleWheel(e: WheelEvent) {
+    if (!e.ctrlKey && !e.metaKey) return;
+    if (e.altKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.deltaY === 0) return;
+
+    // Normalize discrete wheel lines vs pixel trackpad deltas so one physical
+    // wheel notch steps once and smooth trackpad gestures don't overshoot.
+    const delta = e.deltaMode === 1 ? e.deltaY * 32 : e.deltaY;
+    wheelAccum += delta;
+    clearTimeout(wheelResetTimer);
+    wheelResetTimer = setTimeout(() => { wheelAccum = 0; }, 180);
+
+    const threshold = 28;
+    if (Math.abs(wheelAccum) >= threshold) {
+      const dir = wheelAccum < 0 ? 1 : -1;
+      wheelAccum = 0;
+      stepZoom(dir);
+    }
+  }
+
   window.addEventListener("keydown", handleKeydown, true);
-  return () => window.removeEventListener("keydown", handleKeydown, true);
+  window.addEventListener("wheel", handleWheel, { capture: true, passive: false });
+  return () => {
+    clearTimeout(wheelResetTimer);
+    window.removeEventListener("keydown", handleKeydown, true);
+    window.removeEventListener("wheel", handleWheel, true);
+  };
 }

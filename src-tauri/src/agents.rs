@@ -256,7 +256,7 @@ pub fn find_agent(id: &str) -> Option<&'static AgentDef> {
 
 #[cfg(test)]
 mod tests {
-    use super::find_agent;
+    use super::{cheapest_model, clean_explanation, find_agent, parse_ollama_list, strip_ansi};
 
     #[test]
     fn cursor_uses_unambiguous_binary() {
@@ -264,6 +264,154 @@ mod tests {
         assert_eq!(cursor.binary, "cursor-agent");
         assert!(cursor.aliases.is_empty());
     }
+
+    #[test]
+    fn parses_ollama_list_names() {
+        let out = "NAME            ID      SIZE    MODIFIED\nllama3.2:3b     abc     2.0 GB  2 days ago\nqwen2.5-coder:7b  def  4.7 GB  1 week ago\n";
+        assert_eq!(parse_ollama_list(out), vec!["llama3.2:3b", "qwen2.5-coder:7b"]);
+        assert!(parse_ollama_list("").is_empty());
+    }
+
+    #[test]
+    fn strips_ansi_sequences() {
+        assert_eq!(strip_ansi("\u{1b}[?25lhello\u{1b}[0m"), "hello");
+    }
+
+    #[test]
+    fn cleans_reasoning_and_fences() {
+        assert_eq!(clean_explanation("<think>hmm\nmore</think>\n## A\n- b"), "## A\n- b");
+        assert_eq!(clean_explanation("```markdown\n## A\n```"), "## A");
+        assert_eq!(clean_explanation("plain"), "plain");
+    }
+
+    #[test]
+    fn cheapest_models() {
+        assert_eq!(cheapest_model("claude"), Some("haiku"));
+        assert_eq!(cheapest_model("cursor"), None);
+    }
+}
+
+/// CLI flag that selects a model in the agent's headless mode.
+fn model_flag(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        "claude" => Some("--model"),
+        "codex" | "grok" | "kimi" => Some("-m"),
+        _ => None,
+    }
+}
+
+/// Cheapest known model for background helpers such as session explanations.
+/// `None` means "use the CLI default".
+pub fn cheapest_model(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        "claude" => Some("haiku"),
+        "codex" => Some("gpt-5.1-codex-mini"),
+        _ => None,
+    }
+}
+
+/// Remove ANSI escape sequences (spinners, colors) from CLI output.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Remove `<think>…</think>` reasoning blocks and a wrapping markdown fence
+/// that some models add around their answer.
+pub fn clean_explanation(text: &str) -> String {
+    let mut out = text.to_string();
+    while let (Some(start), Some(end)) = (out.find("<think>"), out.find("</think>")) {
+        if end < start {
+            break;
+        }
+        out.replace_range(start..end + "</think>".len(), "");
+    }
+    let trimmed = out.trim();
+    let unfenced = trimmed
+        .strip_prefix("```markdown")
+        .or_else(|| trimmed.strip_prefix("```md"))
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|rest| rest.trim_end().strip_suffix("```"))
+        .unwrap_or(trimmed);
+    unfenced.trim().to_string()
+}
+
+/// Parse `ollama list` output: a header row, then one model per line with the
+/// name in the first column.
+pub fn parse_ollama_list(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Installed local Ollama models. Empty when Ollama is missing or not running.
+pub async fn list_ollama_models() -> Vec<String> {
+    let Some(binary) = resolve_executable("ollama") else {
+        return Vec::new();
+    };
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.arg("list")
+        .env("PATH", augmented_path_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let Ok(child) = cmd.spawn() else {
+        return Vec::new();
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output()).await {
+        Ok(Ok(output)) if output.status.success() => {
+            parse_ollama_list(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// One-shot prompt to a local Ollama model through its CLI.
+pub async fn run_ollama(model: &str, prompt: &str) -> Result<String, String> {
+    let binary = resolve_executable("ollama")
+        .ok_or_else(|| "Ollama is not installed or not on PATH.".to_string())?;
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.arg("run")
+        .arg(model)
+        .arg(prompt)
+        .env("PATH", augmented_path_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd.spawn().map_err(|e| format!("Failed to run ollama: {e}"))?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(180), child.wait_with_output())
+        .await
+        .map_err(|_| format!("Ollama model {model} timed out."))?
+        .map_err(|e| format!("Ollama exited with an error: {e}"))?;
+    let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout)).trim().to_string();
+    if output.status.success() && !stdout.is_empty() {
+        return Ok(stdout);
+    }
+    let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr)).trim().to_string();
+    Err(if stderr.is_empty() {
+        format!("Ollama model {model} produced no output.")
+    } else {
+        stderr
+    })
 }
 
 /// Run `def`'s non-interactive print/exec mode with `prompt` and capture its
@@ -273,6 +421,17 @@ pub async fn run_headless(
     def: &AgentDef,
     project_path: &str,
     prompt: &str,
+) -> Result<String, String> {
+    run_headless_with_model(def, project_path, prompt, None).await
+}
+
+/// Like `run_headless`, optionally selecting a model through the agent's own
+/// model flag. A model is ignored for agents without a known flag.
+pub async fn run_headless_with_model(
+    def: &AgentDef,
+    project_path: &str,
+    prompt: &str,
+    model: Option<&str>,
 ) -> Result<String, String> {
     let headless_args = def
         .headless_args
@@ -285,8 +444,11 @@ pub async fn run_headless(
     })?;
 
     let mut cmd = tokio::process::Command::new(&binary);
-    cmd.args(headless_args)
-        .arg(prompt)
+    cmd.args(headless_args);
+    if let (Some(flag), Some(model)) = (model_flag(def.id), model.filter(|m| !m.trim().is_empty())) {
+        cmd.arg(flag).arg(model);
+    }
+    cmd.arg(prompt)
         .current_dir(project_path)
         .env("PATH", augmented_path_string())
         .stdin(std::process::Stdio::null())

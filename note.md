@@ -432,3 +432,15 @@ Shared primitives cover the following IDs; adaptations preserve current app beha
   values against GitHub's asset digests. The repository cask matches the live tap.
   Public latest.json reports 0.12.0 with signatures and versioned URLs for every
   supported updater platform. Final metadata sync changes only the cask and log.
+
+# Release 0.13.0 preparation (2026-10-23)
+
+- Added CaskaydiaCove Nerd Font Propo (`--font-sans`, `--font-display`) and
+  CaskaydiaCove Nerd Font Mono (`--font-mono`) with `@font-face` local mappings
+  across Light, SemiLight, Regular, SemiBold, Bold and Italic faces; unified
+  `DiffPane`, `TerminalPane` and `agentMeta` on `--font-mono`.
+- Added browser-convention zoom (`Cmd/Ctrl` + `+`/`=`/`-`/`0`, `Cmd/Ctrl + Scroll`,
+  native View menu items, and Settings → Appearance → Zoom) backed by Tauri
+  webview zoom and terminal refit.
+- Bundled with Explain side-pane tab, rich attachment previews, project sidebar
+  reordering/renaming/hiding, and opt-in local agent setup for 0.13.0.

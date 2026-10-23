@@ -39,10 +39,14 @@ const MENU_SHOW_CHANGES: &str = "menu-show-changes";
 const MENU_SHOW_PREVIEW: &str = "menu-show-preview";
 const MENU_SHOW_TERMINAL: &str = "menu-show-terminal";
 const MENU_SHOW_FLOW: &str = "menu-show-flow";
+const MENU_SHOW_EXPLAIN: &str = "menu-show-explain";
 const MENU_SHOW_HISTORY: &str = "menu-show-history";
 const MENU_REVIEW_WORKING_CHANGES: &str = "menu-review-working-changes";
 const MENU_PREV_SESSION: &str = "menu-prev-session";
 const MENU_NEXT_SESSION: &str = "menu-next-session";
+const MENU_ZOOM_IN: &str = "menu-zoom-in";
+const MENU_ZOOM_OUT: &str = "menu-zoom-out";
+const MENU_ZOOM_RESET: &str = "menu-zoom-reset";
 #[cfg(not(target_os = "macos"))]
 const MENU_CHECK_FOR_UPDATES: &str = "menu-check-for-updates";
 
@@ -57,7 +61,7 @@ struct NativeMenuState {
     full_access: bool,
     sidebar_open: bool,
     side_pane_open: bool,
-    /// "changes" | "preview" | "terminal" | "flow"
+    /// "changes" | "preview" | "terminal" | "flow" | "explain"
     side_tab: String,
 }
 
@@ -354,9 +358,14 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
             &check_menu_item(handle, MENU_SHOW_PREVIEW, "Preview", false, None::<&str>)?,
             &check_menu_item(handle, MENU_SHOW_TERMINAL, "Terminal", false, Some("CmdOrCtrl+J"))?,
             &check_menu_item(handle, MENU_SHOW_FLOW, "Flow", false, None::<&str>)?,
+            &check_menu_item(handle, MENU_SHOW_EXPLAIN, "Explain", false, None::<&str>)?,
             &separator(handle)?,
             &menu_item(handle, MENU_REVIEW_WORKING_CHANGES, "Review Working Changes", None::<&str>)?,
             &menu_item(handle, MENU_SHOW_HISTORY, "Commit History", None::<&str>)?,
+            &separator(handle)?,
+            &menu_item(handle, MENU_ZOOM_IN, "Zoom In", Some("CmdOrCtrl+="))?,
+            &menu_item(handle, MENU_ZOOM_OUT, "Zoom Out", Some("CmdOrCtrl+-"))?,
+            &menu_item(handle, MENU_ZOOM_RESET, "Actual Size", Some("CmdOrCtrl+0"))?,
         ],
     )?;
 
@@ -440,6 +449,7 @@ fn sync_native_menu(app: &tauri::AppHandle, state: &NativeMenuState) {
         (MENU_SHOW_PREVIEW, "preview"),
         (MENU_SHOW_TERMINAL, "terminal"),
         (MENU_SHOW_FLOW, "flow"),
+        (MENU_SHOW_EXPLAIN, "explain"),
     ] {
         set_menu_checked(&menu, id, state.side_pane_open && state.side_tab == tab);
     }
@@ -915,6 +925,68 @@ body, no explanation.\n\n{diff}"
         return Err(format!("{} did not return a commit message.", def.name));
     }
     Ok(cleaned)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ExplainProvider {
+    Agent { agent_id: String, model: Option<String> },
+    Ollama { model: String },
+}
+
+#[derive(Debug, Serialize)]
+struct ExplainResult {
+    text: String,
+    /// Human label of what produced the text, e.g. "Claude Code · haiku".
+    source: String,
+}
+
+/// Explain a session (and any open agent question) in plain ASD-STE100 text,
+/// using a cheap headless agent model or a local Ollama model.
+#[tauri::command]
+async fn chat_explain(
+    state: State<'_, std::sync::Arc<chat::ChatManager>>,
+    session_id: String,
+    provider: ExplainProvider,
+    language: String,
+) -> Result<ExplainResult, String> {
+    if chat::store::get_session(&session_id).is_none() {
+        return Err("Session not found.".to_string());
+    }
+    let entries = chat::store::load_entries(&session_id);
+    let names: std::collections::HashMap<String, String> = agents::AGENTS
+        .iter()
+        .map(|a| (a.id.to_string(), a.name.to_string()))
+        .collect();
+    let digest = chat::store::digest_body(&entries, &names, chat::store::EXPLAIN_MAX_BYTES);
+    let pending = state.runtime_state(&session_id).pending;
+    if digest.is_none() && pending.is_empty() {
+        return Err("Nothing to explain yet.".to_string());
+    }
+    let prompt = chat::store::build_explain_prompt(digest.as_deref(), &pending, language.trim());
+    match provider {
+        ExplainProvider::Agent { agent_id, model } => {
+            let def = agents::find_agent(&agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
+            let model = model.filter(|m| !m.trim().is_empty()).or_else(|| agents::cheapest_model(&agent_id).map(str::to_string));
+            let scratch = chat::store::explain_scratch_dir();
+            let text = agents::run_headless_with_model(def, &scratch.to_string_lossy(), &prompt, model.as_deref()).await?;
+            let text = agents::clean_explanation(&text);
+            let source = match &model {
+                Some(m) => format!("{} · {m}", def.name),
+                None => def.name.to_string(),
+            };
+            Ok(ExplainResult { text, source })
+        }
+        ExplainProvider::Ollama { model } => {
+            let text = agents::clean_explanation(&agents::run_ollama(&model, &prompt).await?);
+            Ok(ExplainResult { text, source: format!("Ollama · {model}") })
+        }
+    }
+}
+
+#[tauri::command]
+async fn list_ollama_models() -> Vec<String> {
+    agents::list_ollama_models().await
 }
 
 #[tauri::command]
@@ -1800,6 +1872,8 @@ pub fn run() {
             merge_worktree_branch,
             remove_worktree,
             generate_worktree_commit_message,
+            chat_explain,
+            list_ollama_models,
             // Tools
             get_tool_catalog,
             install_tool,

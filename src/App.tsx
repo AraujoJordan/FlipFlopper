@@ -19,7 +19,7 @@ import {
   type NativeMenuState,
 } from "./lib/ipc";
 import { cancelTurn, chat, initChat, isRunning, setYolo, startNewSession } from "./lib/chat";
-import { hydrateLayout, watchMotionPreferences, layout, openSide, setLayout, setSidebarWidth, toggleSide, toggleSidebar, SIDEBAR_MAX, SIDEBAR_MIN } from "./lib/layout";
+import { hydrateLayout, watchMotionPreferences, layout, openSide, resetZoom, setLayout, setSidebarWidth, stepZoom, toggleSide, toggleSidebar, SIDEBAR_MAX, SIDEBAR_MIN } from "./lib/layout";
 import { openProjectPath, forgetRecentProject, pickAndOpenProject, projectCreated } from "./lib/projects";
 import { initAppPrefs } from "./lib/appPrefs";
 import { hydrateSettings } from "./lib/settings";
@@ -127,6 +127,7 @@ const App: Component = () => {
       case "menu-show-preview": toggleSide("preview"); return;
       case "menu-show-terminal": toggleSide("terminal"); return;
       case "menu-show-flow": toggleSide("flow"); return;
+      case "menu-show-explain": toggleSide("explain"); return;
       case "menu-review-working-changes":
         if (store.currentProject) openReview(undefined, "Working changes");
         return;
@@ -135,6 +136,9 @@ const App: Component = () => {
         setStore("historyFilterPath", null);
         openSide("changes");
         return;
+      case "menu-zoom-in": stepZoom(1); return;
+      case "menu-zoom-out": stepZoom(-1); return;
+      case "menu-zoom-reset": resetZoom(); return;
       case "menu-check-for-updates": void checkForUpdatesInteractive(); return;
     }
   }

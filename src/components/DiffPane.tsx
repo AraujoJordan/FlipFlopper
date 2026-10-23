@@ -59,7 +59,7 @@ function langForPath(p: string | null | undefined): string | null {
 }
 
 // ── Shared styles ─────────────────────────────────────────────────────────────
-const MONO: string = "'JetBrains Mono', 'Fira Mono', monospace";
+const MONO: string = "var(--font-mono)";
 const LINENO_STYLE = {
   display: "inline-block",
   "min-width": "44px",
