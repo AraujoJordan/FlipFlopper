@@ -106,15 +106,13 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            FlipFlopper 0.13.0 adds the CaskaydiaCove Nerd Font Propo/Mono typography
-            stack with true Regular, SemiBold, Bold and Italic face resolution across
-            chat, diffs and terminals, plus browser-convention zoom (Cmd/Ctrl + +/-/0,
-            Cmd/Ctrl + Scroll, View menu and Appearance settings).
+            FlipFlopper 0.14.0 adds Manual and Ask permission modes. Press Shift+Tab in
+            the composer to cycle Manual, Auto-edit, Plan and Ask (Full access stays
+            behind the YOLO switch); each mode tints the composer border and mode pill,
+            and /ask, /edit and /manual switch modes from the prompt.
 
-            Also includes the new Explain side-pane tab for plain-language session
-            summaries, rich image/video/audio attachment previews, project sidebar
-            reordering/renaming/hiding with Undo, and opt-in local agent setup that
-            leaves existing repositories untouched on open.
+            Manual asks before every edit and command (Claude Code and Cursor); Ask is
+            read-only Q&A with no edits and no plan.
 
             Installers include the pinned Node sidecar and Claude ACP helper. Native
             Claude requires macOS 13.5+ on a Mac.

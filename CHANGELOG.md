@@ -1,10 +1,15 @@
 # Changelog
 
+## 0.14.0 - 2026-10-23
+
+### Added
+
+- **Manual** and **Ask** permission modes. `⇧Tab` now cycles Manual → Auto-edit → Plan → Ask (never Full), skipping modes the connected CLI doesn't offer, and the composer border, focus ring and mode pill take a per-mode color (Manual graphite, Auto-edit jade, Plan iris, Ask sky; Full stays amber). `/ask`, `/edit` and `/manual` switch modes from the composer.
+
 ## 0.13.0 - 2026-10-23
 
 ### Added
 
-- **Manual** and **Ask** permission modes. `⇧Tab` now cycles Manual → Auto-edit → Plan → Ask (never Full), and the composer border, focus ring and mode pill take a per-mode color (Manual graphite, Auto-edit jade, Plan iris, Ask sky; Full stays amber). `/ask`, `/edit` and `/manual` switch modes from the composer.
 - Plain-language **Explain** tab in the side pane (`ExplainView`) to summarize the current session and changes using a selectable agent/model provider.
 - **Typography & CaskaydiaCove font stacks**: pair `CaskaydiaCove Nerd Font Propo` for UI and chat prose (`--font-sans`, `--font-display`) with `CaskaydiaCove Nerd Font Mono` (`--font-mono`) for code blocks, inline diffs, `DiffPane` and `TerminalPane`, with explicit `@font-face` local mappings across Light, SemiLight, Regular, SemiBold, Bold and Italic faces.
 - **Browser-convention zoom**: zoom in/out/reset via keyboard (`⌘/Ctrl` + `+`/`=`/`-`/`0`, including numpad), mouse wheel (`⌘/Ctrl + Scroll`), native `View` menu commands, and **Settings → Appearance → Zoom**, persisted across launches with automatic terminal refit.
