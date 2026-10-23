@@ -346,7 +346,7 @@ const App: Component = () => {
           open={true}
           onClose={() => setPickerOpen(false)}
           busy={projectBusy()}
-          recents={store.recentProjects}
+          recents={store.recentProjects.filter((p) => !layout.hiddenProjects.includes(p.path))}
           currentPath={store.currentProject?.path ?? null}
           onPickFolder={() => void openFolder()}
           onOpenRecent={(path) => void openRecent(path)}

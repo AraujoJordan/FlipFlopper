@@ -15,6 +15,16 @@ export { attachments, setAttachments, dragActive, setDragActive };
 const extOf = (path: string) => path.split(".").pop()?.toLowerCase() ?? "";
 const nameOf = (path: string) => path.split(/[\\/]/).pop() || path;
 
+/** Derive presentation from the path so older video/PDF attachments stored as
+ * `kind: file` gain previews without changing the persisted protocol shape. */
+export function attachmentPreviewKind(path: string): "image" | "video" | "audio" | "pdf" | "file" {
+  const ext = extOf(path);
+  if (["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico"].includes(ext)) return "image";
+  if (["mp4", "webm", "mov", "m4v", "ogv", "mkv", "avi"].includes(ext)) return "video";
+  if (["mp3", "wav", "ogg", "flac", "m4a", "aac", "opus"].includes(ext)) return "audio";
+  return ext === "pdf" ? "pdf" : "file";
+}
+
 export function attachmentFor(path: string): Attachment {
   return { path, name: nameOf(path), kind: IMAGE_EXTS.has(extOf(path)) ? "image" : "file" };
 }

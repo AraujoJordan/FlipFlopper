@@ -125,7 +125,7 @@ export const Disclosure: Component<{ open: boolean; class?: string; children: JS
 /** Modal lifetime and focus stay independent from its short visual exit. */
 const modalStack: Array<() => HTMLElement | undefined> = [];
 let rootWasInert = false;
-export const Presence: Component<{ when: boolean; children: JSX.Element }> = (props) => {
+export const Presence: Component<{ when: boolean; label?: string; children: JSX.Element }> = (props) => {
   let element: HTMLDivElement | undefined;
   const present = usePresence(() => props.when, () => element);
   createEffect(() => {
@@ -157,7 +157,7 @@ export const Presence: Component<{ when: boolean; children: JSX.Element }> = (pr
     queueMicrotask(() => { if (!focusFirst() && props.when && element) observer.observe(element, { childList: true, subtree: true }); });
     onCleanup(() => { const index = modalStack.indexOf(ownerScope); if (index >= 0) modalStack.splice(index, 1); if (root) root.inert = modalStack.length > 0 || rootWasInert; observer.disconnect(); document.removeEventListener("keydown", trap, true); });
   });
-  return <Show when={present()}><Portal><div ref={element} class="motion-host" role="dialog" aria-modal="true">{props.children}</div></Portal></Show>;
+  return <Show when={present()}><Portal><div ref={element} class="motion-host" role="dialog" aria-modal="true" aria-label={props.label}>{props.children}</div></Portal></Show>;
 };
 export function RetainedPresence<T>(props: { value: T | null | undefined | false; children: (value: () => T) => JSX.Element }) {
   let last: T | undefined;

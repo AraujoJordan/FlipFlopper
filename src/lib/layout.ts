@@ -1,5 +1,5 @@
-import { createStore } from "solid-js/store";
-import { createSignal } from "solid-js";
+import { createStore, produce } from "solid-js/store";
+import { batch, createSignal } from "solid-js";
 import { readPref, writePref } from "./appPrefs";
 
 export type SideTab = "changes" | "preview" | "terminal" | "flow";
@@ -65,6 +65,9 @@ interface LayoutState {
   sidebarGroup: "project" | "date";
   /** Project path the sidebar is filtered to, or null for all. */
   projectFilter: string | null;
+  projectOrder: string[];
+  projectNames: Record<string, string>;
+  hiddenProjects: string[];
 }
 
 const KEY = "flipflopper:layout";
@@ -79,6 +82,9 @@ const DEFAULTS: LayoutState = {
   motion: "system",
   sidebarGroup: "project",
   projectFilter: null,
+  projectOrder: [],
+  projectNames: {},
+  hiddenProjects: [],
 };
 
 export const [layout, setLayout] = createStore<LayoutState>({ ...DEFAULTS });
@@ -105,8 +111,13 @@ export function applyTheme(theme: ThemePref) {
 }
 
 export async function hydrateLayout() {
-  const saved = await readPref<Partial<LayoutState>>(KEY, {}, () => ({}));
-  setLayout({ ...DEFAULTS, ...saved });
+  const persisted = await readPref<Partial<LayoutState>>(KEY, {}, () => ({}));
+  const saved = persisted && typeof persisted === "object" && !Array.isArray(persisted) ? persisted : {};
+  const paths = (value: unknown) => Array.isArray(value) ? [...new Set(value.filter((p): p is string => typeof p === "string" && !!p))] : [];
+  const names = saved.projectNames;
+  const projectNames = Object.fromEntries(names && typeof names === "object" && !Array.isArray(names)
+    ? Object.entries(names).filter((entry): entry is [string, string] => typeof entry[1] === "string" && !!entry[1].trim()).map(([path, name]) => [path, name.trim().slice(0, 80)]) : []);
+  setLayout({ ...DEFAULTS, ...saved, projectNames, projectOrder: paths(saved.projectOrder), hiddenProjects: paths(saved.hiddenProjects) });
   if (!["system", "reduced", "off"].includes(layout.motion)) setLayout("motion", "system");
   applyTheme(layout.theme);
   setMotionReady(true);
@@ -158,6 +169,39 @@ export function setSidebarGroup(group: "project" | "date") {
 
 export function setProjectFilter(path: string | null) {
   setLayout("projectFilter", path);
+  persist();
+}
+
+export function setProjectDisplayName(path: string, name: string) {
+  const label = name.trim().slice(0, 80);
+  setLayout("projectNames", produce((names) => {
+    if (label) names[path] = label;
+    else delete names[path];
+  }));
+  persist();
+}
+
+/** Merge the current display order before moving, retaining hidden projects and
+ * paths absent from a search so reordering a filtered list never drops them. */
+export function moveSidebarProject(path: string, target: string, position: "before" | "after", available: readonly string[]) {
+  if (path === target || !available.includes(path) || !available.includes(target)) return;
+  const order = [...new Set([...layout.projectOrder, ...available])].filter((p) => p !== path);
+  order.splice(order.indexOf(target) + (position === "after" ? 1 : 0), 0, path);
+  setLayout("projectOrder", order);
+  persist();
+}
+
+export function hideSidebarProject(path: string) {
+  batch(() => {
+    setLayout("hiddenProjects", (paths) => [...new Set([...paths, path])]);
+    if (layout.projectFilter === path) setLayout("projectFilter", null);
+  });
+  persist();
+}
+
+export function restoreSidebarProject(path: string) {
+  if (!layout.hiddenProjects.includes(path)) return;
+  setLayout("hiddenProjects", (paths) => paths.filter((p) => p !== path));
   persist();
 }
 

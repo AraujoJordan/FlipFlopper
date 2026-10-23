@@ -1216,6 +1216,21 @@ async fn read_image_thumbnail(path: String) -> Option<String> {
     run_blocking(move || chat::attach::thumbnail(&path)).await.ok().flatten()
 }
 
+#[tauri::command]
+async fn prepare_attachment_preview(app: tauri::AppHandle, path: String) -> Result<chat::attach::PreviewSource, String> {
+    let preview = run_blocking(move || chat::attach::preview_source(&path)).await??;
+    app.asset_protocol_scope().allow_file(&preview.path)
+        .map_err(|e| format!("Couldn't allow attachment preview: {e}"))?;
+    Ok(preview)
+}
+
+#[tauri::command]
+async fn open_attachment(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let path = run_blocking(move || chat::attach::attachment_path(&path)).await??;
+    app.opener().open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|e| format!("Couldn't open attachment: {e}"))
+}
+
 /// Native multi-file picker for the composer's "Add files…".
 #[tauri::command]
 async fn pick_files(app: tauri::AppHandle) -> Vec<chat::store::Attachment> {
@@ -1808,6 +1823,8 @@ pub fn run() {
             chat_search,
             save_attachment,
             read_image_thumbnail,
+            prepare_attachment_preview,
+            open_attachment,
             pick_files,
             chat_import_scan,
             chat_import,

@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use uuid::Uuid;
+use serde::Serialize;
 
 use super::store::Attachment;
 
@@ -36,6 +37,44 @@ pub fn kind_for(path: &str) -> &'static str {
         Some("png" | "jpg" | "jpeg" | "gif" | "webp") => "image",
         _ => "file",
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreviewSource {
+    pub path: String,
+    pub kind: &'static str,
+    pub size: u64,
+}
+
+/// Validate before granting the WebView access to this exact file. The asset
+/// protocol supplies range requests for media without base64-encoding a video.
+pub fn preview_source(path: &str) -> Result<PreviewSource, String> {
+    let kind = match Path::new(path).extension().and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase).as_deref() {
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp" | "ico") => "image",
+        Some("mp4" | "webm" | "mov" | "m4v" | "ogv" | "mkv" | "avi") => "video",
+        Some("mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" | "opus") => "audio",
+        Some("pdf") => "pdf",
+        _ => return Err("This file type has no inline preview. Open it in its default app.".into()),
+    };
+    let path = attachment_path(path)?;
+    let size = fs::metadata(&path).map_err(|e| format!("Couldn't inspect attachment: {e}"))?.len();
+    if size == 0 {
+        return Err("This attachment is empty.".into());
+    }
+    if matches!(kind, "image" | "pdf") && size > 64 * 1024 * 1024 {
+        return Err("This attachment is too large for an inline preview (64 MiB). Open it in its default app.".into());
+    }
+    Ok(PreviewSource { path: path.to_string_lossy().into_owned(), kind, size })
+}
+
+pub fn attachment_path(path: &str) -> Result<PathBuf, String> {
+    let path = fs::canonicalize(path).map_err(|e| format!("Couldn't find attachment: {e}"))?;
+    if !path.is_file() {
+        return Err("The attachment is not a regular file.".into());
+    }
+    fs::File::open(&path).map_err(|e| format!("Couldn't read attachment: {e}"))?;
+    Ok(path)
 }
 
 /// Store a pasted file (base64 body) and return its attachment.
@@ -137,5 +176,32 @@ mod tests {
         let note = prompt_note(&[Attachment { path: "/a/b.png".into(), name: "b.png".into(), kind: "image".into() }]);
         assert!(note.contains("- /a/b.png"));
         assert!(prompt_note(&[]).is_empty());
+    }
+
+    #[test]
+    fn previews_validate_files_and_keep_media_out_of_the_image_protocol() {
+        let dir = std::env::temp_dir().join(format!("ff-preview-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        for (name, kind) in [("photo [1].PNG", "image"), ("clip.MOV", "video"), ("sound.mp3", "audio"), ("report.pdf", "pdf")] {
+            let path = dir.join(name);
+            fs::write(&path, b"preview fixture").unwrap();
+            let preview = preview_source(path.to_str().unwrap()).unwrap();
+            assert_eq!(preview.kind, kind);
+            assert_eq!(preview.size, 15);
+            assert_eq!(Path::new(&preview.path), fs::canonicalize(path).unwrap());
+        }
+        assert_eq!(kind_for("clip.MOV"), "file");
+        assert_eq!(kind_for("report.pdf"), "file");
+        assert!(preview_source(dir.join("missing.png").to_str().unwrap()).unwrap_err().contains("Couldn't find"));
+        fs::write(dir.join("empty.png"), []).unwrap();
+        assert!(preview_source(dir.join("empty.png").to_str().unwrap()).unwrap_err().contains("empty"));
+        fs::create_dir(dir.join("folder.png")).unwrap();
+        assert!(preview_source(dir.join("folder.png").to_str().unwrap()).unwrap_err().contains("regular file"));
+        fs::write(dir.join("script.html"), b"<script>unsafe</script>").unwrap();
+        assert!(preview_source(dir.join("script.html").to_str().unwrap()).unwrap_err().contains("no inline preview"));
+        let large = dir.join("large.png");
+        fs::File::create(&large).unwrap().set_len(64 * 1024 * 1024 + 1).unwrap();
+        assert!(preview_source(large.to_str().unwrap()).unwrap_err().contains("too large"));
+        let _ = fs::remove_dir_all(dir);
     }
 }

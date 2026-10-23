@@ -1165,9 +1165,25 @@ async fn run_agent(
                     .block_task();
                 tokio::pin!(result);
                 let mut tick = tokio::time::interval(Duration::from_millis(16));
+                let mut turn_only_failure = false;
                 let outcome = loop {
                     tokio::select! {
-                        result=&mut result=>break result.map_err(|e|e.to_string()).and_then(|r|match r["stopReason"].as_str(){Some("cancelled")=>Ok(TurnStatus::Cancelled),Some("refusal"|"max_turn_requests")=>Ok(TurnStatus::Error),Some("end_turn"|"max_tokens")=>Ok(TurnStatus::Done),_=>Err("Agent returned an unsupported ACP stop reason. Update the CLI before retrying.".into())}),
+                        result=&mut result=>break match result {
+                            Ok(r) => match r["stopReason"].as_str() {
+                                Some("cancelled") => Ok(TurnStatus::Cancelled),
+                                Some("refusal" | "max_turn_requests") => Ok(TurnStatus::Error),
+                                Some("end_turn" | "max_tokens") => Ok(TurnStatus::Done),
+                                _ => Err("Agent returned an unsupported ACP stop reason. Update the CLI before retrying.".into()),
+                            },
+                            Err(error) => {
+                                turn_only_failure = is_incomplete_tool_call(&foreground.snapshot().agent_id, &error);
+                                Err(if turn_only_failure {
+                                    format!("Claude stopped before reporting a tool result. The tool may already have run. Send a follow-up to check the current state and continue this conversation.\n\n{error}")
+                                } else {
+                                    error.to_string()
+                                })
+                            }
+                        },
                         _=tick.tick()=>foreground.live.lock().unwrap().flush(),
                         command=rx.recv()=>match command {
                             Some(CommandMessage::SetMode { mode, done }) => {
@@ -1182,7 +1198,11 @@ async fn run_agent(
                     }
                 };
                 foreground.busy.store(false, Ordering::SeqCst);
-                let broken = outcome.is_err();
+                // The Claude helper rejects this prompt after closing unfinished
+                // tools, but keeps its consumer alive for subsequent prompts.
+                // Preserve that native session; replaying the original prompt
+                // could repeat tool side effects whose results were lost.
+                let broken = outcome.is_err() && !turn_only_failure;
                 if broken {
                     foreground.closing.store(true, Ordering::SeqCst);
                 }
@@ -1212,6 +1232,13 @@ async fn run_agent(
             }
         }
     }
+}
+
+fn is_incomplete_tool_call(agent: &str, error: &agent_client_protocol::Error) -> bool {
+    agent == "claude"
+        && error.code == agent_client_protocol::ErrorCode::InternalError
+        && error.data.as_ref().and_then(|data| data["errorKind"].as_str())
+            == Some("incomplete_tool_call")
 }
 
 fn acp_error(e: impl ToString) -> agent_client_protocol::Error {
@@ -1876,6 +1903,103 @@ mod tests {
         assert_eq!(ended, 1);
         assert!(!c.snapshot().connected);
         assert!(c.snapshot().pending.is_empty());
+    }
+    #[test]
+    fn incomplete_tool_call_fails_once_and_preserves_the_native_session() {
+        for resume in [None, Some("fixture-native")] {
+            let c = fixture(resume);
+            let prior_turns = if resume.is_some() {
+                assert_eq!(run(&c, "before-error").0["turns"], 1);
+                1
+            } else {
+                0
+            };
+            let rx = c
+                .prompt("incomplete".into(), "incomplete-tool".into(), vec![])
+                .unwrap();
+            let mut tool_failed = false;
+            let mut finished = 0;
+            while let Ok(message) = rx.recv_timeout(Duration::from_secs(10)) {
+                match message {
+                    Message::Event(ChatEvent::ToolResult { id, ok, .. }) => {
+                        assert_eq!(id, "unfinished-tool");
+                        assert!(!ok);
+                        tool_failed = true;
+                    }
+                    Message::Finished(result) => {
+                        assert!(tool_failed, "tool must close before the turn fails");
+                        let error = result.unwrap_err();
+                        assert!(error.contains("The tool may already have run"));
+                        assert!(error.contains("incomplete_tool_call"));
+                        assert!(error.contains("unfinished-tool"));
+                        finished += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(finished, 1);
+            assert!(c.snapshot().connected);
+            assert!(c.snapshot().active_turn_id.is_none());
+            assert!(c.snapshot().pending.is_empty());
+            assert!(!c.closing.load(Ordering::SeqCst));
+            assert!(!c.busy.load(Ordering::SeqCst));
+            // No automatic retry; only this explicit follow-up advances the peer.
+            let (next, _) = run(&c, "continue");
+            assert_eq!(next["turns"], prior_turns + 2);
+            assert_eq!(
+                c.snapshot().native_session_id.as_deref(),
+                Some("fixture-native")
+            );
+        }
+    }
+    #[test]
+    fn other_prompt_errors_still_close_the_connection() {
+        for (agent, prompt) in [
+            ("cursor", "incomplete-tool"),
+            ("claude", "untyped-incomplete-tool"),
+            ("claude", "other-tool-error"),
+        ] {
+            let c = fixture_agent(None, agent, false);
+            let rx = c.prompt("error".into(), prompt.into(), vec![]).unwrap();
+            let mut finished = 0;
+            while let Ok(message) = rx.recv_timeout(Duration::from_secs(10)) {
+                if let Message::Finished(result) = message {
+                    let error = result.unwrap_err();
+                    assert!(error.contains("unfinished-tool"));
+                    assert!(!error.contains("Send a follow-up"));
+                    finished += 1;
+                }
+            }
+            assert_eq!(finished, 1);
+            assert!(!c.snapshot().connected);
+            assert!(c.closing.load(Ordering::SeqCst));
+        }
+    }
+    #[test]
+    fn cancellation_wins_over_incomplete_tool_call() {
+        let c = fixture(None);
+        let rx = c
+            .prompt("cancel-error".into(), "cancel-incomplete-tool".into(), vec![])
+            .unwrap();
+        loop {
+            if matches!(
+                rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+                Message::Event(ChatEvent::InteractionRequested { .. })
+            ) {
+                break;
+            }
+        }
+        c.cancel();
+        let mut finished = 0;
+        while let Ok(message) = rx.recv_timeout(Duration::from_secs(10)) {
+            if let Message::Finished(result) = message {
+                assert_eq!(result.unwrap(), TurnStatus::Cancelled);
+                finished += 1;
+            }
+        }
+        assert_eq!(finished, 1);
+        assert!(c.snapshot().pending.is_empty());
+        assert!(c.snapshot().active_turn_id.is_none());
     }
     #[test]
     fn cancelling_a_waiting_request_clears_it_and_finishes_once() {

@@ -50,6 +50,9 @@ Currently implemented:
   Up to four idle connections are retained for five minutes; active/waiting
   turns are exempt. Stop cancels requests and the protocol turn, then kills the
   owned process group if needed. Quit/archive/delete/detach close connections.
+  Claude's typed `incomplete_tool_call` failure ends the turn with an error but
+  retains the native connection for an explicit follow-up; never automatically
+  replay that prompt because the unfinished tool may already have run.
 - Native model/effort/command catalogs come from the connected agent, including
   model-dependent option updates. `/agent:<command>` distinguishes native
   commands from local app actions. Images up to 20 MiB use structured ACP image
@@ -81,9 +84,18 @@ Currently implemented:
   transcripts (`chat_search`), projects and actions. Focus composer is ⌘L.
 - Attachments: pick (`pick_files`), drop (Tauri drag-drop event) or paste
   images (`save_attachment`); stored on `Entry::User.attachments`, passed to
-  agents as absolute paths in the prompt.
+  agents as absolute paths in the prompt. Composer/transcript cards show image
+  and video thumbnails and open enlarged image/video/audio previews; draft cards
+  have remove buttons. Presentation types derive from file extensions, preserving
+  the persisted `file | image` kinds. `prepare_attachment_preview` validates and
+  grants exact-file asset protocol access; keep its static scope empty. Other
+  files open in the default app through `open_attachment`.
 - Sidebar: project filter, Project/Date grouping, pinned section, nested flow
-  child sessions, back/forward history (⌘[ ⌘]), ⌘1–9 jump.
+  child sessions, back/forward history (⌘[ ⌘]), ⌘1–9 jump. Project headings
+  reorder by pointer drag or Alt+↑/↓ and expose a context menu (also Shift+F10).
+  `lib/layout.ts` persists project order, display-name aliases and hidden paths;
+  rename never moves a checkout. Remove hides a project from navigation, retains
+  files/conversations and offers Undo; explicitly opening its folder restores it.
 - Native window decorations on macOS, Windows and Linux: the OS owns close,
   minimize, maximize/restore, fullscreen, title-bar dragging and window menus.
   `tauri.conf.json` enables decorations; `tauri.macos.conf.json` keeps a visible
@@ -350,8 +362,6 @@ git status --short
   for example `feat(pty): add resize support`.
 - Do not run destructive git commands such as `git reset --hard`, checkout of
   user changes, or rollback flows unless the user explicitly asks.
-- The app's `auto_commit` stages all changes and refuses `main`/`master`.
-  Treat that as a safety boundary.
 
 ## Dependency Policy
 

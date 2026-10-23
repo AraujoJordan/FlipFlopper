@@ -20,7 +20,7 @@ async function loadChat(overrides = {}) {
   globalThis.document = { hasFocus: () => true };
   globalThis.requestAnimationFrame = () => 1;
   globalThis.cancelAnimationFrame = () => {};
-  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { AGENT_TUNING: {} }, "./store": { store: {} }, ...overrides };
+  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { AGENT_TUNING: {} }, "./store": { store: {} }, "./layout": { layout: {projectNames:{},projectOrder:[],hiddenProjects:[]} }, ...overrides };
   const module = new SourceTextModule(source);
   await module.link((specifier) => {
     const names = imports.get(specifier);
@@ -261,7 +261,10 @@ async function loadFrontend(file, mocks) {
   }).outputText;
   const bindings = new Map();
   for (const node of ts.createSourceFile('frontend.js', code, ts.ScriptTarget.ES2022).statements) {
-    if (ts.isImportDeclaration(node)) bindings.set(node.moduleSpecifier.text, node.importClause.namedBindings.elements.map((e) => e.propertyName?.text ?? e.name.text));
+    if (ts.isImportDeclaration(node)) bindings.set(node.moduleSpecifier.text, [
+      ...(node.importClause.name ? ['default'] : []),
+      ...(node.importClause.namedBindings?.elements.map((e) => e.propertyName?.text ?? e.name.text) ?? []),
+    ]);
   }
   const module = new SourceTextModule(code);
   await module.link((specifier) => new SyntheticModule(bindings.get(specifier), function () {
@@ -289,6 +292,267 @@ async function motionFixture(saved = {}) {
   return { layout, document, window, reduced, writes, dispose };
 }
 const settle = async () => { for (let i=0;i<8;i++) await Promise.resolve(); };
+
+test('project names, hidden projects and manual order survive hydration without changing checkout paths', async () => {
+  const fixture=await motionFixture();
+  try {
+    const {layout}=fixture;
+    layout.setProjectDisplayName('/a','  Alpha workspace  ');
+    layout.moveSidebarProject('/c','/a','before',['/a','/b','/c']);
+    layout.setProjectFilter('/b');layout.hideSidebarProject('/b');
+    assert.deepEqual([...layout.layout.projectOrder],['/c','/a','/b']);
+    assert.equal(layout.layout.projectFilter,null);
+    const saved=JSON.parse(JSON.stringify(fixture.writes.at(-1)[1]));
+    const restored=await motionFixture(saved);
+    try {
+      assert.equal(restored.layout.layout.projectNames['/a'],'Alpha workspace');
+      assert.deepEqual([...restored.layout.layout.projectOrder],['/c','/a','/b']);
+      assert.deepEqual([...restored.layout.layout.hiddenProjects],['/b']);
+      restored.layout.restoreSidebarProject('/b');
+      assert.deepEqual([...restored.layout.layout.hiddenProjects],[]);
+      restored.layout.setProjectDisplayName('/a','');
+      assert.equal(restored.layout.layout.projectNames['/a'],undefined);
+    } finally {restored.dispose();}
+  } finally {fixture.dispose();}
+});
+
+test('reordering retains absent and hidden projects and rejects invalid destinations', async () => {
+  const f=await motionFixture({projectOrder:['/a','/hidden','/b','/c'],hiddenProjects:['/hidden']});
+  try {
+    f.layout.moveSidebarProject('/c','/a','before',['/a','/b','/c']);
+    assert.deepEqual([...f.layout.layout.projectOrder],['/c','/a','/hidden','/b']);
+    const writes=f.writes.length;
+    f.layout.moveSidebarProject('/c','/missing','after',['/a','/b','/c']);
+    f.layout.moveSidebarProject('/c','/c','before',['/a','/b','/c']);
+    assert.equal(f.writes.length,writes);
+  } finally {f.dispose();}
+});
+
+test('project preference migration rejects malformed collections', async () => {
+  const f=await motionFixture({projectOrder:['/a',null,42,'/a',''],hiddenProjects:'invalid',projectNames:{'/a':' Alpha ','/empty':' ','/bad':42}});
+  try {
+    assert.deepEqual([...f.layout.layout.projectOrder],['/a']);
+    assert.deepEqual([...f.layout.layout.hiddenProjects],[]);
+    assert.deepEqual({...f.layout.layout.projectNames},{'/a':'Alpha'});
+  } finally {f.dispose();}
+});
+
+test('project grouping respects saved order and aliases, keeps pinned first, and includes empty recent projects', async () => {
+  const prefs={projectNames:{'/a':'Renamed workspace'},projectOrder:['/b','/a'],hiddenProjects:['/hidden']};
+  const module=await loadChat({'./layout':{layout:prefs},'./store':{store:{recentProjects:[{path:'/empty',name:'empty'}]}}});
+  const sessions=[
+    {id:'a',project_path:'/a',title:'First',updated_at:Date.now()},
+    {id:'b',project_path:'/b',title:'Second',updated_at:Date.now()},
+    {id:'pinned',project_path:'/a',title:'Pin',pinned:true,updated_at:Date.now()},
+    {id:'hidden',project_path:'/hidden',title:'Hidden',pinned:true,updated_at:Date.now()},
+  ];
+  module.setChat('sessions',sessions);
+  const options={includeArchived:false,query:'',group:'project',filter:null};
+  const groups=module.sessionGroups(options);
+  assert.deepEqual(Array.from(groups,(g)=>g.key),['pinned','/b','/a','/empty']);
+  assert.equal(groups[2].label,'Renamed workspace');
+  assert.equal(groups[3].sessions.length,0);
+  assert.equal(groups[0].sessions.length,1);
+  assert.deepEqual(Array.from(module.sessionGroups({...options,query:'Renamed'}),(g)=>g.key),['pinned','/a']);
+  assert.deepEqual(Array.from(module.sessionGroups({...options,query:'not-found'}),(g)=>g.key),[]);
+  assert.deepEqual(Array.from(module.sessionGroups({...options,filter:'/b'}),(g)=>g.key),['/b']);
+  assert.equal(module.sessionGroups({...options,group:'date'}).flatMap((g)=>g.sessions).some((s)=>s.id==='hidden'),false);
+  assert.equal(module.chat.sessions.find((s)=>s.id==='a').project_path,'/a');
+});
+
+test('removing a sidebar project requires confirmation and Undo restores it without deleting conversations or files', async () => {
+  const f=await motionFixture();
+  let confirm=false,undo;
+  try {
+    const module=await loadFrontend('../src/lib/projects.ts',{
+      './chat':{projectName:()=> 'Alpha'},
+      './layout':{hideSidebarProject:f.layout.hideSidebarProject,restoreSidebarProject:f.layout.restoreSidebarProject},
+      '../components/ui':{confirmDialog:async()=>confirm,toast:(_text,_kind,options)=>{undo=options.onAction;}},
+    });
+    await module.removeSidebarProject('/a');
+    assert.deepEqual([...f.layout.layout.hiddenProjects],[]);
+    confirm=true;await module.removeSidebarProject('/a');
+    assert.deepEqual([...f.layout.layout.hiddenProjects],['/a']);
+    undo();assert.deepEqual([...f.layout.layout.hiddenProjects],[]);
+  } finally {f.dispose();}
+});
+
+test('attachment presentation recognizes media paths without changing persisted attachment kinds', async () => {
+  const module=await loadFrontend('../src/lib/attachments.ts',{'solid-js':solid});
+  for (const [path,kind] of [
+    ['/fixture/photo.PNG','image'],['C:\\media\\clip.MOV','video'],
+    ['/fixture/audio.flac','audio'],['/fixture/REPORT.PDF','pdf'],
+    ['/fixture/data.csv','file'],['/fixture/code.html','file'],
+  ]) assert.equal(module.attachmentPreviewKind(path),kind);
+  assert.equal(module.attachmentFor('/fixture/clip.mp4').kind,'file');
+  assert.equal(module.attachmentFor('/fixture/report.pdf').kind,'file');
+});
+
+test('attachment removal stays separate from preview opening and Escape closes the preview', async () => {
+  const signals=[],nodes=[],requests=[];
+  let dispose,removed=0;
+  const document=new EventTarget();
+  globalThis.document=document;
+  const module=await loadFrontend('../src/components/chat/AttachmentChip.tsx',{
+    'solid-js':{...solid,createSignal:(...args)=>{const s=solid.createSignal(...args);signals.push(s);return s;}},
+    '@tauri-apps/api/core':{convertFileSrc:(path)=>`asset://local${path}`},
+    '../../lib/ipc':{prepareAttachmentPreview:async(path)=>{requests.push(path);return {path,kind:'video',size:5000};}},
+    '../../lib/attachments':{attachmentPreviewKind:()=> 'video'},
+    '../../lib/fileIcons':{getFileIcon:()=> 'video'},
+    '../ui':{useValueMotion(){}},
+  });
+  const previousReact=globalThis.React;
+  globalThis.React={createElement:(tag,props,...children)=>{const node={tag,props,children};nodes.push(node);return node;}};
+  try {
+    solid.createRoot((stop)=>{dispose=stop;module.default({attachment:{path:'/fixture/clip.mp4',name:'clip.mp4',kind:'file'},onRemove:()=>removed++});});
+    await settle();
+    assert.deepEqual(requests,['/fixture/clip.mp4']);
+    nodes.find((node)=>node.props?.['aria-label']==='Remove clip.mp4').props.onClick();
+    assert.equal(removed,1);
+    assert.equal(signals[0][0](),false);
+    nodes.find((node)=>node.props?.['aria-label']==='Preview clip.mp4').props.onClick({currentTarget:{focus(){}}});
+    assert.equal(signals[0][0](),true);
+    const escape=new Event('keydown',{cancelable:true});Object.defineProperty(escape,'key',{value:'Escape'});
+    document.dispatchEvent(escape);
+    assert.equal(signals[0][0](),false);
+    assert.equal(escape.defaultPrevented,true);
+  } finally {dispose?.();globalThis.React=previousReact;}
+});
+
+// Exercise Composer's real input handlers and Solid effects. JSX is represented
+// by inert nodes; provider latency is controlled by the deferred submit boundary.
+async function composerFixture(activeId = 's') {
+  const [chat, setChat] = solidStore.createStore({
+    activeId, views: {}, composer: { agentId:'claude', mode:'auto_edit' },
+    sessions: [{id:'s'}, {id:'other'}],
+  });
+  const [attachments, setAttachments] = solid.createSignal([]);
+  const signals = [], nodes = [], submissions = [], animations = [];
+  let resolve, dispose;
+  const module = await loadFrontend('../src/components/chat/Composer.tsx', {
+    'solid-js': { ...solid, createSignal: (...args) => { const signal=solid.createSignal(...args); signals.push(signal); return signal; } },
+    '../../lib/chat': {
+      chat, isRunning: () => false, permissionModeUpdating: () => false, sessionModePending: () => false,
+      agentTuning: () => ({ models:[], efforts:[] }), nativeCommands: () => [],
+      submitPrompt: (...args) => { submissions.push(args); return new Promise((done) => { resolve=done; }); },
+    },
+    '../../lib/store': { store: { agents:[], currentProject:null }, effectiveRoot: () => null },
+    '../../lib/attachments': { attachments, setAttachments, clearAttachments: () => setAttachments([]) },
+    '../../lib/shortcuts': { registerShortcutHandler: () => () => {} },
+    '../ui': {
+      animateElement: (...args) => { animations.push(args); return Promise.resolve(); },
+      cancelMotion() {}, useValueMotion() {}, useListMotion() {}, useSelectionMotion() {},
+      usePresence: () => () => false, toast() {},
+    },
+  });
+  const previousReact = globalThis.React;
+  globalThis.React = { createElement: (tag, props, ...children) => { const node={tag,props,children}; nodes.push(node); return node; } };
+  try { solid.createRoot((stop) => { dispose=stop; module.default({}); }); }
+  finally { globalThis.React=previousReact; }
+  const input = nodes.find((node) => node.tag === 'textarea').props;
+  return {
+    chat, setChat, attachments, setAttachments, submissions, animations, dispose,
+    value: signals[0][0], submitting: signals[1][0],
+    type: (value) => input.onInput({currentTarget:{value,selectionStart:value.length}}),
+    send: () => input.onKeyDown({key:'Enter',preventDefault(){}}),
+    finish: async (ok) => { resolve(ok); await settle(); },
+  };
+}
+
+test('composer clears immediately during slow startup and keeps the next draft after success', async () => {
+  const f=await composerFixture();
+  try {
+    const file={path:'/fixture/a.png',name:'a.png',kind:'image'};
+    f.type('First prompt'); f.setAttachments([file]); f.send();
+    assert.equal(f.value(),'');
+    assert.deepEqual(f.attachments(),[]);
+    assert.equal(f.submitting(),true);
+    assert.equal(f.submissions[0][0],'First prompt');
+    assert.deepEqual(f.submissions[0][1],[file]);
+    f.send(); assert.equal(f.submissions.length,1); // No duplicate launch.
+    f.type('A follow-up');
+    await f.finish(true);
+    assert.equal(f.value(),'A follow-up');
+    assert.equal(f.submitting(),false);
+    assert(f.animations.length>0);
+  } finally { f.dispose(); }
+});
+
+test('failed composer submission restores its original draft and attachments without touching another conversation', async () => {
+  const f=await composerFixture();
+  try {
+    const first={path:'/fixture/a.png',name:'a.png',kind:'image'};
+    const second={path:'/fixture/b.txt',name:'b.txt',kind:'file'};
+    f.type('  Original prompt\n'); f.setAttachments([first]); f.send();
+    f.type('Next draft'); f.setAttachments([second]);
+    f.setChat('activeId','other'); f.type('Other conversation');
+    await f.finish(false);
+    assert.equal(f.value(),'Other conversation');
+    assert.deepEqual(f.attachments(),[]);
+    f.setChat('activeId','s');
+    assert.equal(f.value(),'  Original prompt\n\n\nNext draft');
+    assert.deepEqual(f.attachments(),[first,second]);
+  } finally { f.dispose(); }
+});
+
+test('a follow-up draft follows a newly created session and survives a startup failure', async () => {
+  const f=await composerFixture(null);
+  try {
+    f.type('Initial task'); f.send(); f.type('More detail');
+    f.submissions[0][2]('created');
+    f.setChat('sessions',(s) => [...s,{id:'created'}]);
+    f.setChat('activeId','created');
+    assert.equal(f.value(),'More detail');
+    await f.finish(false);
+    assert.equal(f.value(),'Initial task\n\nMore detail');
+    f.setChat('activeId',null);
+    assert.equal(f.value(),'');
+  } finally { f.dispose(); }
+});
+
+test('removing a failed first-turn session brings its follow-up draft back to the new-session composer', async () => {
+  const f=await composerFixture(null);
+  try {
+    f.type('Initial task'); f.send();
+    f.submissions[0][2]('removed');
+    f.setChat('sessions',(s) => [...s,{id:'removed'}]);
+    f.setChat('activeId','removed');
+    f.type('Keep this follow-up');
+    const file={path:'/fixture/follow-up.txt',name:'follow-up.txt',kind:'file'};
+    f.setAttachments([file]);
+    f.setChat('sessions',(s) => s.filter((session) => session.id!=='removed'));
+    f.setChat('activeId',null);
+    await f.finish(false);
+    assert.equal(f.value(),'Initial task\n\nKeep this follow-up');
+    assert.deepEqual(f.attachments(),[file]);
+  } finally { f.dispose(); }
+});
+
+test('new-session submission identifies its draft destination before navigation and the slow send acknowledgement', async () => {
+  const meta={id:'created',project_path:'/fixture',cwd:'/fixture',agent_id:'claude',mode:'auto_edit'};
+  let acknowledge, destination;
+  const module=await loadChat({
+    './ipc': {
+      chatCreateSession: async () => meta,
+      onChatEntry: async () => () => {},
+      chatSend: () => new Promise((resolve) => { acknowledge=resolve; }),
+      chatListSessions: async () => [meta],
+    },
+    './appPrefs': { writePref() {} },
+    './store': { store:{}, setStore() {} },
+  });
+  module.setChat('draftProject','/fixture');
+  const pending=module.submitPrompt('Initial task',[],(id) => {
+    destination=id;
+    assert.equal(module.chat.activeId,null);
+  });
+  await settle();
+  assert.equal(destination,'created');
+  assert.equal(module.chat.activeId,'created');
+  assert.equal(typeof acknowledge,'function');
+  acknowledge('turn');
+  assert.equal(await pending,true);
+});
 
 test('headless reload restores the active turn from backend authority without reactivating historical requests', async () => {
   const module = await loadChat();

@@ -35,6 +35,7 @@ import { requestNotificationPermissionIfNeeded, sendNativeNotification } from ".
 import { bumpGitStatus, setStore, store } from "./store";
 import { toast, confirmDialog } from "../components/ui";
 import { AGENT_TUNING, type AgentTuning } from "./agentMeta";
+import { layout } from "./layout";
 
 // ── View model ───────────────────────────────────────────────────────────────
 
@@ -138,6 +139,7 @@ export const activeView = (): SessionView | undefined =>
 export const isRunning = (id: string): boolean => chat.views[id]?.running ?? false;
 
 export function projectName(path: string): string {
+  if (layout.projectNames[path]) return layout.projectNames[path];
   const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || path;
 }
@@ -169,9 +171,10 @@ export function sessionGroups(opts: {
 }): SessionGroup[] {
   const q = opts.query.trim().toLowerCase();
   const visible = chat.sessions.filter((s) => {
+    if (layout.hiddenProjects.includes(s.project_path)) return false;
     if (s.archived && !opts.includeArchived) return false;
     if (opts.filter && s.project_path !== opts.filter) return false;
-    return !q || s.title.toLowerCase().includes(q) || projectName(s.project_path).toLowerCase().includes(q);
+    return !q || s.title.toLowerCase().includes(q) || projectName(s.project_path).toLowerCase().includes(q) || s.project_path.toLowerCase().includes(q);
   });
   const groups: SessionGroup[] = [];
   const pinned = visible.filter((s) => s.pinned);
@@ -197,16 +200,23 @@ export function sessionGroups(opts: {
       }
       g.sessions.push(s);
     }
-    groups.push(...byProject.values());
+    for (const project of sessionProjects()) {
+      if (opts.filter && project.path !== opts.filter) continue;
+      if (q && !byProject.has(project.path) && !`${project.name} ${project.path}`.toLowerCase().includes(q)) continue;
+      groups.push(byProject.get(project.path) ?? { key: project.path, label: project.name, projectPath: project.path, sessions: [] });
+    }
   }
   return groups;
 }
 
-/** Distinct projects that have sessions, for the sidebar filter. */
+/** Known projects in durable sidebar order, including folders without chats. */
 export function sessionProjects(): { path: string; name: string }[] {
   const seen = new Map<string, string>();
   for (const s of chat.sessions) if (!seen.has(s.project_path)) seen.set(s.project_path, projectName(s.project_path));
-  return [...seen].map(([path, name]) => ({ path, name })).sort((a, b) => a.name.localeCompare(b.name));
+  for (const project of store.recentProjects ?? []) if (!seen.has(project.path)) seen.set(project.path, projectName(project.path));
+  const rank = new Map(layout.projectOrder.map((path, index) => [path, index]));
+  return [...seen].filter(([path]) => !layout.hiddenProjects.includes(path)).map(([path, name]) => ({ path, name }))
+    .sort((a, b) => (rank.get(a.path) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.path) ?? Number.MAX_SAFE_INTEGER));
 }
 
 // ── Reducer: transcript entries → messages ───────────────────────────────────
@@ -759,8 +769,8 @@ export async function retryLastTurn(sessionId: string) {
 }
 
 /** Send from the composer: creates the session on first use. Returns false if
- *  nothing was sent (the composer keeps its text). */
-export async function submitPrompt(text: string, attachments: Attachment[] = []): Promise<boolean> {
+ *  nothing was sent, so the composer can restore its submitted draft. */
+export async function submitPrompt(text: string, attachments: Attachment[] = [], onCreated?: (id: string) => void): Promise<boolean> {
   if (permissionModeUpdating()) { toast("Session permissions are still updating.", "info"); return false; }
   const prompt = text.trim();
   if (!prompt && attachments.length === 0) return false;
@@ -802,6 +812,7 @@ export async function submitPrompt(text: string, attachments: Attachment[] = [])
       prompt,
       attachments,
       activate: true,
+      onCreated,
     });
     writePref(COMPOSER_KEY, { ...chat.composer });
     return true;
@@ -827,6 +838,8 @@ export interface StartTurnOptions {
   title?: string;
   /** Switch the UI to the new session. */
   activate?: boolean;
+  /** Notify the composer before navigation so its next draft can follow. */
+  onCreated?: (id: string) => void;
 }
 
 /** Create a session and run its first turn. Throws on failure; the session is
@@ -850,6 +863,7 @@ export async function startSessionTurn(o: StartTurnOptions): Promise<SessionMeta
   setChat("sessions", (s) => [meta, ...s]);
   setChat("views", meta.id, { messages: [], loaded: true, running: false });
   await subscribe(meta.id);
+  o.onCreated?.(meta.id);
   if (o.activate) {
     setChat({ activeId: meta.id, draftProject: null });
     writePref(ACTIVE_KEY, meta.id);

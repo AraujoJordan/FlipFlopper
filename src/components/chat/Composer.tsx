@@ -1,5 +1,5 @@
 import {
-  Component, For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
+  Component, For, Show, batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from "solid-js";
 import {
   agentTuning, nativeCommands, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, permissionModeUpdating, sessionModePending, startNewSession, submitPrompt, isRunning,
@@ -9,7 +9,7 @@ import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMod
 import { openSide } from "../../lib/layout";
 import { registerShortcutHandler } from "../../lib/shortcuts";
 import { effectiveRoot, setStore, store } from "../../lib/store";
-import { Menu, MenuDivider, MenuItem, MenuLabel, animateElement, useValueMotion, useListMotion, usePresence, useSelectionMotion } from "../ui";
+import { Menu, MenuDivider, MenuItem, MenuLabel, Spinner, animateElement, cancelMotion, useValueMotion, useListMotion, usePresence, useSelectionMotion, toast } from "../ui";
 import { Icon, type IconName } from "../shell/Icon";
 import { getFileIcon } from "../../lib/fileIcons";
 import {
@@ -75,6 +75,9 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   let plusAnchor: HTMLButtonElement | undefined;
   let agentAnchor: HTMLButtonElement | undefined;
   let modeAnchor: HTMLButtonElement | undefined;
+  let sendControl: HTMLDivElement | undefined;
+  let sendingStatus: HTMLSpanElement | undefined;
+  let draftMove: { from: string; to: string } | undefined;
 
   const running = () => (chat.activeId ? isRunning(chat.activeId) : false);
   const projectRoot = () => effectiveRoot() ?? store.currentProject?.path ?? null;
@@ -87,6 +90,11 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     lastKey = draftKey();
     setValue(drafts.get(lastKey) ?? "");
     setAttachments(attachmentDrafts.get(lastKey) ?? []);
+    if (draftMove?.to === lastKey) {
+      drafts.delete(draftMove.from);
+      attachmentDrafts.delete(draftMove.from);
+      draftMove = undefined;
+    }
     resize();
   }, { defer: true }));
 
@@ -217,22 +225,68 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
 
   // ── Sending ──
   async function send() {
-    if (submitting()) return;
-    const text = value().trim();
-    const files = attachments();
+    if (submitting() || permissionModeUpdating()) return;
+    const original = value();
+    const text = original.trim();
+    const files = [...attachments()];
     if (!text && files.length === 0) return;
-    setSubmitting(true);
-    let ok: boolean;
-    try { ok = await submitPrompt(text, files); } finally { setSubmitting(false); }
-    if (!ok) return;
-    clearAttachments();
-    attachmentDrafts.delete(draftKey());
-    if (text) history.unshift(text);
-    history.length = Math.min(history.length, HISTORY_MAX);
-    setHistoryIndex(null);
-    setValue("");
-    drafts.delete(draftKey());
+    const source = draftKey();
+    let target = source;
+    // Acknowledge the press before any IPC, worktree creation or CLI startup.
+    batch(() => {
+      setSubmitting(true);
+      setValue("");
+      clearAttachments();
+      setCaret(0);
+      setHistoryIndex(null);
+      setDismissedKey(null);
+    });
+    drafts.delete(source);
+    attachmentDrafts.delete(source);
     queueMicrotask(resize);
+    let ok = false;
+    try {
+      ok = await submitPrompt(text, files, (id) => {
+        target = id;
+        // Carry a follow-up being typed on the new-session screen into its
+        // newly created conversation before navigation swaps the draft.
+        if (source === "new" && draftKey() === source) {
+          drafts.set(id, value());
+          attachmentDrafts.set(id, [...attachments()]);
+          draftMove = { from: source, to: id };
+        }
+      });
+      if (ok && text) {
+        history.unshift(text);
+        history.length = Math.min(history.length, HISTORY_MAX);
+      }
+    } catch (error) {
+      toast(`Couldn't send message: ${String(error)}`, "error");
+    } finally {
+      if (!ok) {
+        // Startup can fail after creating (or removing) a native session.
+        const removed = target !== source && !chat.sessions.some((s) => s.id === target) ? target : undefined;
+        const movedText = removed ? drafts.get(removed) ?? "" : "";
+        const movedFiles = removed ? attachmentDrafts.get(removed) ?? [] : [];
+        if (removed) {
+          drafts.delete(removed);
+          attachmentDrafts.delete(removed);
+          target = source;
+        }
+        const visible = draftKey() === target;
+        const nextText = [movedText, visible ? value() : drafts.get(target) ?? ""].filter(Boolean).join("\n\n");
+        const nextFiles = [...movedFiles, ...(visible ? attachments() : attachmentDrafts.get(target) ?? [])];
+        const restored = original + (nextText ? `\n\n${nextText}` : "");
+        const restoredFiles = [...new Map([...files, ...nextFiles].map((a) => [a.path, a])).values()];
+        drafts.set(target, restored);
+        attachmentDrafts.set(target, restoredFiles);
+        if (visible) {
+          batch(() => { setValue(restored); setAttachments(restoredFiles); });
+          queueMicrotask(resize);
+        }
+      }
+      setSubmitting(false);
+    }
   }
 
   function onKeyDown(e: KeyboardEvent) {
@@ -308,7 +362,11 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   let composerElement: HTMLDivElement | undefined;
   let suggestions: HTMLDivElement | undefined;
   const suggestionsPresent = usePresence(menuOpen, () => suggestions);
-  useValueMotion(() => composerElement?.querySelector<HTMLElement>(".composer-send") ?? undefined, () => `${running()}:${!!value().trim() || attachments().length > 0}`);
+  useValueMotion(() => sendControl, () => `${submitting()}:${running()}:${hasText()}`);
+  createEffect(on(submitting, (pending) => {
+    if (pending) queueMicrotask(() => void animateElement(sendingStatus, [{ opacity: 0, transform: "translateX(4px)" }, { opacity: 1, transform: "none" }], 160));
+  }));
+  onCleanup(() => { cancelMotion(sendControl); cancelMotion(sendingStatus); cancelMotion(textarea); });
   useValueMotion(() => agentAnchor, () => chat.composer.agentId, true);
   useValueMotion(() => modeAnchor, () => chat.composer.mode);
   useValueMotion(() => agentAnchor?.querySelector<HTMLElement>(".pill-sub") ?? undefined, modelSummary);
@@ -354,7 +412,9 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           rows={1}
           aria-label="Message"
           placeholder={
-            running()
+            submitting()
+              ? "Write a follow-up while sending…"
+              : running()
               ? "Queue a follow-up…"
               : chat.activeId
                 ? "Reply, or @ to mention a file…"
@@ -408,25 +468,32 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           </div>
 
           <div class="composer-bar-right">
-            <Show
-              when={(running() && !hasText()) || submitting()}
-              fallback={
-                <button
-                  type="button"
-                  class="send-btn"
-                  disabled={!hasText() || submitting() || permissionModeUpdating()}
-                  onClick={() => void send()}
-                  title={running() ? "Queue follow-up (Enter)" : "Send (Enter)"}
-                  aria-label="Send"
-                >
-                  <Icon name="arrowUp" size={16} />
-                </button>
-              }
-            >
-              <button type="button" class="send-btn send-btn-stop" onClick={cancelTurn} title="Stop (Esc)" aria-label="Stop">
-                <Icon name="stop" size={14} />
-              </button>
+            <Show when={submitting()}>
+              <span ref={sendingStatus} class="composer-send-status" role="status">Sending…</span>
             </Show>
+            <div ref={sendControl} class="composer-send" aria-busy={submitting()}>
+              <Show
+                when={running() && (!hasText() || submitting())}
+                fallback={
+                  <button
+                    type="button"
+                    class="send-btn"
+                    disabled={!hasText() || submitting() || permissionModeUpdating()}
+                    onClick={() => void send()}
+                    title={submitting() ? "Sending message" : running() ? "Queue follow-up (Enter)" : "Send (Enter)"}
+                    aria-label={submitting() ? "Sending message" : "Send"}
+                  >
+                    <Show when={submitting()} fallback={<Icon name="arrowUp" size={16} />}>
+                      <Spinner size={15} />
+                    </Show>
+                  </button>
+                }
+              >
+                <button type="button" class="send-btn send-btn-stop" onClick={cancelTurn} title="Stop (Esc)" aria-label="Stop">
+                  <Icon name="stop" size={14} />
+                </button>
+              </Show>
+            </div>
           </div>
         </div>
       </div>

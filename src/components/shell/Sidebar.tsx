@@ -1,11 +1,14 @@
-import { Component, For, Show, createMemo, createSignal } from "solid-js";
+import { Component, For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
+import { Portal } from "solid-js/web";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   archiveSession, chat, deleteSession, isRunning, pendingInputCount, navBack, navForward, navState, nestSessions, pinSession,
   projectName, renameSession, selectSession, sessionGroups, sessionProjects, startNewSession,
 } from "../../lib/chat";
 import { removeWorktree, type SessionMeta } from "../../lib/ipc";
-import { cycleTheme, layout, setProjectFilter, setSidebarGroup, toggleSidebar } from "../../lib/layout";
+import { cycleTheme, layout, moveSidebarProject, setProjectDisplayName, setProjectFilter, setSidebarGroup, toggleSidebar } from "../../lib/layout";
+import { openProjectPath, removeSidebarProject } from "../../lib/projects";
+import { writeClipboardText } from "../../lib/native";
 import { store } from "../../lib/store";
 import { updateInfo } from "../../lib/updater";
 import { openPalette } from "../../lib/palette";
@@ -124,6 +127,14 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
   const [collapsed, setCollapsed] = createSignal<Record<string, boolean>>({});
   const [renamingId, setRenamingId] = createSignal<string | null>(null);
   const [menu, setMenu] = createSignal<{ x: number; y: number; session: SessionMeta } | null>(null);
+  const [projectMenu, setProjectMenu] = createSignal<{ x: number; y: number; path: string } | null>(null);
+  const [renamingProject, setRenamingProject] = createSignal<string | null>(null);
+  const [projectDraft, setProjectDraft] = createSignal("");
+  const [drag, setDrag] = createSignal<{ path: string; x: number; y: number } | null>(null);
+  const [drop, setDrop] = createSignal<{ path: string; position: "before" | "after" } | null>(null);
+  let stopDragging: (() => void) | undefined;
+  let suppressClick = false;
+  let clickReset: ReturnType<typeof setTimeout> | undefined;
 
   const groups = createMemo(() =>
     sessionGroups({ includeArchived: showArchived(), query: query(), group: layout.sidebarGroup, filter: layout.projectFilter }),
@@ -137,9 +148,92 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
   const archivedCount = () => chat.sessions.filter((s) => s.archived).length;
   let sidebar: HTMLElement | undefined;
   let themeButton: HTMLButtonElement | undefined;
-  useListMotion(() => sidebar, () => groups().map((g) => g.sessions.map((s) => s.id).join()).join("|"), ".session-row");
+  useListMotion(() => sidebar, () => groups().map((g) => `${g.key}:${g.sessions.map((s) => s.id).join()}`).join("|"), ".session-group-head, .session-row");
   useSelectionMotion(() => sidebar, () => chat.activeId, ".session-row-active");
   useValueMotion(() => themeButton, () => layout.theme, true);
+
+  const projectPaths = () => projects().map((p) => p.path);
+  const projectIndex = (path: string) => projectPaths().indexOf(path);
+  const focusProject = (path: string) => queueMicrotask(() => sidebar?.querySelector<HTMLElement>(`[data-project-path="${CSS.escape(path)}"] .session-group-toggle`)?.focus({ preventScroll: true }));
+  const moveProject = (path: string, direction: -1 | 1) => {
+    const target = projectPaths()[projectIndex(path) + direction];
+    if (target) { moveSidebarProject(path, target, direction < 0 ? "before" : "after", projectPaths()); focusProject(path); }
+  };
+  const renameProject = (path: string) => {
+    setProjectDraft(projectName(path)); setRenamingProject(path); setProjectMenu(null);
+  };
+  const commitProjectName = (path: string) => {
+    if (renamingProject() !== path) return;
+    const name = projectDraft().trim();
+    if (name) setProjectDisplayName(path, name);
+    setRenamingProject(null); focusProject(path);
+  };
+  const showProjectMenu = (event: MouseEvent, path: string) => {
+    event.preventDefault(); event.stopPropagation();
+    setMenu(null); setProjectMenu({ x: event.clientX, y: event.clientY, path });
+  };
+
+  // Pointer capture works inside Tauri's native file-drop surface, including on
+  // WebKit where native HTML drag/drop can be intercepted by the desktop shell.
+  function beginProjectDrag(event: PointerEvent, path: string) {
+    if (event.button !== 0 || renamingProject() || projectPaths().length < 2) return;
+    stopDragging?.();
+    clearTimeout(clickReset); suppressClick = false;
+    const handle = event.currentTarget as HTMLElement;
+    const pointer = event.pointerId, startX = event.clientX, startY = event.clientY;
+    let active = false;
+    handle.setPointerCapture(pointer);
+    const move = (next: PointerEvent) => {
+      if (next.pointerId !== pointer) return;
+      if (!active && Math.hypot(next.clientX - startX, next.clientY - startY) < 5) return;
+      active = true; suppressClick = true;
+      setProjectMenu(null); setDrag({ path, x: next.clientX, y: next.clientY });
+      const scroll = sidebar?.querySelector<HTMLElement>(".sidebar-scroll");
+      if (scroll) {
+        const bounds = scroll.getBoundingClientRect();
+        if (next.clientY < bounds.top + 32) scroll.scrollTop -= 14;
+        if (next.clientY > bounds.bottom - 32) scroll.scrollTop += 14;
+      }
+      const target = document.elementFromPoint(next.clientX, next.clientY)?.closest<HTMLElement>("[data-project-path]");
+      const targetPath = target?.dataset.projectPath;
+      if (!target || !sidebar?.contains(target) || !targetPath || targetPath === path) { setDrop(null); return; }
+      const bounds = target.getBoundingClientRect();
+      setDrop({ path: targetPath, position: next.clientY < bounds.top + bounds.height / 2 ? "before" : "after" });
+      next.preventDefault();
+    };
+    const cleanup = () => {
+      document.removeEventListener("pointermove", move, true);
+      document.removeEventListener("pointerup", finish, true);
+      document.removeEventListener("pointercancel", cancel, true);
+      handle.removeEventListener("lostpointercapture", cancel);
+      document.removeEventListener("keydown", escape, true);
+      if (handle.hasPointerCapture(pointer)) handle.releasePointerCapture(pointer);
+      setDrag(null); setDrop(null); stopDragging = undefined;
+    };
+    const finish = (next: PointerEvent) => {
+      if (next.pointerId !== pointer) return;
+      const destination = drop();
+      cleanup();
+      if (active && destination) {
+        moveSidebarProject(path, destination.path, destination.position, projectPaths()); focusProject(path);
+      }
+      // The synthesized click follows pointerup; a later keyboard/click action
+      // must still be able to expand the project normally.
+      clickReset = setTimeout(() => { suppressClick = false; }, 0);
+    };
+    const cancel = (event?: PointerEvent) => { if (event && event.pointerId !== pointer) return; cleanup(); suppressClick = false; };
+    const escape = (key: KeyboardEvent) => { if (key.key === "Escape") { key.preventDefault(); key.stopPropagation(); cancel(); } };
+    stopDragging = cancel;
+    // A release can be retargeted by the WebView/native drag surface. Capture
+    // it at the document as well as retaining pointer capture on the handle.
+    document.addEventListener("pointermove", move, true);
+    document.addEventListener("pointerup", finish, true);
+    document.addEventListener("pointercancel", cancel, true);
+    handle.addEventListener("lostpointercapture", cancel);
+    document.addEventListener("keydown", escape, true);
+  }
+  createEffect(() => { if (layout.sidebarGroup !== "project") stopDragging?.(); });
+  onCleanup(() => { stopDragging?.(); clearTimeout(clickReset); });
 
   async function confirmDelete(session: SessionMeta) {
     if (!(await confirmDialog(`Delete “${session.title || "this session"}”? The conversation can't be recovered.`, "Delete"))) return;
@@ -233,11 +327,23 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
         >
           <For each={groups()}>
             {(group) => (
-              <section class="session-group">
-                <div class="session-group-head">
+              <section class="session-group" data-project-path={group.projectPath}
+                classList={{ "project-dragging": drag()?.path === group.projectPath && !!group.projectPath, "project-drop-before": drop()?.path === group.projectPath && drop()?.position === "before", "project-drop-after": drop()?.path === group.projectPath && drop()?.position === "after" }}>
+                <div class="session-group-head" data-motion-key={`group:${group.key}`}
+                  onContextMenu={(event) => { if (group.projectPath) showProjectMenu(event, group.projectPath); }}>
+                  <Show when={renamingProject() === group.projectPath && !!group.projectPath} fallback={
                   <button
                     class="session-group-toggle"
-                    onClick={() => setCollapsed((c) => ({ ...c, [group.key]: !c[group.key] }))}
+                    onClick={() => { if (!suppressClick) setCollapsed((c) => ({ ...c, [group.key]: !c[group.key] })); }}
+                    onPointerDown={(event) => { if (group.projectPath) beginProjectDrag(event, group.projectPath); }}
+                    onKeyDown={(event) => {
+                      const path = group.projectPath;
+                      if (!path) return;
+                      if (event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key)) { event.preventDefault(); moveProject(path, event.key === "ArrowUp" ? -1 : 1); }
+                      if (event.key === "F2") { event.preventDefault(); renameProject(path); }
+                      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); setProjectMenu({path,x:rect.left,y:rect.bottom}); }
+                    }}
+                    aria-expanded={!collapsed()[group.key]}
                     title={group.projectPath ?? group.label}
                   >
                     <Icon
@@ -248,7 +354,24 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                     <Icon name={group.key === "pinned" ? "sparkle" : group.projectPath ? "folder" : "history"} size={14} />
                     <span class="session-group-name">{group.label}</span>
                   </button>
+                  }>
+                    <input class="session-row-input project-name-input" aria-label="Project display name" maxLength={80} value={projectDraft()}
+                      ref={(input) => queueMicrotask(() => { if (input.isConnected) { input.focus(); input.select(); } })}
+                      onInput={(event) => setProjectDraft(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        event.stopPropagation();
+                        if (event.key === "Enter") { event.preventDefault(); commitProjectName(group.projectPath!); }
+                        if (event.key === "Escape") { event.preventDefault(); setRenamingProject(null); focusProject(group.projectPath!); }
+                      }} onBlur={() => commitProjectName(group.projectPath!)} />
+                  </Show>
                   <Show when={group.projectPath}>
+                    <button type="button" class="icon-btn project-drag-handle" title="Drag to reorder · Alt+↑/↓ to move" aria-label={`Reorder ${group.label}`}
+                      onPointerDown={(event) => beginProjectDrag(event, group.projectPath!)}
+                      onKeyDown={(event) => { if (event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key)) { event.preventDefault(); moveProject(group.projectPath!, event.key === "ArrowUp" ? -1 : 1); } }}>
+                      <Icon name="dragHandle" size={13} />
+                    </button>
+                    <button type="button" class="icon-btn session-group-add" title={`Options for ${group.label}`} aria-label={`Options for ${group.label}`}
+                      onClick={(event) => { const rect=event.currentTarget.getBoundingClientRect(); setMenu(null); setProjectMenu({path:group.projectPath!,x:rect.left,y:rect.bottom}); }}><Icon name="more" size={14} /></button>
                     <button
                       class="icon-btn session-group-add"
                       onClick={() => startNewSession(group.projectPath)}
@@ -260,6 +383,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                   </Show>
                 </div>
                 <Disclosure open={!collapsed()[group.key]}>
+                  <Show when={group.projectPath && group.sessions.length === 0}><button type="button" class="project-empty-session" onClick={() => startNewSession(group.projectPath)}>Start a conversation</button></Show>
                   <For each={nestSessions(group.sessions)}>
                     {({ session, depth }) => (
                       <SessionRow
@@ -268,7 +392,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                         projectLabel={group.projectPath ? undefined : projectName(session.project_path)}
                         renaming={renamingId() === session.id}
                         onRenameDone={() => setRenamingId(null)}
-                        onContext={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, session }); }}
+                        onContext={(e) => { e.preventDefault(); setProjectMenu(null); setMenu({ x: e.clientX, y: e.clientY, session }); }}
                         onRename={() => setRenamingId(session.id)}
                         onArchive={() => void archiveSession(session.id, !session.archived)}
                       />
@@ -311,6 +435,26 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
           </button>
         </div>
       </div>
+
+      <Show when={drag()}>{(moving) => <Portal><div class="project-drag-preview" style={{left:`${moving().x + 14}px`,top:`${moving().y + 12}px`}} aria-hidden="true"><Icon name="folder" size={14} />{projectName(moving().path)}</div></Portal>}</Show>
+
+      <ContextMenu open={!!projectMenu()} onClose={() => setProjectMenu(null)} x={projectMenu()?.x ?? 0} y={projectMenu()?.y ?? 0} width={230}>
+        <Show when={projectMenu()}>{(item) => <>
+          <MenuLabel>{projectName(item().path)}</MenuLabel>
+          <MenuItem onSelect={() => { const path=item().path; setProjectMenu(null); startNewSession(path); }}><Icon name="plus" size={14} />New session</MenuItem>
+          <MenuItem onSelect={() => { const path=item().path; setProjectMenu(null); void openProjectPath(path); }}><Icon name="folder" size={14} />Open project</MenuItem>
+          <MenuItem onSelect={() => renameProject(item().path)}><Icon name="pencil" size={14} />Rename…</MenuItem>
+          <Show when={layout.projectNames[item().path]}><MenuItem onSelect={() => { setProjectDisplayName(item().path, ""); setProjectMenu(null); }}><Icon name="refresh" size={14} />Reset name</MenuItem></Show>
+          <MenuDivider />
+          <MenuItem disabled={projectIndex(item().path) <= 0} onSelect={() => { moveProject(item().path, -1); setProjectMenu(null); }}><Icon name="arrowUp" size={14} />Move up</MenuItem>
+          <MenuItem disabled={projectIndex(item().path) >= projects().length - 1} onSelect={() => { moveProject(item().path, 1); setProjectMenu(null); }}><Icon name="arrowDown" size={14} />Move down</MenuItem>
+          <MenuDivider />
+          <MenuItem onSelect={() => { const path=item().path; setProjectMenu(null); void revealItemInDir(path).catch((error) => toast(`Couldn't reveal project: ${String(error)}`, "error")); }}><Icon name="folder" size={14} />Reveal folder</MenuItem>
+          <MenuItem onSelect={() => { const path=item().path; setProjectMenu(null); void writeClipboardText(path, "project path").catch((error) => toast(String(error), "error")); }}><Icon name="copy" size={14} />Copy path</MenuItem>
+          <MenuDivider />
+          <MenuItem onSelect={() => { const path=item().path; setProjectMenu(null); void removeSidebarProject(path); }}><Icon name="trash" size={14} />Remove project…</MenuItem>
+        </>}</Show>
+      </ContextMenu>
 
       <ContextMenu open={!!menu()} onClose={() => setMenu(null)} x={menu()?.x ?? 0} y={menu()?.y ?? 0} width={210}>
         <Show when={menu()}>

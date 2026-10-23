@@ -2,6 +2,7 @@ import { Component, For, Show, onMount, createEffect } from "solid-js";
 import { chat, projectName } from "../../lib/chat";
 import { openProjectPath } from "../../lib/projects";
 import { store } from "../../lib/store";
+import { layout } from "../../lib/layout";
 import { installAgent, installable, installing, loadInstallable } from "../../lib/install";
 import { dismissBanner, pendingCandidates, setImportOpen } from "../../lib/importer";
 import { Spinner, reveal } from "../ui";
@@ -13,7 +14,7 @@ let introduced = false;
  *  this fills the space above it with the target project and shortcuts. */
 const EmptyState: Component<{ onOpenProjects: () => void; onNewProject: () => void }> = (props) => {
   const project = () => chat.draftProject ?? store.currentProject?.path ?? null;
-  const recents = () => store.recentProjects.filter((p) => p.path !== project()).slice(0, 5);
+  const recents = () => store.recentProjects.filter((p) => p.path !== project() && !layout.hiddenProjects.includes(p.path)).slice(0, 5);
   const noAgents = () => store.agents.length > 0 && !store.agents.some((a) => a.installed && a.chat_supported);
   const suggestions = () => store.agents.filter((a) => a.chat_supported && !a.installed && installable().has(a.id)).slice(0, 4);
   onMount(() => void loadInstallable());
@@ -72,7 +73,7 @@ const EmptyState: Component<{ onOpenProjects: () => void; onNewProject: () => vo
             {(p) => (
               <button class="recent-chip" onClick={() => void openProjectPath(p.path)} title={p.path}>
                 <Icon name="folder" size={13} />
-                {p.name}
+                {projectName(p.path)}
               </button>
             )}
           </For>

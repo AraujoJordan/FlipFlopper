@@ -654,6 +654,18 @@ export const savePastedAttachment = (dataBase64: string, ext: string): Promise<A
 export const readImageThumbnail = (path: string): Promise<string | null> =>
   invoke("read_image_thumbnail", { path });
 
+export interface AttachmentPreviewSource {
+  path: string;
+  kind: "image" | "video" | "audio" | "pdf";
+  size: number;
+}
+
+/** Grant local streaming access to one validated attachment, including range requests. */
+export const prepareAttachmentPreview = (path: string): Promise<AttachmentPreviewSource> =>
+  invoke("prepare_attachment_preview", { path });
+
+export const openAttachment = (path: string): Promise<void> => invoke("open_attachment", { path });
+
 /** Native multi-file picker. */
 export const pickFiles = (): Promise<Attachment[]> => invoke("pick_files");
 

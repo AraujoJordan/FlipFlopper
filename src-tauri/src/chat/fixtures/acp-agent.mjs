@@ -43,6 +43,20 @@ async function handle(message) {
       cancelled = false; turns++;
       const text = p.prompt[0].text;
       if (text === "disconnect") process.exit(2);
+      if (["incomplete-tool", "untyped-incomplete-tool", "other-tool-error", "cancel-incomplete-tool"].includes(text)) {
+        update({ sessionUpdate: "tool_call", toolCallId: "unfinished-tool", title: "Run command", kind: "execute", status: "in_progress" });
+        if (text === "cancel-incomplete-tool") {
+          await ask("session/request_permission", { toolCall: { toolCallId: "unfinished-tool", title: "Run command", kind: "execute" }, options: [{ optionId: "once", name: "Allow once", kind: "allow_once" }] });
+          while (!cancelled) await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        update({ sessionUpdate: "tool_call_update", toolCallId: "unfinished-tool", status: "failed", content: [{ type: "content", content: { type: "text", text: "Claude ended the turn without returning a result for this tool." } }] });
+        send({ id: message.id, error: {
+          code: -32603,
+          message: "Internal error: Claude ended the turn without returning results for tool calls: unfinished-tool",
+          ...(text === "untyped-incomplete-tool" ? {} : { data: { errorKind: text === "other-tool-error" ? "no_result" : "incomplete_tool_call" } }),
+        } });
+        return;
+      }
       if (text === "stderr") process.stderr.write("x".repeat(180000) + "\n");
       if (text.startsWith("hang:")) {
         const child = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" });

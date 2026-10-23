@@ -26,6 +26,7 @@ import description from "@material-symbols/svg-400/rounded/description.svg?raw";
 import dock_to_right from "@material-symbols/svg-400/rounded/dock_to_right.svg?raw";
 import download from "@material-symbols/svg-400/rounded/download.svg?raw";
 import draft from "@material-symbols/svg-400/rounded/draft.svg?raw";
+import drag_indicator from "@material-symbols/svg-400/rounded/drag_indicator.svg?raw";
 import edit from "@material-symbols/svg-400/rounded/edit.svg?raw";
 import fit_screen from "@material-symbols/svg-400/rounded/fit_screen.svg?raw";
 import folder from "@material-symbols/svg-400/rounded/folder.svg?raw";
@@ -95,6 +96,7 @@ const SYMBOLS = {
   eye: visibility,
   sparkle: wand_stars,
   list: format_list_bulleted,
+  dragHandle: drag_indicator,
   wrench: build,
   shield: shield,
   zap: bolt,

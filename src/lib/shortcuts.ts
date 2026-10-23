@@ -82,6 +82,14 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     ],
   },
   {
+    label: "Project headings",
+    items: [
+      { keys: `${altKey}↑ / ${altKey}↓`, description: "Move the focused project up / down" },
+      { keys: "F2", description: "Rename the focused project" },
+      { keys: `${shiftKey}F10`, description: "Open the project context menu" },
+    ],
+  },
+  {
     label: "Composer",
     items: [
       { keys: "Enter", description: "Send (or queue while a turn runs)" },

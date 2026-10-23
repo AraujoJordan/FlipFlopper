@@ -1,6 +1,7 @@
 import { Icon } from "./shell/Icon";
 import { Component, For, Show } from "solid-js";
 import type { ProjectInfo } from "../lib/ipc";
+import { projectName } from "../lib/chat";
 import { Button, Spinner } from "./ui";
 
 /** Modal opened from the title-bar project button. Surfaces
@@ -107,7 +108,7 @@ const ProjectPicker: Component<{
                         "font-size": "12.5px", color: "var(--fg-default)",
                         display: "flex", "align-items": "center", gap: "6px",
                       }}>
-                        {project.name}
+                        {projectName(project.path)}
                         <Show when={project.path === props.currentPath}>
                           <span style={{
                             "font-size": "9.5px", color: "var(--accent-soft)",
@@ -129,7 +130,7 @@ const ProjectPicker: Component<{
                       class="icon-btn-danger press"
                       onclick={(e) => { e.stopPropagation(); props.onRemoveRecent(project.path); }}
                       title="Remove from recents"
-                      aria-label={`Remove ${project.name} from recent projects`}
+                      aria-label={`Remove ${projectName(project.path)} from recent projects`}
                       style={{
                         display: "flex", "align-items": "center", "justify-content": "center",
                         width: "22px", height: "22px", "flex-shrink": "0",

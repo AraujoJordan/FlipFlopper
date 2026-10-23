@@ -1,7 +1,8 @@
 import { getRecentProjects, openProject, pickProjectFolder, removeRecentProject, type ProjectInfo } from "./ipc";
-import { setDraftProject } from "./chat";
+import { projectName, setDraftProject } from "./chat";
+import { hideSidebarProject, restoreSidebarProject } from "./layout";
 import { setPendingPromptSeed, setStore, updateCurrentBranch } from "./store";
-import { toast } from "../components/ui";
+import { confirmDialog, toast } from "../components/ui";
 
 export async function refreshRecentProjects() {
   try {
@@ -16,6 +17,7 @@ export async function refreshRecentProjects() {
 export async function openProjectPath(path: string): Promise<ProjectInfo | null> {
   try {
     const info = await openProject(path);
+    restoreSidebarProject(path);
     setStore("currentProject", info);
     setDraftProject(info);
     void updateCurrentBranch();
@@ -41,9 +43,19 @@ export async function forgetRecentProject(path: string) {
   }
 }
 
+/** Remove a project from navigation while retaining its conversations and
+ * checkout. Opening its folder again or Undo restores the same project. */
+export async function removeSidebarProject(path: string) {
+  const name = projectName(path);
+  if (!(await confirmDialog(`Remove “${name}” from project lists? Files and conversations are kept. Open the folder again to restore it.`, "Remove project"))) return;
+  hideSidebarProject(path);
+  toast(`Removed ${name}`, "info", { actionLabel: "Undo", onAction: () => restoreSidebarProject(path) });
+}
+
 /** The new-project wizard finished: open the project and seed the composer
  *  with the brief it produced. */
 export function projectCreated(project: ProjectInfo, prompt: string) {
+  restoreSidebarProject(project.path);
   setStore("currentProject", project);
   setDraftProject(project);
   void updateCurrentBranch();
