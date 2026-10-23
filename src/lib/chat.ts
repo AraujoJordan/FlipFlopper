@@ -474,7 +474,7 @@ function flushLiveEntries() {
       // re-enable YOLO after the user has chosen the next turn's permissions.
       if (e.event.type === "runtime_updated" && e.event.state.connected && modeChanges.has(e)) {
         const nativeMode = e.event.state.current_mode;
-        const mode: PermissionMode | undefined = e.event.state.permission_mode ?? (nativeMode === "plan" ? "plan" : nativeMode === "bypassPermissions" ? "full" : ["acceptEdits", "agent", "code"].includes(nativeMode ?? "") ? "auto_edit" : undefined);
+        const mode: PermissionMode | undefined = e.event.state.permission_mode ?? (nativeMode === "plan" ? "plan" : nativeMode === "ask" ? "ask" : nativeMode === "default" ? "manual" : nativeMode === "bypassPermissions" ? "full" : ["acceptEdits", "agent", "code"].includes(nativeMode ?? "") ? "auto_edit" : undefined);
         // Cursor Full access uses agent mode with app-managed permission
         // responses. Preserve that explicit policy unless a plan was approved.
         if (mode && !permissionUpdates().has(id) && !(e.event.state.permission_mode == null && e.event.state.agent_id === "cursor" && mode === "auto_edit" && chat.composer.mode === "full")) {
@@ -634,7 +634,7 @@ export function setDraftProject(project: { path: string }) {
 
 // Remember the non-YOLO choice per conversation without adding another persisted
 // permission state. `composer.mode` and the session's existing mode stay canonical.
-const beforeYolo = new Map<string, "plan" | "auto_edit">();
+const beforeYolo = new Map<string, Exclude<PermissionMode, "full">>();
 
 const [permissionUpdates, setPermissionUpdates] = createSignal<Set<string>>(new Set());
 export const permissionModeUpdating = () => permissionUpdates().has(chat.activeId ?? "new");
@@ -645,6 +645,35 @@ export const sessionModePending = () => {
 
 export function setYolo(enabled: boolean) {
   return setPermissionMode(enabled ? "full" : beforeYolo.get(chat.activeId ?? "new") ?? "auto_edit");
+}
+
+const MODE_CYCLE: Exclude<PermissionMode, "full">[] = ["manual", "auto_edit", "plan", "ask"];
+
+const isNativeAgent = (agentId: string) => agentId === "claude" || agentId === "cursor";
+
+/** Mirrors the backend's `apply_mode` id mapping so the UI can skip modes the connected CLI doesn't offer. */
+export function modeAvailable(mode: PermissionMode): boolean {
+  const agent = chat.composer.agentId;
+  if (mode === "manual" && !isNativeAgent(agent)) return false; // headless agents can't ask mid-turn
+  const offered = activeView()?.runtime?.modes;
+  if (!offered?.length || !isNativeAgent(agent)) return true;
+  const claude = agent === "claude";
+  const id = mode === "plan" ? "plan" : mode === "ask" ? (claude ? "default" : "ask") : mode === "manual" ? (claude ? "default" : "agent")
+    : mode === "auto_edit" ? (claude ? "acceptEdits" : "agent") : claude ? "bypassPermissions" : "agent";
+  return offered.some((m) => m.id === id);
+}
+
+/** Shift+Tab: step through the available modes. Never enters Full, which stays behind the YOLO switch. */
+export function cycleMode(dir: 1 | -1 = 1) {
+  const cycle = MODE_CYCLE.filter(modeAvailable);
+  if (cycle.length === 0) return;
+  const current = chat.composer.mode === "full" ? beforeYolo.get(chat.activeId ?? "new") ?? "auto_edit" : chat.composer.mode;
+  const at = MODE_CYCLE.indexOf(current as Exclude<PermissionMode, "full">);
+  // Step from the current position in the full order, landing on the next available mode.
+  for (let i = 1; i <= MODE_CYCLE.length; i++) {
+    const next = MODE_CYCLE[(at + dir * i + MODE_CYCLE.length * i) % MODE_CYCLE.length];
+    if (cycle.includes(next)) { void setPermissionMode(next); return; }
+  }
 }
 
 export async function setPermissionMode(mode: PermissionMode): Promise<boolean> {
@@ -710,7 +739,9 @@ export function setComposer(patch: Partial<ComposerPrefs>) {
 /** Switch the agent; its model/effort overrides don't carry across agents. */
 export function setComposerAgent(agentId: string) {
   if (chat.composer.agentId === agentId) return;
-  setComposer({ agentId, model: null, effort: null });
+  // Manual needs live approvals, which headless agents lack.
+  const mode = chat.composer.mode === "manual" && !isNativeAgent(agentId) ? "auto_edit" : undefined;
+  setComposer({ agentId, model: null, effort: null, ...(mode ? { mode } : {}) });
 }
 
 // ── Sending ──────────────────────────────────────────────────────────────────

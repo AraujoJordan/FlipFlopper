@@ -2,7 +2,7 @@ import {
   Component, For, Show, batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from "solid-js";
 import {
-  agentTuning, nativeCommands, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, permissionModeUpdating, sessionModePending, startNewSession, submitPrompt, isRunning,
+  agentTuning, nativeCommands, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, submitPrompt, isRunning,
 } from "../../lib/chat";
 import { AgentLogo } from "../../lib/agentMeta";
 import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMode } from "../../lib/ipc";
@@ -20,8 +20,10 @@ import type { Attachment } from "../../lib/ipc";
 import AttachmentChip from "./AttachmentChip";
 
 const MODES: { id: PermissionMode; label: string; icon: IconName; hint: string }[] = [
-  { id: "plan", label: "Plan", icon: "clipboard", hint: "Read-only. Investigates and proposes a plan; changes nothing." },
+  { id: "manual", label: "Manual", icon: "shield", hint: "Asks before every edit and command. Live-approval agents only." },
   { id: "auto_edit", label: "Auto-edit", icon: "pencil", hint: "Edits workspace files; asks when the CLI requires command approval." },
+  { id: "plan", label: "Plan", icon: "clipboard", hint: "Read-only. Investigates and proposes a plan; changes nothing." },
+  { id: "ask", label: "Ask", icon: "help", hint: "Read-only Q&A. Answers questions; no edits and no plan." },
   { id: "full", label: "Full access", icon: "zap", hint: "Allows tool requests. Native CLI and system policies still apply." },
 ];
 
@@ -152,6 +154,9 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   const slashCommands = createMemo<SlashItem[]>(() => [
     { name: "review", detail: "Open the Changes pane", run: () => openSide("changes") },
     { name: "plan", detail: "Switch to Plan mode", run: () => setComposer({ mode: "plan" }) },
+    { name: "ask", detail: "Switch to Ask mode", run: () => setComposer({ mode: "ask" }) },
+    { name: "edit", detail: "Switch to Auto-edit mode", run: () => setComposer({ mode: "auto_edit" }) },
+    ...(modeAvailable("manual") ? [{ name: "manual", detail: "Switch to Manual mode", run: () => setComposer({ mode: "manual" }) }] : []),
     { name: "new", detail: "Start a new session", run: () => startNewSession() },
     { name: "terminal", detail: "Open the terminal pane", run: () => openSide("terminal") },
     {
@@ -301,9 +306,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
 
     if (e.key === "Tab" && e.shiftKey) {
       e.preventDefault();
-      const order: PermissionMode[] = ["plan", "auto_edit", "full"];
-      const next = order[(order.indexOf(chat.composer.mode) + 1) % 2]; // never cycle into Full by accident
-      setComposer({ mode: next });
+      if (!permissionModeUpdating()) cycleMode(1);
       return;
     }
 
@@ -375,7 +378,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   useSelectionMotion(() => suggestions, selected, ".mention-item-active");
   return (
     <div ref={composerElement} class="composer">
-      <div class="composer-box" classList={{ "composer-box-full": chat.composer.mode === "full" }}>
+      <div class="composer-box" data-mode={chat.composer.mode} classList={{ "composer-box-full": chat.composer.mode === "full" }}>
         <Show when={suggestionsPresent()}>
           <div ref={suggestions} class="mention-menu" role="listbox">
             <For each={items()}>
@@ -541,6 +544,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
             ref={modeAnchor}
             type="button"
             class="pill"
+            data-mode={chat.composer.mode}
             classList={{ "pill-full": chat.composer.mode === "full" }}
             disabled={permissionModeUpdating()}
             onClick={() => setModeMenu((v) => !v)}
@@ -554,11 +558,11 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
             <MenuLabel>Permissions</MenuLabel>
             <For each={MODES}>
               {(m) => (
-                <MenuItem onSelect={() => void chooseMode(m.id)}>
+                <MenuItem disabled={!modeAvailable(m.id)} onSelect={() => void chooseMode(m.id)}>
                   <Icon name={m.icon} size={16} />
                   <span style={{ display: "flex", "flex-direction": "column", gap: "2px", flex: 1 }}>
                     <span style={{ "font-weight": 500 }}>{m.label}</span>
-                    <span style={{ "font-size": "12px", color: "var(--fg-subtle)" }}>{m.hint}</span>
+                    <span style={{ "font-size": "12px", color: "var(--fg-subtle)" }}>{!modeAvailable(m.id) ? (m.id === "manual" && !native() ? "This agent can't ask mid-turn." : "Not offered by this CLI version.") : m.hint}</span>
                   </span>
                   <Show when={chat.composer.mode === m.id}><Icon name="check" size={14} /></Show>
                 </MenuItem>

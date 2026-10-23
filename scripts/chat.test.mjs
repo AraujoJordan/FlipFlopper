@@ -130,6 +130,21 @@ test('YOLO restores Plan or Auto-edit and follows every chat agent', async () =>
   assert.equal('yolo' in writes.at(-1)[1], false); // Existing permission schema.
 });
 
+test('Shift+Tab cycles Manual, Auto-edit, Plan, Ask, skips Manual for headless agents and never enters Full', async () => {
+  const module = await loadChat({ './appPrefs': { writePref() {} } });
+  const seen = () => { module.cycleMode(1); return module.chat.composer.mode; };
+  module.setComposerAgent('claude');
+  module.setChat('composer', 'mode', 'manual');
+  assert.deepEqual([seen(), seen(), seen(), seen()], ['auto_edit', 'plan', 'ask', 'manual']);
+  module.cycleMode(-1); assert.equal(module.chat.composer.mode, 'ask');
+  module.setComposerAgent('codex');
+  module.setChat('composer', 'mode', 'ask');
+  assert.deepEqual([seen(), seen(), seen()], ['auto_edit', 'plan', 'ask']);
+  module.setYolo(true); assert.equal(seen(), 'auto_edit'); // Full steps on from the remembered Ask.
+  module.setComposerAgent('claude'); module.setComposer({ mode: 'manual' });
+  module.setComposerAgent('goose'); assert.equal(module.chat.composer.mode, 'auto_edit');
+});
+
 const modeReply = (id, mode, extra = {}) => ({ session: { id, mode }, runtime: { ...runtime(), pending: [], permission_mode: mode, ...extra } });
 
 test('YOLO return mode is conversation-scoped and restored Full falls back to Auto-edit', async () => {
@@ -432,7 +447,7 @@ async function composerFixture(activeId = 's') {
   const module = await loadFrontend('../src/components/chat/Composer.tsx', {
     'solid-js': { ...solid, createSignal: (...args) => { const signal=solid.createSignal(...args); signals.push(signal); return signal; } },
     '../../lib/chat': {
-      chat, isRunning: () => false, permissionModeUpdating: () => false, sessionModePending: () => false,
+      chat, isRunning: () => false, cycleMode() {}, modeAvailable: () => true, permissionModeUpdating: () => false, sessionModePending: () => false,
       agentTuning: () => ({ models:[], efforts:[] }), nativeCommands: () => [],
       submitPrompt: (...args) => { submissions.push(args); return new Promise((done) => { resolve=done; }); },
     },

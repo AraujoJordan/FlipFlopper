@@ -174,6 +174,11 @@
   --full-access-accent: #f59e0b;
   --full-access-accent-rgb: 245, 158, 11;
 
+  /* Per-mode composer accents (Full keeps the full-access amber above) */
+  --mode-manual-accent: #9AA8B2;  --mode-manual-accent-rgb: 154, 168, 178;
+  --mode-plan-accent:   #9D87F2;  --mode-plan-accent-rgb: 157, 135, 242;
+  --mode-ask-accent:    #5BB8F0;  --mode-ask-accent-rgb: 91, 184, 240;
+
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
@@ -220,6 +225,9 @@
   --accent:     #006C52;
   --accent-rgb: 0, 108, 82;
   --accent-soft: #006C52;
+  --mode-manual-accent: #4D626F;  --mode-manual-accent-rgb: 77, 98, 111;
+  --mode-plan-accent:   #6044B8;  --mode-plan-accent-rgb: 96, 68, 184;
+  --mode-ask-accent:    #0A6FA8;  --mode-ask-accent-rgb: 10, 111, 168;
   --accent-2:   #6044B8;
   --fg-on-accent: #ffffff;
 
@@ -267,6 +275,9 @@
   --accent:     #006C52;
   --accent-rgb: 0, 108, 82;
   --accent-soft: #006C52;
+  --mode-manual-accent: #4D626F;  --mode-manual-accent-rgb: 77, 98, 111;
+  --mode-plan-accent:   #6044B8;  --mode-plan-accent-rgb: 96, 68, 184;
+  --mode-ask-accent:    #0A6FA8;  --mode-ask-accent-rgb: 10, 111, 168;
   --accent-2:   #6044B8;
   --fg-on-accent: #ffffff;
 
@@ -1591,3 +1602,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .explain-meta { margin-top: 16px; font-size: 11.5px; color: var(--fg-subtle); }
 .explain-note { font-size: 12.5px; color: var(--fg-subtle); margin-bottom: 10px; }
 .explain-error { font-size: 12.5px; color: var(--danger, #f85149); margin-bottom: 10px; white-space: pre-wrap; }
+
+/* Mode tint: border, focus ring and pill follow the active permission mode (Full stays amber) */
+.composer-box[data-mode="manual"] { --mode-c: var(--mode-manual-accent); --mode-rgb: var(--mode-manual-accent-rgb); }
+.composer-box[data-mode="auto_edit"] { --mode-c: var(--accent); --mode-rgb: var(--accent-rgb); }
+.composer-box[data-mode="plan"] { --mode-c: var(--mode-plan-accent); --mode-rgb: var(--mode-plan-accent-rgb); }
+.composer-box[data-mode="ask"] { --mode-c: var(--mode-ask-accent); --mode-rgb: var(--mode-ask-accent-rgb); }
+.composer-box[data-mode]:not([data-mode="full"]) { border-color: rgba(var(--mode-rgb), .5); }
+.composer-box[data-mode]:not([data-mode="full"]):focus-within { border-color: var(--mode-c); box-shadow: 0 0 0 3px rgba(var(--mode-rgb), .14), 0 5px 20px rgba(3,12,16,.12); }
+.pill[data-mode="manual"] { --mode-c: var(--mode-manual-accent); --mode-rgb: var(--mode-manual-accent-rgb); }
+.pill[data-mode="auto_edit"] { --mode-c: var(--accent); --mode-rgb: var(--accent-rgb); }
+.pill[data-mode="plan"] { --mode-c: var(--mode-plan-accent); --mode-rgb: var(--mode-plan-accent-rgb); }
+.pill[data-mode="ask"] { --mode-c: var(--mode-ask-accent); --mode-rgb: var(--mode-ask-accent-rgb); }
+.pill[data-mode]:not([data-mode="full"]) { color: var(--mode-c); background: rgba(var(--mode-rgb), .12); }
+.pill[data-mode]:not([data-mode="full"]):not(:disabled):hover { color: var(--mode-c); background: rgba(var(--mode-rgb), .2); }

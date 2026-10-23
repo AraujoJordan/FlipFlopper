@@ -31,7 +31,11 @@ Currently implemented:
   (Claude-compatible schema), opencode, droid, and tolerant text parsers for
   grok, aider and goose. The shared Claude parser is retained for imports and
   Qwen; there is no Claude/Cursor headless fallback. Plandex/Cline are terminal-only.
-- Permission modes are `plan | auto_edit | full`; the composer YOLO switch maps
+- Permission modes are `manual | auto_edit | plan | ask | full`. `⇧Tab` cycles the first four
+  (Manual is skipped for headless agents, which cannot ask mid-turn; Full stays behind
+  the YOLO switch) and `.composer-box[data-mode]` tints the composer per mode. Ask is
+  read-only Q&A, enforced natively on Cursor and via auto-reject plus a prompt preamble
+  elsewhere. The composer YOLO switch maps
   to `full` for every chat agent. `setYolo` restores the previous non-full choice
   per conversation (Auto-edit after reload). `chat_set_mode` applies permission
   changes live to Claude/Cursor and resolves pending tool approvals when enabling

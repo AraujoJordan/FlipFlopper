@@ -320,10 +320,15 @@ impl Live {
                 self.state.current_mode = u["currentModeId"].as_str().map(String::from);
                 self.mode = match self.state.current_mode.as_deref() {
                     Some("plan") => PermissionMode::Plan,
+                    Some("ask") => PermissionMode::Ask,
                     Some("bypassPermissions") => PermissionMode::Full,
-                    Some("agent" | "code") if self.mode == PermissionMode::Full => {
-                        PermissionMode::Full
+                    Some("agent" | "code")
+                        if matches!(self.mode, PermissionMode::Full | PermissionMode::Manual) =>
+                    {
+                        self.mode
                     }
+                    Some("default") if self.mode == PermissionMode::Ask => PermissionMode::Ask,
+                    Some("default") => PermissionMode::Manual,
                     Some("acceptEdits" | "agent" | "code") => PermissionMode::AutoEdit,
                     _ => self.mode,
                 };
@@ -1144,7 +1149,16 @@ async fn run_agent(
                 let id = foreground.snapshot().native_session_id;
                 let image_supported =
                     foreground.snapshot().capabilities["promptCapabilities"]["image"] == true;
-                let mut blocks = vec![json!({"type":"text","text":prompt})];
+                // Claude has no native Ask mode; steer it through the prompt.
+                let text = {
+                    let snap = foreground.snapshot();
+                    if snap.permission_mode == Some(PermissionMode::Ask) && snap.current_mode.as_deref() != Some("ask") {
+                        super::adapters::ask_preamble(&prompt)
+                    } else {
+                        prompt.to_string()
+                    }
+                };
+                let mut blocks = vec![json!({"type":"text","text":text})];
                 if image_supported {
                     for a in attachments.iter().filter(|a| a.kind == "image") {
                         if let Some(url) = super::attach::native_image(&a.path) {
@@ -1259,6 +1273,8 @@ async fn apply_mode(c: &Connection, cx: &ConnectionTo<Agent>, mode: PermissionMo
         .ok_or("Native session missing")?;
     let mode_id = match (snapshot.agent_id.as_str(), mode) {
         (_, PermissionMode::Plan) => "plan",
+        ("claude", PermissionMode::Manual | PermissionMode::Ask) => "default",
+        ("cursor", PermissionMode::Ask) => "ask",
         ("claude", PermissionMode::AutoEdit) => "acceptEdits",
         ("claude", PermissionMode::Full) => "bypassPermissions",
         _ => "agent",
@@ -1430,8 +1446,10 @@ fn handle_request(
         let options = request.params["options"].as_array();
         let automatic = if live.mode == PermissionMode::Full {
             Some("allow_once")
-        } else if live.mode == PermissionMode::Plan
-            && matches!(tool_kind, "edit" | "delete" | "move")
+        } else if (live.mode == PermissionMode::Plan
+            && matches!(tool_kind, "edit" | "delete" | "move"))
+            || (live.mode == PermissionMode::Ask
+                && matches!(tool_kind, "edit" | "delete" | "move" | "execute"))
         {
             Some("reject_once")
         } else {

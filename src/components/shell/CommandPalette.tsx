@@ -90,6 +90,7 @@ const CommandPalette: Component = () => {
     { id: "a-flow", section: "Actions", label: "Show flow", icon: "flow", run: act(() => toggleSide("flow")) },
     { id: "a-review", section: "Actions", label: "Review working changes", icon: "diff", run: act(() => store.currentProject && openReview(undefined, "Working changes")) },
     { id: "a-plan", section: "Actions", label: "Switch to Plan mode", icon: "clipboard", run: act(() => setComposer({ mode: "plan" })) },
+    { id: "a-ask", section: "Actions", label: "Switch to Ask mode", icon: "help", run: act(() => setComposer({ mode: "ask" })) },
     { id: "a-auto", section: "Actions", label: "Switch to Auto-edit mode", icon: "pencil", run: act(() => setComposer({ mode: "auto_edit" })) },
     { id: "a-yolo", section: "Actions", label: `${chat.composer.mode === "full" ? "Turn off" : "Turn on"} YOLO mode`, icon: "zap", run: act(() => setYolo(chat.composer.mode !== "full")) },
     { id: "a-theme", section: "Actions", label: `Change theme (now ${layout.theme})`, icon: "eye", run: act(cycleTheme) },

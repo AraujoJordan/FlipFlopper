@@ -98,7 +98,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: `${shiftKey}Enter`, description: "New line" },
       { keys: "@", description: "Mention a file" },
       { keys: "/", description: "Commands and skills" },
-      { keys: `${shiftKey}Tab`, description: "Cycle Plan / Auto-edit" },
+      { keys: `${shiftKey}Tab`, description: "Cycle Manual / Auto-edit / Plan / Ask" },
       { keys: `${altKey}↑ / ${altKey}↓`, description: "Previous / next sent prompt" },
       { keys: "Esc", description: "Stop the running turn" },
     ],

@@ -33,8 +33,10 @@ const THEMES: { id: ThemePref; label: string }[] = [
 ];
 
 const MODES: { id: PermissionMode; label: string; hint: string }[] = [
-  { id: "plan", label: "Plan", hint: "Read-only; proposes a plan" },
+  { id: "manual", label: "Manual", hint: "Asks before every edit (Claude Code and Cursor)" },
   { id: "auto_edit", label: "Auto-edit", hint: "Edits files without asking" },
+  { id: "plan", label: "Plan", hint: "Read-only; proposes a plan" },
+  { id: "ask", label: "Ask", hint: "Read-only Q&A; no edits or plan" },
   { id: "full", label: "Full access", hint: "Allows tools; native security policies still apply" },
 ];
 

@@ -480,7 +480,7 @@ export const onPreviewUrl = (sessionId: string, cb: (url: string) => void): Prom
 
 // ── Chat sessions ────────────────────────────────────────────────────────────
 
-export type PermissionMode = "plan" | "auto_edit" | "full";
+export type PermissionMode = "manual" | "auto_edit" | "plan" | "ask" | "full";
 export type ToolKind = "read" | "edit" | "write" | "bash" | "search" | "web" | "todo" | "other";
 export type TurnStatus = "done" | "error" | "cancelled";
 

@@ -62,7 +62,7 @@ export const ConflictFixDialogHost: Component = () => {
         projectPath: project.path,
         agentId: agent.id,
         // Resolving conflicts means editing files; never escalate to Full on the user's behalf.
-        mode: chat.composer.mode === "plan" ? "auto_edit" : chat.composer.mode,
+        mode: chat.composer.mode === "plan" || chat.composer.mode === "ask" ? "auto_edit" : chat.composer.mode,
         prompt: buildConflictPrompt(s.files, s.context),
         title: "Resolve merge conflicts",
         activate: true,

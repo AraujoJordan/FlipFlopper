@@ -22,8 +22,13 @@ mod opencode;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
+    /// Approve every edit and command; headless agents cannot ask mid-turn, so
+    /// they fall back to their most conservative writable policy.
+    Manual,
     /// Read-only: analyze and propose a plan, no edits.
     Plan,
+    /// Read-only Q&A: answer questions, no edits and no plan.
+    Ask,
     /// Edit files in the workspace; shell is limited by the agent's sandbox.
     AutoEdit,
     /// Auto-approve tools using the CLI's full-access mode. Native security
@@ -79,14 +84,22 @@ pub fn supports_resume(agent_id: &str) -> bool {
 
 /// For agents with no native read-only mode: steer via the prompt instead.
 fn with_plan_preamble(prompt: &str, mode: PermissionMode) -> String {
-    if mode == PermissionMode::Plan {
-        format!(
+    match mode {
+        PermissionMode::Plan => format!(
             "Plan mode: do NOT modify any files or run commands that change state. \
              Investigate read-only and reply with a concrete plan.\n\n{prompt}"
-        )
-    } else {
-        prompt.to_string()
+        ),
+        PermissionMode::Ask => ask_preamble(prompt),
+        _ => prompt.to_string(),
     }
+}
+
+/// Ask mode has no native equivalent on most agents: steer via the prompt.
+pub fn ask_preamble(prompt: &str) -> String {
+    format!(
+        "Ask mode: answer the question. Do NOT modify any files, run commands that change \
+         state, or produce an implementation plan.\n\n{prompt}"
+    )
 }
 
 /// Prompts passed as argv must not be mistaken for a flag.
@@ -120,8 +133,10 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
                 args.push(format!("model_reasoning_effort={effort}"));
             }
             match req.mode {
-                PermissionMode::Plan => args.extend(["-s", "read-only"].map(String::from)),
-                PermissionMode::AutoEdit => {
+                PermissionMode::Plan | PermissionMode::Ask => {
+                    args.extend(["-s", "read-only"].map(String::from))
+                }
+                PermissionMode::AutoEdit | PermissionMode::Manual => {
                     args.extend(["-s", "workspace-write"].map(String::from))
                 }
                 PermissionMode::Full => {
@@ -132,14 +147,17 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
                 args.extend(["resume", id].map(String::from));
             }
             args.push("-".into());
-            stdin = Some(req.prompt.to_string());
+            stdin = Some(with_plan_preamble(req.prompt, req.mode));
         }
         "agy" => {
             args.extend(["--output-format", "stream-json"].map(String::from));
             push_opt(&mut args, "--model", req.model);
             push_opt(&mut args, "--effort", req.effort);
             match req.mode {
-                PermissionMode::Plan => args.extend(["--mode", "plan"].map(String::from)),
+                PermissionMode::Plan | PermissionMode::Ask => {
+                    args.extend(["--mode", "plan"].map(String::from))
+                }
+                PermissionMode::Manual => {}
                 PermissionMode::AutoEdit => {
                     args.extend(["--mode", "accept-edits"].map(String::from))
                 }
@@ -147,13 +165,16 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
             }
             push_opt(&mut args, "--conversation", req.resume_id);
             // `-p` swallows the next token as its prompt, so attach it.
-            args.push(format!("-p={}", req.prompt));
+            args.push(format!("-p={}", with_plan_preamble(req.prompt, req.mode)));
         }
         "qwen" => {
             args.extend(["-o", "stream-json"].map(String::from));
             push_opt(&mut args, "-m", req.model);
             match req.mode {
-                PermissionMode::Plan => args.extend(["--approval-mode", "plan"].map(String::from)),
+                PermissionMode::Plan | PermissionMode::Ask => {
+                    args.extend(["--approval-mode", "plan"].map(String::from))
+                }
+                PermissionMode::Manual => {}
                 PermissionMode::AutoEdit => {
                     args.extend(["--approval-mode", "auto-edit"].map(String::from))
                 }
@@ -161,26 +182,28 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
             }
             push_opt(&mut args, "-r", req.resume_id);
             args.push("-p".into());
-            args.push(req.prompt.to_string());
+            args.push(with_plan_preamble(req.prompt, req.mode));
         }
         "opencode" => {
             args.extend(["run", "--format", "json"].map(String::from));
             push_opt(&mut args, "-m", req.model);
             push_opt(&mut args, "--variant", req.effort);
             match req.mode {
-                PermissionMode::Plan => args.extend(["--agent", "plan"].map(String::from)),
-                PermissionMode::AutoEdit => {}
+                PermissionMode::Plan | PermissionMode::Ask => {
+                    args.extend(["--agent", "plan"].map(String::from))
+                }
+                PermissionMode::AutoEdit | PermissionMode::Manual => {}
                 PermissionMode::Full => args.push("--auto".into()),
             }
             push_opt(&mut args, "-s", req.resume_id);
-            args.push(argv_prompt(req.prompt.to_string()));
+            args.push(argv_prompt(with_plan_preamble(req.prompt, req.mode)));
         }
         "droid" => {
             args.extend(["exec", "-o", "stream-json"].map(String::from));
             push_opt(&mut args, "-m", req.model);
             push_opt(&mut args, "-r", req.effort);
             match req.mode {
-                PermissionMode::Plan => {}
+                PermissionMode::Plan | PermissionMode::Ask | PermissionMode::Manual => {}
                 PermissionMode::AutoEdit => args.extend(["--auto", "medium"].map(String::from)),
                 PermissionMode::Full => args.push("--skip-permissions-unsafe".into()),
             }
@@ -208,7 +231,7 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
         "aider" => {
             args.extend(["--no-pretty", "--no-stream", "--no-auto-commits"].map(String::from));
             push_opt(&mut args, "--model", req.model);
-            if req.mode != PermissionMode::Plan {
+            if !matches!(req.mode, PermissionMode::Plan | PermissionMode::Ask | PermissionMode::Manual) {
                 args.push("--yes-always".into());
             }
             args.push("--message".into());
@@ -305,5 +328,17 @@ mod tests {
     fn plan_preamble_only_in_plan_mode() {
         assert!(with_plan_preamble("x", PermissionMode::Plan).contains("Plan mode"));
         assert_eq!(with_plan_preamble("x", PermissionMode::Full), "x");
+    }
+
+    #[test]
+    fn ask_mode_is_read_only_with_preamble() {
+        let codex = build_invocation("codex", &req(PermissionMode::Ask, None)).unwrap();
+        assert!(codex.args.windows(2).any(|w| w == ["-s", "read-only"]));
+        assert!(codex.stdin.unwrap().contains("Ask mode"));
+        let qwen = build_invocation("qwen", &req(PermissionMode::Ask, None)).unwrap();
+        assert!(qwen.args.windows(2).any(|w| w == ["--approval-mode", "plan"]));
+        let manual = build_invocation("codex", &req(PermissionMode::Manual, None)).unwrap();
+        assert!(manual.args.windows(2).any(|w| w == ["-s", "workspace-write"]));
+        assert_eq!(with_plan_preamble("x", PermissionMode::Manual), "x");
     }
 }
