@@ -1,8 +1,8 @@
-import { Component, For, Show, createSignal } from "solid-js";
+import { Component, Index, Show, createSignal } from "solid-js";
 import type { ToolBlock } from "../../lib/chat";
 import type { ToolKind } from "../../lib/ipc";
 import { Icon, type IconName } from "../shell/Icon";
-import { Spinner } from "../ui";
+import { Spinner, Disclosure, useValueMotion } from "../ui";
 import InlineDiff, { DiffStat, diffFromInput } from "./InlineDiff";
 
 const KIND_ICON: Record<ToolKind, IconName> = {
@@ -74,8 +74,10 @@ const ToolCallRow: Component<{ block: ToolBlock }> = (props) => {
   };
   const hasDetail = () => !!todos() || !!diff() || !!props.block.output || !!command() || props.block.input != null;
 
+  let state: HTMLSpanElement | undefined;
+  useValueMotion(() => state, () => props.block.status);
   return (
-    <div class="tool-row" classList={{ "tool-row-error": props.block.status === "error" }}>
+    <div data-motion-id={props.block.id} class="tool-row" classList={{ "tool-row-error": props.block.status === "error" }}>
       <button
         type="button"
         class="tool-row-head"
@@ -86,7 +88,7 @@ const ToolCallRow: Component<{ block: ToolBlock }> = (props) => {
         <span class="tool-row-verb">{verb()}</span>
         <span class="tool-row-title">{title()}</span>
         <Show when={diff()}>{(d) => <DiffStat adds={d().adds} dels={d().dels} />}</Show>
-        <span class="tool-row-state">
+        <span class="tool-row-state" ref={state}>
           <Show when={props.block.status === "running"}><Spinner size={12} /></Show>
           <Show when={props.block.status === "error"}><Icon name="x" size={13} /></Show>
           <Show when={hasDetail()}>
@@ -94,19 +96,20 @@ const ToolCallRow: Component<{ block: ToolBlock }> = (props) => {
           </Show>
         </span>
       </button>
-      <Show when={open()}>
-        <div class="tool-row-body">
+      <Disclosure open={open()} class="tool-row-body">
           <Show when={todos()}>
             {(list) => (
               <ul class="todo-list">
-                <For each={list()}>
-                  {(t) => (
-                    <li classList={{ "todo-done": t.done, "todo-active": t.active }}>
-                      <span class="todo-box">{t.done ? "✓" : t.active ? "•" : ""}</span>
-                      <span>{t.text}</span>
-                    </li>
-                  )}
-                </For>
+                <Index each={list()}>
+                  {(t) => {
+                    let check: HTMLSpanElement | undefined;
+                    useValueMotion(() => check, () => t().done);
+                    return <li classList={{ "todo-done": t().done, "todo-active": t().active }}>
+                      <span ref={check} class="todo-box">{t().done ? "✓" : t().active ? "•" : ""}</span>
+                      <span>{t().text}</span>
+                    </li>;
+                  }}
+                </Index>
               </ul>
             )}
           </Show>
@@ -120,8 +123,7 @@ const ToolCallRow: Component<{ block: ToolBlock }> = (props) => {
           <Show when={props.block.output}>
             <pre class="tool-pre tool-pre-output">{props.block.output}</pre>
           </Show>
-        </div>
-      </Show>
+      </Disclosure>
     </div>
   );
 };

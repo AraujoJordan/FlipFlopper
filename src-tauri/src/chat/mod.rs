@@ -33,6 +33,9 @@ use store::{Attachment, Entry, SessionMeta, WorktreeRef};
 struct Running {
     pid: u32,
     cancelled: Arc<AtomicBool>,
+    agent_id: String,
+    mode: PermissionMode,
+    turn_id: String,
 }
 
 /// Tauri-managed state: turns currently executing, keyed by session id.
@@ -40,6 +43,13 @@ struct Running {
 pub struct ChatManager {
     running: Mutex<HashMap<String, Running>>,
     pub native: acp::Pool,
+    session_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ModeUpdate {
+    session: SessionMeta,
+    runtime: acp_types::RuntimeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +198,35 @@ pub fn update_session(id: &str, patch: SessionPatch) -> Result<SessionMeta, Stri
 }
 
 impl ChatManager {
+    fn session_operation(&self, session_id: &str) -> Arc<Mutex<()>> {
+        self.session_operations.lock().unwrap().entry(session_id.into()).or_default().clone()
+    }
+    pub fn runtime_state(&self, session_id: &str) -> acp_types::RuntimeState {
+        let mut state = self.native.state(session_id);
+        if !state.connected {
+            if let Some(run) = self.running.lock().unwrap().get(session_id).filter(|run| !run.cancelled.load(Ordering::SeqCst)) {
+                state.agent_id = run.agent_id.clone();
+                state.active_turn_id = Some(run.turn_id.clone());
+                state.permission_mode = Some(run.mode);
+            }
+        }
+        state
+    }
+
+    pub fn set_mode(&self, session_id: &str, mode: PermissionMode) -> Result<ModeUpdate, String> {
+        let operation = self.session_operation(session_id);
+        let _change = operation.lock().unwrap();
+        let meta = store::get_session(session_id).ok_or("Session not found")?;
+        // Native connections change in place, including an outstanding prompt.
+        // Headless processes retain their launch policy; the saved session
+        // changes now and the next process receives it without a silent restart.
+        if self.native.set_mode(session_id, &meta.agent_id, mode)? {
+            if let Some(run) = self.running.lock().unwrap().get_mut(session_id) { run.mode = mode; }
+        }
+        let session = store::update_session(session_id, |meta| meta.mode = mode)?.ok_or("Session was removed while changing permissions")?;
+        Ok(ModeUpdate { session, runtime: self.runtime_state(session_id) })
+    }
+
     pub fn is_running(&self, session_id: &str) -> bool {
         self.running.lock().unwrap().contains_key(session_id)
     }
@@ -214,12 +253,16 @@ impl ChatManager {
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
         self.cancel(session_id);
         self.native.close_session(session_id);
-        store::delete_session(session_id)
+        store::delete_session(session_id)?;
+        self.session_operations.lock().unwrap().remove(session_id);
+        Ok(())
     }
 
     /// Start one turn. Returns the turn id once the process is spawned; events
     /// stream afterwards on `chat://{session_id}`.
     pub fn send(self: &Arc<Self>, app: Emitter, args: SendArgs) -> Result<String, String> {
+        let operation = self.session_operation(&args.session_id);
+        let _launch = operation.lock().unwrap();
         if self.is_running(&args.session_id) {
             return Err("This session is already running a turn".into());
         }
@@ -321,7 +364,7 @@ impl ChatManager {
         let cancelled = Arc::new(AtomicBool::new(false));
         self.running.lock().unwrap().insert(
             meta.id.clone(),
-            Running { pid: child.id(), cancelled: cancelled.clone() },
+            Running { pid: child.id(), cancelled: cancelled.clone(), agent_id: args.agent_id.clone(), mode: args.mode, turn_id: turn_id.clone() },
         );
 
         let session_id = meta.id.clone();
@@ -359,6 +402,8 @@ impl ChatManager {
             turn_id: turn_id.clone(),
             agent_id: args.agent_id.clone(),
         });
+        count += 1;
+        emit_event(&app, &session_id, ChatEvent::RuntimeUpdated { state: self.runtime_state(&session_id) });
         count += 1;
 
         let manager = Arc::clone(self);
@@ -497,7 +542,7 @@ impl ChatManager {
         {
             let mut running = self.running.lock().unwrap();
             if running.contains_key(&meta.id) { return Err("This session is already running a turn".into()); }
-            running.insert(meta.id.clone(), Running { pid: 0, cancelled: cancelled.clone() });
+            running.insert(meta.id.clone(), Running { pid: 0, cancelled: cancelled.clone(), agent_id: args.agent_id.clone(), mode: args.mode, turn_id: turn_id.clone() });
         }
         let prepared = (|| {
             let connection = self.native.prepare(&meta, &args.agent_id, &binary, args.recover_context, &cancelled)?;
@@ -665,6 +710,30 @@ fn diff_changes(before: &Snapshot, after: &Snapshot) -> Vec<ChangedFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converting_a_running_headless_session_saves_policy_without_restarting_it() {
+        let _env = store::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-live-mode-{}", Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "codex".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, parent_id: None, title: None }).unwrap();
+        let manager = ChatManager::default();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        manager.running.lock().unwrap().insert(meta.id.clone(), Running { pid: 12345, cancelled: cancelled.clone(), agent_id: "codex".into(), mode: PermissionMode::AutoEdit, turn_id: "same-turn".into() });
+        let updated = manager.set_mode(&meta.id, PermissionMode::Full).unwrap();
+        assert_eq!(updated.session.id, meta.id);
+        assert_eq!(updated.session.mode, PermissionMode::Full);
+        assert_eq!(store::get_session(&meta.id).unwrap().mode, PermissionMode::Full);
+        assert_eq!(updated.runtime.permission_mode, Some(PermissionMode::AutoEdit));
+        assert_eq!(updated.runtime.active_turn_id.as_deref(), Some("same-turn"));
+        assert_eq!(manager.running.lock().unwrap()[&meta.id].pid, 12345);
+        assert!(!cancelled.load(Ordering::SeqCst));
+        manager.running.lock().unwrap().remove(&meta.id);
+        assert_eq!(manager.runtime_state(&meta.id).permission_mode, None);
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
+    }
 
     #[test]
     fn interrupted_native_turn_recovers_once_and_deleted_streams_stay_deleted() {

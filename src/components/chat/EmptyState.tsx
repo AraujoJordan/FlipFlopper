@@ -1,11 +1,13 @@
-import { Component, For, Show, onMount } from "solid-js";
+import { Component, For, Show, onMount, createEffect } from "solid-js";
 import { chat, projectName } from "../../lib/chat";
 import { openProjectPath } from "../../lib/projects";
 import { store } from "../../lib/store";
 import { installAgent, installable, installing, loadInstallable } from "../../lib/install";
 import { dismissBanner, pendingCandidates, setImportOpen } from "../../lib/importer";
-import { Spinner } from "../ui";
+import { Spinner, reveal } from "../ui";
 import { Icon } from "../shell/Icon";
+
+let introduced = false;
 
 /** New-session screen. The composer is docked below (like every other screen);
  *  this fills the space above it with the target project and shortcuts. */
@@ -16,8 +18,17 @@ const EmptyState: Component<{ onOpenProjects: () => void; onNewProject: () => vo
   const suggestions = () => store.agents.filter((a) => a.chat_supported && !a.installed && installable().has(a.id)).slice(0, 4);
   onMount(() => void loadInstallable());
 
+  let empty: HTMLDivElement | undefined;
+  createEffect(() => {
+    if (store.restoringWorkspace || introduced) return;
+    queueMicrotask(() => {
+      if (introduced || !empty?.isConnected) return;
+      introduced = true;
+      [...empty.querySelectorAll<HTMLElement>(".empty-lead, .import-banner, .recent-chip")].slice(0, 4).forEach((element) => void reveal(element, 240));
+    });
+  });
   return (
-    <div class="empty-state">
+    <div ref={empty} class="empty-state">
       <div class="empty-state-inner">
         <Show
           when={project()}

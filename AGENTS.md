@@ -31,7 +31,15 @@ Currently implemented:
   (Claude-compatible schema), opencode, droid, and tolerant text parsers for
   grok, aider and goose. The shared Claude parser is retained for imports and
   Qwen; there is no Claude/Cursor headless fallback. Plandex/Cline are terminal-only.
-- Permission modes are `plan | auto_edit | full`. ACP maps native modes and
+- Permission modes are `plan | auto_edit | full`; the composer YOLO switch maps
+  to `full` for every chat agent. `setYolo` restores the previous non-full choice
+  per conversation (Auto-edit after reload). `chat_set_mode` applies permission
+  changes live to Claude/Cursor and resolves pending tool approvals when enabling
+  Full. Headless sessions save the change immediately but keep the running process
+  policy until the next turn; `runtime.permission_mode` drives the pending label.
+  Launch/mode operations serialize per session; live mode RPCs stay concurrent
+  with streaming, cancellation and native input. Questions/forms remain interactive.
+  ACP maps native modes and
   supports live permission, question, plan and elicitation cards; historical
   requests are read-only. Full access still respects native security policies.
   Headless agents receive their policy at launch and cannot ask mid-turn.
@@ -162,7 +170,7 @@ git push origin main
 src/
   App.tsx                    three-column shell (sidebar · session · side pane),
                              startup restore, native menu routing, updater
-  App.css                    theme tokens (cool blue dark/light) + shell styles
+  App.css                    theme tokens (Circuit graphite/jade and porcelain) + shell styles
   lib/ipc.ts                 typed Tauri invoke/listen wrappers (incl. chat_*)
   lib/chat.ts                single source of truth for sessions: Solid store,
                              transcript reducer (live + loaded entries share
@@ -302,9 +310,21 @@ requires generated output.
 - `lib/orchestrator.ts` is the only owner of flow state; `components/flow/*`
   are pure views. Do not give flow nodes their own status: derive it.
 - Keep UI text compact and operational. Preserve the sessions/transcript,
-  docked composer and retained side-pane layout. The current palette is cool
-  blue; the independent Circuit palette and expanded motion in the UI/UX plan
-  are planned work. Do not restore the superseded warm Claude Desktop styling.
+  docked composer and retained side-pane layout. The current palette is
+  jade/graphite (Circuit), with porcelain light mode and iris handoffs. Do not
+  restore the superseded Claude Desktop styling.
+
+- `lib/layout.ts` owns durable `system | reduced | off` motion preferences and
+  live OS/visibility resolution. Shared cancellable WAAPI/presence/list helpers
+  live in `components/ui.tsx`; settle pending work when preferences change.
+  Reduced allows only short opacity feedback; Off is immediate. Theme token
+  pairs swap atomically, including cached-terminal themes.
+- `onLivePresentation` in `lib/chat.ts` emits transient hints after live reduction.
+  History/import/replay must never produce message entrances. Keep the reducer
+  pure, later text deltas immediate, and backend outcomes independent of motion.
+- Responsive panes retain their children, trap focus while overlaid and return
+  focus when closed. Avoid animating terminal output, iframe documents or every
+  diff line. Keep Flow cards/edges/gates on the shared position map.
 
 ## Git And Commit Rules
 

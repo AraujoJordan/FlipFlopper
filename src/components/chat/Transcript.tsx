@@ -1,5 +1,7 @@
 import { Component, For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
-import { activeView, chat, pendingInputCount, dropQueued, isRunning, sendQueuedNow } from "../../lib/chat";
+import { activeView, chat, pendingInputCount, dropQueued, isRunning, sendQueuedNow, onLivePresentation } from "../../lib/chat";
+import { resolvedMotion } from "../../lib/layout";
+import { animateElement, reveal, cancelMotion, useListMotion } from "../ui";
 import { Icon } from "../shell/Icon";
 import { AssistantBubble, Divider, UserBubble } from "./MessageItem";
 
@@ -18,10 +20,45 @@ const Transcript: Component = () => {
   let content: HTMLDivElement | undefined;
   const [stuck, setStuck] = createSignal(true);
   const [limit, setLimit] = createSignal(PAGE);
+  const queueKeys = new WeakMap<object, string>();
+  let queueKey = 0;
+  const keyOf = (item: object) => { if (!queueKeys.has(item)) queueKeys.set(item, `q-${++queueKey}`); return queueKeys.get(item)!; };
+  useListMotion(() => content, () => (chat.activeId ? chat.queued[chat.activeId] ?? [] : []).map(keyOf).join(), ".queued-item");
+  const seen = new Set<string>();
+  let disposed = false;
+  onMount(() => {
+    const off = onLivePresentation((sessionId, hints) => {
+      queueMicrotask(() => {
+        if (disposed || document.hidden || chat.activeId !== sessionId || !content) return;
+        const targets = new Set<HTMLElement>();
+        for (const hint of hints) {
+          const key = `${hint.kind}:${hint.messageId}:${hint.itemId ?? ""}:${hint.status ?? ""}`;
+          if (seen.has(key)) continue;
+          seen.add(key); if (seen.size > 256) seen.delete(seen.values().next().value!);
+          const message = content.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(hint.messageId)}"]`);
+          if (!message) continue;
+          const item = hint.itemId ? message.querySelector<HTMLElement>(`[data-motion-id="${CSS.escape(hint.itemId)}"]`) : undefined;
+          if (hint.kind === "flip") {
+            const marker = message.querySelector<HTMLElement>(".handoff-marker");
+            if (marker) void animateElement(marker, [{ opacity: 0, transform: "translateX(0)" }, { opacity: 1, offset: .12 }, { opacity: 0, transform: `translateX(${Math.max(0, marker.parentElement!.clientWidth - 8)}px)` }], 420);
+            continue;
+          }
+          const target = hint.kind === "start" ? message.querySelector<HTMLElement>(".msg-assistant-head") : hint.kind === "text" ? message.querySelector<HTMLElement>(".md") : hint.kind === "tool-result" ? item?.querySelector<HTMLElement>(".tool-row-state") : hint.kind === "finish" ? message.querySelector<HTMLElement>(hint.status === "done" ? ".msg-done" : ".msg-error, .msg-note") : item ?? (hint.kind === "tool" ? message.querySelector<HTMLElement>(".tool-group-head") : message);
+          if (target) targets.add(target);
+          if (hint.kind === "finish" && hint.status === "done") {
+            const changes = message.querySelector<HTMLElement>(".turn-changes");
+            if (changes) targets.add(changes);
+          }
+        }
+        targets.forEach((target) => void reveal(target, 180));
+      });
+    });
+    onCleanup(() => { disposed = true; off(); content?.querySelectorAll<HTMLElement>("[data-message-id], [data-motion-id], .md, .msg-assistant-head, .handoff-marker, .msg-done, .turn-changes").forEach(cancelMotion); seen.clear(); });
+  });
 
   const toBottom = (smooth = false) => {
     if (!scroller) return;
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth && resolvedMotion() === "full" ? "smooth" : "auto" });
   };
 
   const onScroll = () => {
@@ -43,6 +80,8 @@ const Transcript: Component = () => {
 
   // Opening another session restores where you left it (bottom by default).
   createEffect(on(() => chat.activeId, (id) => {
+    seen.clear();
+    if (content) void animateElement(content, [{ opacity: .65 }, { opacity: 1 }], 120);
     setLimit(PAGE);
     const memo = id ? scrollMemory.get(id) : undefined;
     setStuck(memo ? memo.stuck : true);
@@ -111,7 +150,7 @@ const Transcript: Component = () => {
             <div class="queued">
               <For each={queue()}>
                 {(text, i) => (
-                  <div class="queued-item">
+                  <div class="queued-item" data-motion-key={keyOf(text)}>
                     <span class="queued-label">Queued</span>
                     <span class="queued-text">
                       {text.text || `${text.attachments.length} attachment${text.attachments.length === 1 ? "" : "s"}`}

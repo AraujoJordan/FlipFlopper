@@ -1,5 +1,6 @@
+import { Presence } from "./ui";
 import { Icon } from "./shell/Icon";
-import { Component, For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, For, createSignal, onCleanup, onMount } from "solid-js";
 import { registerShortcutHandler, SHORTCUT_GROUPS } from "../lib/shortcuts";
 
 /** Keyboard-shortcut reference modal, opened with "?" (see shortcuts.ts) or
@@ -27,7 +28,7 @@ const ShortcutHelp: Component = () => {
   }
 
   return (
-    <Show when={open()}>
+    <Presence when={open()}>
       <div
         class="overlay-backdrop-in"
         onclick={close}
@@ -105,7 +106,7 @@ const ShortcutHelp: Component = () => {
           </For>
         </div>
       </div>
-    </Show>
+    </Presence>
   );
 };
 

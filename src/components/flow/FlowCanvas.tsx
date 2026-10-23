@@ -6,8 +6,10 @@ import {
   createMemo,
   createSignal,
   onCleanup,
+  on,
   untrack,
 } from "solid-js";
+import { layout, resolvedMotion, motionForeground, registerMotionSettler } from "../../lib/layout";
 import { flow, type FlowNode } from "../../lib/orchestrator";
 import FlowNodeCard, {
   FLOW_CARD_HEIGHT,
@@ -100,9 +102,31 @@ const FlowCanvas: Component<Props> = (props) => {
   let vpStartX = 0;
   let vpStartY = 0;
   let animationFrame: number | null = null;
+  let cameraFrame: number | null = null;
+  let cameraTarget: Viewport | undefined;
+  let lastCameraWrite: Viewport | undefined;
+  const originalNodes = new Set(untrack(() => flow.nodes.map((node) => node.id)));
+  const visible = () => motionForeground() && layout.sideOpen && layout.sideTab === "flow";
+  createEffect(() => { if (!visible()) cancelCamera(true); });
+  function cancelCamera(settle = false) {
+    if (cameraFrame !== null) cancelAnimationFrame(cameraFrame);
+    cameraFrame = null;
+    if (settle && cameraTarget) props.setViewport(cameraTarget);
+    cameraTarget = undefined;
+  }
+  createEffect(on(props.viewport, (value) => {
+    if (cameraFrame !== null && value !== lastCameraWrite) cancelCamera();
+  }));
+  const removeSettler = registerMotionSettler(() => {
+    if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+    animationFrame = null;
+    setPositions(untrack(targetPositions));
+    cancelCamera(true);
+  });
 
   function onWheel(e: WheelEvent) {
     e.preventDefault();
+    cancelCamera();
     const vp = props.viewport();
     if (e.metaKey || e.ctrlKey) {
       const rect = props.containerRef()?.getBoundingClientRect();
@@ -127,6 +151,7 @@ const FlowCanvas: Component<Props> = (props) => {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
     if (target !== e.currentTarget) return;
+    cancelCamera();
     panning = true;
     panStartX = e.clientX;
     panStartY = e.clientY;
@@ -221,7 +246,7 @@ const FlowCanvas: Component<Props> = (props) => {
     });
     if (
       !hasMovement ||
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      resolvedMotion() !== "full" || !visible()
     ) {
       setPositions(targets);
       animationFrame = null;
@@ -257,17 +282,26 @@ const FlowCanvas: Component<Props> = (props) => {
       MAX_K,
       Math.max(MIN_K, Math.min((rect.width - padding * 2) / width, (rect.height - padding * 2) / height)),
     );
-    props.setViewport({
-      x: (rect.width - boardWidth * k) / 2,
-      y: (rect.height - boardHeight() * k) / 2,
-      k,
-    });
+    const target = { x: (rect.width - boardWidth * k) / 2, y: (rect.height - boardHeight() * k) / 2, k };
+    cancelCamera();
+    if (resolvedMotion() !== "full" || !visible()) { props.setViewport(target); return; }
+    cameraTarget = target;
+    const from = props.viewport(), started = performance.now();
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - started) / 240), t = easeOutCubic(progress);
+      lastCameraWrite = { x: from.x + (target.x - from.x) * t, y: from.y + (target.y - from.y) * t, k: from.k + (target.k - from.k) * t };
+      props.setViewport(lastCameraWrite);
+      if (progress < 1) cameraFrame = requestAnimationFrame(tick);
+      else { cameraFrame = null; cameraTarget = undefined; }
+    };
+    cameraFrame = requestAnimationFrame(tick);
   }
 
   props.registerFitView(fitView);
 
   onCleanup(() => {
     if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+    cancelCamera(); removeSettler();
   });
 
   return (
@@ -295,7 +329,6 @@ const FlowCanvas: Component<Props> = (props) => {
           height: `${boardHeight()}px`,
           transform: `translate(${vp().x}px, ${vp().y}px) scale(${vp().k})`,
           "transform-origin": "0 0",
-          "will-change": "transform",
           "pointer-events": "none",
         }}
       >
@@ -323,6 +356,7 @@ const FlowCanvas: Component<Props> = (props) => {
           {(node) => (
             <FlowNodeCard
               node={node}
+              animateIn={!originalNodes.has(node.id)}
               position={() => positions()[node.id] ?? targetPositions()[node.id] ?? { x: node.x, y: node.y }}
               onAddStep={(nodeId, anchor) => setAddStepFrom({ nodeId, anchor })}
               onEditStep={(nodeId, anchor) => setAddStepFrom({ nodeId, anchor, editNodeId: nodeId })}

@@ -1,3 +1,4 @@
+import { resolvedMotion } from "../lib/layout";
 import {
   Component, createEffect, createResource, createSignal, For, Show, createMemo,
 } from "solid-js";
@@ -5,7 +6,7 @@ import { escapeHtml, highlightCode } from "../lib/markdownLite";
 import { store, closeReview, openReview, effectiveRoot } from "../lib/store";
 import { getReviewDiff, type FileDiff, type DiffLine } from "../lib/ipc";
 import { getFileIcon } from "../lib/fileIcons";
-import { Button, Spinner } from "./ui";
+import { Button, Spinner, useValueMotion, Disclosure } from "./ui";
 import { Icon } from "./shell/Icon";
 
 // ── Layout toggle ────────────────────────────────────────────────────────────
@@ -290,7 +291,7 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
       </div>
 
       {/* Diff body */}
-      <Show when={!collapsed()}>
+      <Disclosure open={!collapsed()}>
         <Show when={props.file.is_binary}>
           <div style={{ padding: "24px", color: "var(--fg-faint)", "font-size": "12px", "text-align": "center" }}>
             Binary file — no diff available
@@ -358,7 +359,7 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
             </For>
           </div>
         </Show>
-      </Show>
+      </Disclosure>
     </div>
   );
 };
@@ -407,6 +408,8 @@ const DiffPane: Component = () => {
 
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   let bodyRef: HTMLDivElement | undefined;
+  useValueMotion(() => bodyRef, mode);
+  useValueMotion(() => bodyRef, () => store.review?.path ?? store.review?.rev);
 
   /** Scroll-space offset of `el` within `bodyRef`, computed via
    *  getBoundingClientRect deltas rather than offsetTop so it's correct
@@ -430,14 +433,14 @@ const DiffPane: Component = () => {
       const before = tops.filter((t) => t < current - tolerance);
       target = before.length > 0 ? before[before.length - 1] : tops[0];
     }
-    bodyRef.scrollTo({ top: target, behavior: "smooth" });
+    bodyRef.scrollTo({ top: target, behavior: resolvedMotion() === "full" ? "smooth" : "auto" });
   }
 
   function jumpToFile(index: number) {
     if (!bodyRef) return;
     const el = bodyRef.querySelector<HTMLElement>(`[data-diff-file="${index}"]`);
     if (!el) return;
-    bodyRef.scrollTo({ top: relativeTop(el), behavior: "smooth" });
+    bodyRef.scrollTo({ top: relativeTop(el), behavior: resolvedMotion() === "full" ? "smooth" : "auto" });
   }
 
   /** Next/prev-file (`]`/`[`) and next/prev-hunk (`j`/`k`) review navigation.

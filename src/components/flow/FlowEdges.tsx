@@ -1,8 +1,8 @@
 import { Icon } from "../shell/Icon";
-import { Component, For, Show, createSignal } from "solid-js";
+import { Component, For, Show, createSignal, createEffect, on, onCleanup } from "solid-js";
 import { flow, releaseGate, toggleEdgeGate, removeEdge, toggleEdgeCarry } from "../../lib/orchestrator";
 import { agentColor } from "../../lib/agentMeta";
-import { ContextMenu, MenuItem, MenuDivider } from "../ui";
+import { ContextMenu, MenuItem, MenuDivider, animateElement, useValueMotion, cancelMotion } from "../ui";
 import { FLOW_CARD_WIDTH, FLOW_CARD_HEIGHT } from "./FlowNodeCard";
 import type { FlowPosition } from "./FlowCanvas";
 
@@ -43,6 +43,7 @@ interface Props {
 
 const FlowEdges: Component<Props> = (props) => {
   const [menuPos, setMenuPos] = createSignal<{ x: number; y: number; edgeId: string } | null>(null);
+  const initialEdges = new Set(flow.edges.map((edge) => edge.id));
   const [hoveredEdge, setHoveredEdge] = createSignal<string | null>(null);
 
   const nodeById = (id: string) => flow.nodes.find((n) => n.id === id);
@@ -68,6 +69,25 @@ const FlowEdges: Component<Props> = (props) => {
       >
         <For each={flow.edges}>
           {(edge) => {
+            let wire: SVGPathElement | undefined;
+            let marker: SVGPathElement | undefined;
+            const draw = (path: SVGPathElement) => {
+              wire = path;
+              if (!initialEdges.has(edge.id)) queueMicrotask(() => {
+                const length = path.getTotalLength();
+                void animateElement(path, [{ opacity: 0, strokeDasharray: `${length} ${length}`, strokeDashoffset: `${length}` }, { opacity: .7, strokeDasharray: `${length} ${length}`, strokeDashoffset: "0" }], 180);
+              });
+            };
+            createEffect(on(() => edge.fired, (fired, before) => {
+              if (!fired || before !== false) return;
+              queueMicrotask(() => {
+                if (marker && edge.carry) {
+                  const length = marker.getTotalLength();
+                  void animateElement(marker, [{ opacity: 0, strokeDashoffset: "8" }, { opacity: 1, offset: .12 }, { opacity: 0, strokeDashoffset: `${-length}` }], 420);
+                } else if (wire) void animateElement(wire, [{ opacity: .2 }, { opacity: .9 }, { opacity: .7 }], 240);
+              });
+            }));
+            onCleanup(() => { cancelMotion(wire); cancelMotion(marker); });
             const from = () => nodeById(edge.from);
             const to = () => nodeById(edge.to);
             const fromPosition = () => props.positions()[edge.from];
@@ -87,6 +107,7 @@ const FlowEdges: Component<Props> = (props) => {
                     <>
                       <Show when={edge.carry} fallback={
                         <path
+                          ref={draw}
                           d={path()}
                           fill="none"
                           stroke={stroke}
@@ -94,11 +115,12 @@ const FlowEdges: Component<Props> = (props) => {
                           stroke-dasharray={edge.fired ? "none" : "5 4"}
                           opacity={isHovered() ? "0.95" : edge.fired ? "0.7" : "0.55"}
                           style={{
-                            transition: "opacity 160ms ease, stroke-dasharray 160ms ease",
+                            transition: "opacity var(--dur-base), stroke-dasharray var(--dur-base)",
                           }}
                         />
                       }>
                         <path
+                          ref={draw}
                           d={path()}
                           fill="none"
                           stroke={stroke}
@@ -106,10 +128,11 @@ const FlowEdges: Component<Props> = (props) => {
                           stroke-dasharray={edge.fired ? "none" : "5 4"}
                           opacity={isHovered() ? "0.95" : edge.fired ? "0.7" : "0.55"}
                           style={{
-                            transition: "opacity 160ms ease, stroke-dasharray 160ms ease",
+                            transition: "opacity var(--dur-base), stroke-dasharray var(--dur-base)",
                           }}
                         />
                         <path
+                          ref={draw}
                           d={path()}
                           fill="none"
                           stroke="var(--surface-1)"
@@ -117,11 +140,12 @@ const FlowEdges: Component<Props> = (props) => {
                           stroke-dasharray={edge.fired ? "none" : "5 4"}
                           opacity={isHovered() ? "1" : "0.9"}
                           style={{
-                            transition: "opacity 160ms ease, stroke-dasharray 160ms ease",
+                            transition: "opacity var(--dur-base), stroke-dasharray var(--dur-base)",
                           }}
                         />
                       </Show>
                       {/* Invisible fat hit-path for right-click targeting. */}
+                      <path ref={marker} d={path()} fill="none" stroke="var(--accent-2)" stroke-width="3" stroke-linecap="round" stroke-dasharray="8 10000" opacity="0" pointer-events="none" />
                       <path
                         d={path()}
                         fill="none"
@@ -144,6 +168,8 @@ const FlowEdges: Component<Props> = (props) => {
       {/* HTML chips at midpoints */}
       <For each={flow.edges}>
         {(edge) => {
+          let gateButton: HTMLButtonElement | undefined;
+          useValueMotion(() => gateButton, () => edge.gatePending);
           const from = () => nodeById(edge.from);
           const to = () => nodeById(edge.to);
           const fromPosition = () => props.positions()[edge.from];
@@ -170,7 +196,7 @@ const FlowEdges: Component<Props> = (props) => {
                   >
                     <Show when={edge.gatePending}>
                       <button
-                        class="flow-gate-pulse"
+                        ref={gateButton} class="flow-gate-pulse"
                         onclick={(e) => {
                           e.stopPropagation();
                           releaseGate(edge.id);

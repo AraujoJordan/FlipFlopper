@@ -5,7 +5,7 @@ import { addTerminal, effectiveRoot, removeTerminal, setActiveTerminal, store, t
 import { agentColor } from "../../lib/agentMeta";
 import ValidationButton from "../ValidationButton";
 import { Icon } from "../shell/Icon";
-import { Spinner, toast } from "../ui";
+import { Spinner, toast, useSelectionMotion, useListMotion } from "../ui";
 
 // Lazy: keeps xterm out of the startup bundle.
 const TerminalPane = lazy(() => import("../TerminalPane"));
@@ -14,7 +14,7 @@ function kindColor(kind: TerminalKind): string {
   switch (kind) {
     case "run": return agentColor("run");
     case "validate": return agentColor("validate");
-    case "install": return "#f0883e";
+    case "install": return "var(--accent)";
     case "shell": return "var(--fg-subtle)";
   }
 }
@@ -61,10 +61,13 @@ const TerminalView: Component = () => {
     }
   }
 
+  let tabs: HTMLDivElement | undefined;
+  useSelectionMotion(() => tabs, () => store.activeTerminalId, ".terminal-tab-on", true);
+  useListMotion(() => tabs, () => store.terminals.map((terminal) => terminal.sessionId).join(), ".terminal-tab");
   return (
     <div class="terminal-view">
       <div class="terminal-bar">
-        <div class="terminal-tabs">
+        <div ref={tabs} class="terminal-tabs">
           <For each={store.terminals}>
             {(term) => {
               const active = () => term.sessionId === store.activeTerminalId;
@@ -73,7 +76,7 @@ const TerminalView: Component = () => {
                   role="tab"
                   tabIndex={0}
                   aria-selected={active()}
-                  class="terminal-tab"
+                  class="terminal-tab" data-motion-key={term.sessionId}
                   classList={{ "terminal-tab-on": active() }}
                   onClick={() => setActiveTerminal(term.sessionId)}
                   onAuxClick={(e) => { if (e.button === 1) removeTerminal(term.sessionId); }}

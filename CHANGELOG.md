@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.12.0 - 2026-10-23
+
+### Added
+
+- One-click YOLO switch for every chat agent, backed by the existing Full access policy. Amber state, keyboard access, command-palette action and native menu entry; switching off restores the previous Plan/Auto-edit choice. Enabling YOLO converts the current session, with live Claude/Cursor updates and pending approval resolution; headless processes show when the saved change applies on the next turn.
+
+### Changed
+
+- Apply the Circuit identity across dark/light surfaces, syntax, semantic status colors and terminal ANSI colors; add jade selection rails, iris handoffs and stronger text-entry boundaries.
+- Add shared interruptible motion for live chat, composer controls and attachments, disclosures, navigation, retained panes, Flow, diffs, menus, dialogs and onboarding. Saved transcripts do not replay entrances and subsequent text deltas render immediately.
+- Add durable System / Reduced / Off motion preferences, live OS reduced-motion support, background settling and atomic theme switching.
+- Preserve terminal/preview instances during pane exits; add responsive sheet focus handling and nested modal focus ownership.
+- Refresh README screenshots and document motion ownership and verification.
+
+### Fixed
+
+- Prevent an interrupted exit from hiding a reopened view. Settle pending animations immediately when motion is disabled.
+- Confirm clipboard success before displaying Copied; surface preference-write failures and keep notifications accessible above dialogs.
+
 ## 0.11.0 - 2026-10-22
 
 ### Changed

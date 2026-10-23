@@ -1,3 +1,4 @@
+import { RetainedPresence } from "../ui";
 import { Icon } from "../shell/Icon";
 import { Component, For, Show, createSignal, createEffect } from "solid-js";
 import { store, bumpGitStatus, updateCurrentBranch, effectiveRoot } from "../../lib/store";
@@ -110,7 +111,7 @@ export const SquashPushDialogHost: Component = () => {
   }
 
   return (
-    <Show when={state()}>
+    <RetainedPresence value={state()}>
       {(s) => (
         <div
           class="overlay-backdrop-in"
@@ -289,6 +290,6 @@ export const SquashPushDialogHost: Component = () => {
           </div>
         </div>
       )}
-    </Show>
+    </RetainedPresence>
   );
 };

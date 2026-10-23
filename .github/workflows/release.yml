@@ -106,16 +106,18 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            A new conversation workspace with project sessions, streamed transcripts,
-            Changes / Preview / Terminal / Flow panes and native OS window controls.
+            Circuit brings graphite/jade dark mode, porcelain light mode and iris
+            handoffs, with expanded motion across chat, panes, Flow and dialogs.
+            Settings offers System / Reduced / Off motion.
 
-            Claude Code and Cursor use persistent ACP sessions with live request cards
-            and agent-provided model/command catalogs. Claude prompt/resume and native
-            UI interactions were checked locally. Cursor's tested CLI still rejects
-            authenticated ACP sessions after login; see the README for details.
+            The one-click YOLO switch converts the current session. Claude/Cursor
+            apply permission changes live, including pending tool approvals.
+            Headless sessions save the change immediately and mark when the running
+            process will apply it on the next turn. Questions/forms remain interactive.
 
             Installers include the pinned Node sidecar and Claude ACP helper. Extract
             portable archives in full. Native Claude requires macOS 13.5+ on a Mac.
+            Cursor's known authenticated ACP limitation remains; see the README.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'

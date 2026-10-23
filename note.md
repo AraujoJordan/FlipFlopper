@@ -10,7 +10,7 @@ Rule: update this file after each meaningful step. Each phase must end with `npx
 
 ## Current direction (2026-10-22)
 - New user request supersedes the old Claude visual-fidelity goal: give FlipFlopper its own color scheme and plan substantially more animation. Keep the established sessions/transcript/docked-composer/side-pane layout.
-- Round 3 is planned in the existing plan file above: Circuit (graphite + jade, iris for handoffs), 80 named motion treatments, M7–M11 implementation sequence. This does not mean those UI changes are implemented or the draft palette is separately user-approved.
+- Round 3 Circuit and expressive motion were approved for implementation. See the implementation record below; earlier planned-work notes are historical.
 
 ## Phase 0: CLI spike  [DONE for claude + codex]
 - claude: `-p --output-format stream-json --verbose --permission-mode <m>`, resume `--resume <id>`. Final `result` line has session_id/cost/usage.
@@ -78,7 +78,7 @@ Milestones: M1 defects+polish, M2 Desktop layout, M3 import CLI sessions, M4 com
 - [x] M6 superseded by the native-window-controls follow-up below: standard visible native title bars on every desktop OS, replacing the overlay/frameless split. Mock files from round 2 were parked at scratchpad/*.bak (NOT in repo).
 - Docs updated: AGENTS.md, README, CHANGELOG.
 
-# ROUND 3 (independent identity + extensive motion) — PLANNED
+# ROUND 3 (independent identity + extensive motion) — original planning record
 - Read the round 2 plan, this log, current theme/motion CSS, chat entry/turn contracts, layout preferences, pane mounting, terminal theme handling and existing flow position animation.
 - Source reality: App.css already uses navy/blue/cyan (`#0b1020`, `#0f1526`, `#5b8cff`, `#36d1dc`). Earlier warm-theme descriptions are historical/stale; round 3 compares against the actual working tree.
 - Research linked in the plan: Radix palette composition, Fluent motion, WCAG contrast/reduced-motion guidance and native Element.animate(). No new dependencies or source files proposed.
@@ -273,3 +273,129 @@ Implemented on the existing branch, preserving the prior UI cleanup/window work.
   controls are present. Web Inspector's startup console is clean. Closing with
   the real native close control leaves zero isolated app/helper processes.
   Final scoped diff checks, TypeScript check and cargo check pass as well.
+
+
+# ROUND 3 implementation (2026-10-23)
+
+- Circuit replaces the blue palette in both appearances, including RGB companions,
+  syntax, semantic tints, neutral shadows and xterm ANSI colors. Text-entry borders
+  use the stronger boundary token. Native decorations are unchanged.
+- Motion uses the existing Solid/WAAPI stack: cancel/reverse from current geometry,
+  finite entrance/value/list/selection effects, retained exits, immediate logical
+  updates, stale-completion protection and cleanup. No packages or source files added.
+- Appearance has durable System / Reduced / Off motion. OS reduction wins; reduced
+  feedback is opacity only, at most 80ms. Off, hidden views and preference changes
+  settle motion. Theme token pairs switch with transitions disabled during the swap.
+- Live presentation hints are emitted after live reduction, never during historical
+  reduction/import. First content and real outcomes animate; later text deltas do
+  not. No protocol, transcript format, backend authority or provider behavior changed.
+- Sidebar/panes retain state through exits. Responsive sheets make background content
+  inert and manage focus; modal stacking, interrupted reopen and lazy dialog focus
+  are centralized. Toasts render outside the inert app root.
+
+## Catalog implementation map
+
+The catalog describes interaction families, not 80 independent animation engines.
+Shared primitives cover the following IDs; adaptations preserve current app behavior.
+
+| IDs | Implementation / adaptation |
+| --- | --- |
+| A01–A08 | Picker hinge, live divider rail, actual carry-edge marker, live turn entry/completion, queue FLIP, worktree label feedback and atomic theme settle. No fabricated transfer progress or completion claims. |
+| A09–A18 | Immediate focus boundary, fixed send control/press feedback, bounded textarea resize, retained menus/suggestions, picker labels, keyed chips, native drop target presence and reserved thumbnail/retry state. |
+| A19–A28 | Live-only message/first-block entry, activity labels, foreground typing indicator, hover/focus actions, resolved clipboard feedback, immediate edit/focus, queue reflow, preference-aware Latest and history wrapper fade. |
+| A29–A36 | Tool/result feedback, bounded measured disclosures, grouped count/status labels, thinking labels, stable todo rows/check feedback and inline diff disclosure. No per-code-line motion or historical replay. |
+| A37–A44 | Measured selection rail, bounded visible-list reflow/entry/removal, rename-label feedback, project/date disclosures and immediate navigation with transcript wrapper fade. Large groups skip height travel. |
+| A45–A52 | Retained sidebar/pane width or responsive sheet exit, scrim, pane/tab chrome feedback, immediate pointer resize, cached xterm fitting/cursor policy and actual iframe-load reveal. A52 preserves the existing process-exit/reset semantics rather than retaining a stale preview URL. |
+| A53–A62 | New-card opacity, one shared position tween, accepted-edge draw, finite status/gate/carry feedback and cancelable fit camera. A55 uses existing Add step connections; no new drag-connector feature. A53 avoids independent card transforms so ports remain aligned; A62 uses shared board reflow rather than flying removed cards. |
+| A63–A70 | Real git-count/sync feedback, successful-stage list reflow, diff/revision/mode wrapper feedback, retained worktree/conflict dialogs and explicit outcome toasts. No synthetic progress or operation delays. |
+| A71–A80 | Retained palette/menu/dialog exits, active markers/results, Settings section/preference feedback, directional wizard steps, candidate-list reveal and readiness styling, one-time restored empty-state entry. Existing operational labels stay authoritative. |
+
+## Verification
+
+- Nine Node/Solid regression tests pass, including live/history gating, background
+  request progress, preference migration/OS changes, stale exit/reopen, Off during
+  exit, reduced opacity-only duration and missing-WAAPI fallback.
+- TypeScript, cargo check and production frontend/native debug builds pass. No Rust source changed.
+- Solid text/syntax/status contrast was recalculated in both appearances across the
+  five neutral surfaces. Syntax exceeds 4.5:1; tinted status text minima exceed 4.5:1.
+- An isolated native QA store contains 3,000 saved entries and 50 Flow sessions;
+  the transcript mounts its existing 150-message window and restored history has
+  zero entrance animations. Flow fit viewport survives repeated close/reopen.
+- Native 1440px, 1000px and 720px layouts were inspected with standard macOS window controls.
+  Updated README screenshots use only the copied public demo conversation; static captures use Off motion. Agent logos render directly in their reserved frames so cached image load events cannot leave them invisible.
+- Quantitative frame timing and short motion recordings could not be established
+  through the available native capture surface; do not claim measured 60fps or
+  all 80 treatments individually recorded. Windows/Linux native visual checks
+  still require those platforms. Cursor authentication limitation remains unchanged.
+- Closed the isolated QA windows and removed only the disposable project from
+  recents. User transcripts and the separate Window Check app were left intact.
+
+
+# YOLO switch follow-up (2026-10-23)
+
+- Added an accessible one-click YOLO switch beside composer permissions. Its amber
+  state reflects the existing `full` policy; no new permission enum or dependency.
+- All chat agents use their existing native Full access mappings. Checked installed
+  CLI help; Kimi Code 2.x prompt mode already uses auto permission and rejects
+  explicit --yolo/--auto flags (official reference:
+  https://github.com/MoonshotAI/kimi-code/blob/main/docs/en/reference/kimi-command.md).
+- Switching agents preserves YOLO. Switching off restores the previous Plan or
+  Auto-edit choice in that conversation; reloaded Full sessions return to Auto-edit.
+- Permission changes are blocked during a running turn rather than displaying a
+  policy the running process has not received. Questions/forms/plans/auth remain
+  interactive; native CLI/system policy still applies. Palette and native menu
+  use the same toggle; the native menu is disabled during a turn.
+- Added regression coverage for all headless Full mappings, real ACP peer automatic
+  approval for Claude/Cursor and return to prompting, per-conversation restoration,
+  agent switching, persistence and running-turn protection. No paid model calls.
+- Stale catalog/usage snapshots no longer re-enable YOLO after switching it off;
+  actual native mode transitions still synchronize. All 13 frontend tests and
+  100 Rust tests pass (six opt-in tests skipped), plus TypeScript, cargo check
+  and production/native builds. Isolated macOS smoke verified the accessible
+  on/off switch, agent switching with YOLO retained, and return to Auto-edit.
+
+
+# Live session conversion correction (2026-10-23)
+
+- User clarified that enabling YOLO should convert the current session. This
+  supersedes the between-turn restriction in the previous follow-up.
+- Added `chat_set_mode` and typed IPC. The current session mode persists on success.
+  Claude/Cursor apply `session/set_mode` while the same prompt runs, without
+  resetting model/effort or restarting/resubmitting the task. Existing pending
+  tool permissions auto-resolve only through original validated allow-once IDs.
+- Mode commands run as independent SDK tasks while streaming/cancellation continue.
+  Per-connection and per-session locks serialize changes against other mode updates
+  and initial launch. A rejected/unsupported mode leaves saved policy unchanged.
+- Questions, forms, plan approval and authentication remain interactive. Approving
+  a plan preserves explicit Full; only Plan mode transitions to Auto-edit.
+- Headless sessions convert immediately in saved metadata, while the current process
+  retains launch permissions. Additive runtime permission state makes the composer
+  show Next turn for this mismatch, including after webview reload. No silent
+  cancellation, restart, duplicate task submission or history replacement.
+- Composer/menu/palette controls remain available during a turn; pending updates
+  disable repeated changes and Send until acknowledged. Late completions cannot
+  change another conversation's composer, and older queued native snapshots are
+  reduced before the acknowledged snapshot.
+- Queued follow-ups wait for an in-flight conversion and read their own session's
+  policy even when another conversation is active. General settings now names the
+  current conversation's permissions explicitly.
+- Verification: 18 frontend tests pass; 104 Rust tests pass, six opt-in tests
+  skipped; TypeScript, cargo check, production build and native debug bundle pass.
+  New transport tests cover enabling during an outstanding approval, preserving
+  tuning and the turn, disabling during a form, unavailable-mode rejection and
+  headless metadata conversion without process replacement. Isolated native UI
+  check verified the existing session persisted `full` under the same id and
+  switched back successfully. No real provider/model calls were made for this
+  correction; Cursor's authenticated ACP limitation remains unverified/unchanged.
+
+
+# Release 0.12.0 preparation (2026-10-23)
+
+- User requested commit, push, GitHub release and Homebrew update. Version aligned
+  across npm/lockfile, Cargo/lockfile and Tauri configuration at 0.12.0.
+- Release notes cover Circuit, motion preferences and current-session YOLO, with
+  the headless next-turn behavior and known Cursor ACP login limitation explicit.
+- Refreshed both README screenshots with the YOLO control visible using the
+  isolated public demo. Capture preferences restored and QA app closed.
+- Release checks: TypeScript and 18 frontend tests pass; Rust suite 104 passed,
+  six opt-in tests skipped. Workflow YAML parses and staged diff checks pass.

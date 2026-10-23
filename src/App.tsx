@@ -18,8 +18,8 @@ import {
   syncNativeMenuState,
   type NativeMenuState,
 } from "./lib/ipc";
-import { cancelTurn, chat, initChat, isRunning, setComposer, startNewSession } from "./lib/chat";
-import { hydrateLayout, layout, openSide, setLayout, setSidebarWidth, toggleSide, toggleSidebar, SIDEBAR_MAX, SIDEBAR_MIN } from "./lib/layout";
+import { cancelTurn, chat, initChat, isRunning, setYolo, startNewSession } from "./lib/chat";
+import { hydrateLayout, watchMotionPreferences, layout, openSide, setLayout, setSidebarWidth, toggleSide, toggleSidebar, SIDEBAR_MAX, SIDEBAR_MIN } from "./lib/layout";
 import { openProjectPath, forgetRecentProject, pickAndOpenProject, projectCreated } from "./lib/projects";
 import { initAppPrefs } from "./lib/appPrefs";
 import { hydrateSettings } from "./lib/settings";
@@ -44,7 +44,7 @@ import { WorktreeCloseDialogHost } from "./components/git/WorktreeCloseDialog";
 import ImportDialog from "./components/ImportDialog";
 import CommandPalette from "./components/shell/CommandPalette";
 import { togglePalette } from "./lib/palette";
-import { ToastHost, ConfirmHost, toast } from "./components/ui";
+import { ToastHost, ConfirmHost, toast, Presence, usePresence, useThemeMotion } from "./components/ui";
 import "./App.css";
 
 // Lazy modals: each is also wrapped in a `Show` at its call site — without
@@ -57,6 +57,8 @@ const UpdateDialog = lazy(() => import("./components/UpdateDialog"));
 
 const App: Component = () => {
   const win = getCurrentWindow();
+  useThemeMotion();
+  onMount(() => onCleanup(watchMotionPreferences()));
   initOrchestrator();
 
   const [pickerOpen, setPickerOpen] = createSignal(false);
@@ -64,6 +66,8 @@ const App: Component = () => {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [updateDialogOpen, setUpdateDialogOpen] = createSignal(false);
   const [projectBusy, setProjectBusy] = createSignal(false);
+  let dropOverlay: HTMLDivElement | undefined;
+  const dropPresent = usePresence(dragActive, () => dropOverlay);
 
   const sidebarResize = useResizable({
     axis: "x",
@@ -114,7 +118,7 @@ const App: Component = () => {
       case "menu-focus-prompt": runAction("focus-prompt"); return;
       case "menu-command-palette": togglePalette(); return;
       case "menu-stop-turn": cancelTurn(); return;
-      case "menu-full-access": setComposer({ mode: chat.composer.mode === "full" ? "auto_edit" : "full" }); return;
+      case "menu-full-access": setYolo(chat.composer.mode !== "full"); return;
       case "menu-prev-session": cycleSession(-1); return;
       case "menu-next-session": cycleSession(1); return;
       case "menu-toggle-sidebar": toggleSidebar(); return;
@@ -162,6 +166,12 @@ const App: Component = () => {
     void store.activeCwd;
     void store.currentProject?.path;
     void updateCurrentBranch();
+  });
+
+  onMount(() => {
+    const failed = () => toast("Setting could not be saved. Your change applies for this window only.", "error");
+    window.addEventListener("flipflopper:preference-error", failed);
+    onCleanup(() => window.removeEventListener("flipflopper:preference-error", failed));
   });
 
   onMount(async () => {
@@ -273,10 +283,15 @@ const App: Component = () => {
 
   const sidebarWidth = () => Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, layout.sidebarWidth));
 
+  let sidebarElement: HTMLDivElement | undefined;
+  const sidebarPresent = usePresence(() => layout.sidebarOpen, () => sidebarElement, {
+    axis: "width", size: sidebarWidth, duration: 240,
+    anchor: () => document.querySelector<HTMLElement>('[aria-label="Show sidebar"]') ?? undefined,
+  });
+
   return (
     <div class="app-root" classList={{ "app-full-access": chat.composer.mode === "full", "app-sidebar-closed": !layout.sidebarOpen }}>
-      <Show when={layout.sidebarOpen}>
-        <div class="sidebar-wrap" style={{ width: `${sidebarWidth()}px` }}>
+      <div hidden={!sidebarPresent()} ref={sidebarElement} class="sidebar-wrap" style={{ width: `${sidebarWidth()}px` }}>
           <Sidebar
             onOpenSettings={() => setSettingsOpen(true)}
             onOpenProjects={() => setPickerOpen(true)}
@@ -290,7 +305,6 @@ const App: Component = () => {
             onPointerUp={sidebarResize.onPointerUp}
           />
         </div>
-      </Show>
 
       <main class="main-col">
         <SessionHeader changeCount={gitChangedCount()} />
@@ -315,8 +329,8 @@ const App: Component = () => {
         </div>
       </main>
 
-      <Show when={dragActive()}>
-        <div class="drop-overlay"><div class="drop-overlay-card"><Icon name="upload" size={22} /> Drop files to attach</div></div>
+      <Show when={dropPresent()}>
+        <div ref={dropOverlay} class="drop-overlay"><div class="drop-overlay-card"><Icon name="upload" size={22} /> Drop files to attach</div></div>
       </Show>
       <ToastHost />
       <ShortcutHelp />
@@ -327,9 +341,9 @@ const App: Component = () => {
       <ImportDialog />
       <CommandPalette />
 
-      <Show when={pickerOpen()}>
+      <Presence when={pickerOpen()}>
         <ProjectPicker
-          open={pickerOpen()}
+          open={true}
           onClose={() => setPickerOpen(false)}
           busy={projectBusy()}
           recents={store.recentProjects}
@@ -338,10 +352,10 @@ const App: Component = () => {
           onOpenRecent={(path) => void openRecent(path)}
           onRemoveRecent={(path) => void forgetRecentProject(path)}
         />
-      </Show>
-      <Show when={newProjectOpen()}>
+      </Presence>
+      <Presence when={newProjectOpen()}>
         <NewProjectWizard
-          open={newProjectOpen()}
+          open={true}
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project, prompt) => {
             setNewProjectOpen(false);
@@ -349,13 +363,13 @@ const App: Component = () => {
             projectCreated(project, prompt);
           }}
         />
-      </Show>
-      <Show when={settingsOpen()}>
-        <SettingsPanel open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
-      </Show>
-      <Show when={updateDialogOpen()}>
-        <UpdateDialog open={updateDialogOpen()} onClose={() => setUpdateDialogOpen(false)} />
-      </Show>
+      </Presence>
+      <Presence when={settingsOpen()}>
+        <SettingsPanel open={true} onClose={() => setSettingsOpen(false)} />
+      </Presence>
+      <Presence when={updateDialogOpen()}>
+        <UpdateDialog open={true} onClose={() => setUpdateDialogOpen(false)} />
+      </Presence>
     </div>
   );
 };

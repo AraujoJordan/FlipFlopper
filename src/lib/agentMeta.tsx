@@ -143,7 +143,6 @@ export const AgentLogo: Component<{
   radius?: number;
 }> = (props) => {
   const [imageFailed, setImageFailed] = createSignal(false);
-  const [imageLoaded, setImageLoaded] = createSignal(false);
   const size = () => props.size ?? 24;
   const radius = () => props.radius ?? 7;
 
@@ -152,14 +151,14 @@ export const AgentLogo: Component<{
       width: `${size()}px`, height: `${size()}px`,
       "border-radius": `${radius()}px`,
       background: `${agentColor(props.agentId)}22`,
-      border: "1px solid rgba(255,255,255,.08)",
+      border: "1px solid var(--border-default)",
       display: "flex", "align-items": "center", "justify-content": "center",
       overflow: "hidden",
       flex: "0 0 auto",
     }}>
       <Show when={props.icon && !imageFailed()} fallback={
         <span style={{
-          color: "#f0f6fc",
+          color: "var(--fg-default)",
           "font-family": "'JetBrains Mono', monospace",
           "font-weight": "700", "font-size": `${Math.max(10, Math.round(size() * 0.52))}px`,
           "line-height": "1",
@@ -171,13 +170,10 @@ export const AgentLogo: Component<{
           src={props.icon ?? ""}
           alt={props.name ? `${props.name} logo` : ""}
           onError={() => setImageFailed(true)}
-          onLoad={() => setImageLoaded(true)}
           style={{
             width: "100%", height: "100%",
             "object-fit": "contain",
             display: "block",
-            opacity: imageLoaded() ? "1" : "0",
-            transition: "opacity var(--dur-base) var(--ease-standard)",
           }}
         />
       </Show>

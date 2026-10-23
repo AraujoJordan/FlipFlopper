@@ -511,6 +511,7 @@ export interface AgentRuntimeState {
   capabilities: Record<string, unknown> | null; config_options: AgentOption[];
   modes: { id: string; name: string; description?: string }[];
   current_mode: string | null; commands: { name: string; description: string }[]; pending: AgentInteraction[];
+  permission_mode?: PermissionMode | null;
 }
 export interface AgentRuntimeInfo { available: boolean; detail: string; protocol: string; node_version: string | null; helper_version: string | null }
 
@@ -701,6 +702,8 @@ export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenF
 
 export const chatDetachNative = (sessionId: string): Promise<void> => invoke("chat_detach_native", { sessionId });
 export const chatRuntimeState = (sessionId: string): Promise<AgentRuntimeState> => invoke("chat_runtime_state", { sessionId });
+export const chatSetMode = (sessionId: string, mode: PermissionMode): Promise<{ session: SessionMeta; runtime: AgentRuntimeState }> =>
+  invoke("chat_set_mode", { sessionId, mode });
 export const chatRespond = (sessionId: string, turnId: string, requestId: string, response: InteractionResponse): Promise<void> =>
   invoke("chat_respond", { sessionId, turnId, requestId, response });
 export const agentRuntimeInfo = (agentId: string): Promise<AgentRuntimeInfo> => invoke("agent_runtime_info", { agentId });

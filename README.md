@@ -25,7 +25,7 @@ losing context.
 ---
 
 <div align="center">
-  <img src="docs/media/screenshot.jpg" alt="FlipFlopper's new conversation workspace in dark mode, with sessions, agent controls and the Changes pane" width="1200" />
+  <img src="docs/media/screenshot.jpg" alt="FlipFlopper's Circuit conversation workspace in dark mode, with sessions, agent controls and the Changes pane" width="1200" />
 </div>
 
 <details>
@@ -53,7 +53,7 @@ serial monogamists at best.
 - **Native Claude and Cursor integration** - persistent ACP connections with live permission, question and plan cards, using the agent's CLI login and configuration. Model/effort pickers follow the agent's catalog; native commands use `/agent:<command>`. See the Cursor authentication limitation below.
 - **Structured chat for every agent** - native ACP or headless JSON streams give you streamed markdown, collapsible tool calls (read / edit / run / search / web), inline diffs for edits, and a "Changed N files - Review" footer per turn.
 - **Flip agents mid-conversation** - pick another agent (and model / effort) in the composer. FlipFlopper owns the transcript: agents that can resume their own session do, and the others get a digest of the conversation so far.
-- **Composer** - `@` file mentions, `/` commands and skills, queued follow-ups while a turn runs, stop button, and a Plan / Auto-edit / Full access permission picker.
+- **Composer** - `@` file mentions, `/` commands and skills, queued follow-ups while a turn runs, stop button, and a Plan / Auto-edit / Full access permission picker. A one-click **YOLO** switch enables Full access for any chat agent; switch it off to restore your previous permission mode. Enabling YOLO converts the current session. Claude/Cursor apply the change live, including pending tool approvals; headless CLIs keep their current launch policy until the next turn, marked in the composer.
 - **Changes pane** - working-tree changes, stage / unstage / discard, stash, commit, push / pull, squash-and-push with an AI-generated message, history, and native diffs.
 - **Preview and terminal panes** - start the project's dev server and see it in a live frame; run validation and tests; shell terminals; or resume a session in the agent's own terminal UI.
 - **Isolated git worktrees** - run a session in its own `flipflopper/wt-*` branch so edits never touch your branch until you merge back from the Changes pane.
@@ -63,7 +63,8 @@ serial monogamists at best.
 - **Attachments** - drag files onto the window, pick them, or paste screenshots; native agents receive supported images directly; files remain available by their paths.
 - **Agent registry** - detects installed CLI agents, their PATH and versions.
 - **New Project wizard** - walks you through category, stack, details, name, and folder, then seeds the composer with a structured brief.
-- **Light and dark themes**, keyboard shortcuts (`?` for the reference), and an in-app updater on Windows / Linux.
+- **Circuit appearance and motion** - graphite and jade in dark mode, porcelain and deep jade in light mode, with iris agent handoffs. Responsive pane transitions, live message/tool feedback, Flow movement and retained dialog exits. Settings → Appearance offers System, Reduced and Off motion; system reduced-motion preferences are respected.
+- **Keyboard shortcuts** (`?` for the reference), and an in-app updater on Windows / Linux.
 - **Native window controls** - the operating system handles close, minimize, maximize, fullscreen, resizing and title-bar behavior on macOS, Windows and Linux.
 
 ## 🕹️ Supported agents

@@ -2,6 +2,7 @@ import { Icon } from "../shell/Icon";
 import {
   Component,
   createSignal,
+  onMount,
   onCleanup,
   Show,
   createMemo,
@@ -13,7 +14,7 @@ import {
   focusNodeTab,
 } from "../../lib/orchestrator";
 import { agentColor, AgentLogo } from "../../lib/agentMeta";
-import { Spinner, ContextMenu, MenuItem, MenuDivider } from "../ui";
+import { Spinner, ContextMenu, MenuItem, MenuDivider, useValueMotion, animateElement } from "../ui";
 import { openWorktreeDialog } from "../git/WorktreeCloseDialog";
 import type { FlowPosition } from "./FlowCanvas";
 
@@ -21,15 +22,16 @@ export const FLOW_CARD_WIDTH = 220;
 export const FLOW_CARD_HEIGHT = 112;
 
 const STATUS_COLORS: Record<string, string> = {
-  done: "#6fbf73",
-  waiting: "#d9a441",
-  failed: "#e5675d",
-  queued: "#8b8980",
-  detached: "#5e5d59",
+  done: "var(--status-add)",
+  waiting: "var(--status-mod)",
+  failed: "var(--status-del)",
+  queued: "var(--fg-muted)",
+  detached: "var(--fg-subtle)",
 };
 
 interface Props {
   node: FlowNode;
+  animateIn?: boolean;
   position: () => FlowPosition;
   onAddStep: (nodeId: string, anchor: HTMLElement) => void;
   onEditStep: (nodeId: string, anchor: HTMLElement) => void;
@@ -53,7 +55,7 @@ const FlowNodeCard: Component<Props> = (props) => {
     return `${m}:${s.toString().padStart(2, "0")}`;
   });
 
-  const statusColor = () => STATUS_COLORS[props.node.status] ?? "#6e7681";
+  const statusColor = () => STATUS_COLORS[props.node.status] ?? "var(--fg-muted)";
   const isBusy = () => props.node.status === "working" || props.node.status === "spawning";
   const tuningLabel = () => {
     const parts = [props.node.model, props.node.effort].filter(Boolean);
@@ -67,12 +69,15 @@ const FlowNodeCard: Component<Props> = (props) => {
   }
 
   let cardRef: HTMLDivElement | undefined;
+  let statusLabel: HTMLSpanElement | undefined;
+  useValueMotion(() => statusLabel, () => props.node.status);
+  onMount(() => { if (props.animateIn) void animateElement(cardRef, [{ opacity: 0 }, { opacity: 1 }], 240); });
 
   return (
     <>
       <div
         ref={cardRef}
-        class="flow-card"
+        class="flow-card" data-motion-key={props.node.id} data-flow-status={props.node.status}
         style={{
           position: "absolute",
           left: `${props.position().x}px`,
@@ -82,7 +87,7 @@ const FlowNodeCard: Component<Props> = (props) => {
           background: "var(--surface-3)",
           "border-radius": "var(--radius-lg)",
           "border-left": `2px solid ${color()}`,
-          "box-shadow": "0 4px 14px rgba(0,0,0,.32)",
+          "box-shadow": "var(--shadow-sm)",
           cursor: props.node.sessionId ? "pointer" : "default",
           "user-select": "none",
           overflow: "visible",
@@ -172,8 +177,8 @@ const FlowNodeCard: Component<Props> = (props) => {
               {elapsed()}
             </span>
           </Show>
-          <span style={{
-            "font-size": "9.5px",
+          <span ref={statusLabel} style={{
+            "font-size": "12px",
             color: "var(--fg-subtle)",
             "text-transform": "capitalize",
             "margin-left": "auto",

@@ -1,6 +1,6 @@
-import { Component, createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { Component, createEffect, createMemo, createSignal, on, For, Show } from "solid-js";
 import { createProject, pickProjectFolder, type ProjectInfo } from "../lib/ipc";
-import { Button, Spinner, toast } from "./ui";
+import { Button, Spinner, toast, animateElement } from "./ui";
 
 type CategoryId = "mobile" | "web" | "backend" | "game2d" | "game3d" | "desktop" | "cli" | "custom";
 type Detail = { label: string; options: string[] };
@@ -71,11 +71,16 @@ const NewProjectWizard: Component<{ open: boolean; onClose: () => void; onCreate
   }
 
   const titles = ["What are we making?", "Choose the foundation", "Shape the project", "Give it a home", "Ready for the first prompt"];
+  let stepContent: HTMLElement | undefined;
+  createEffect(on(step, (next, before) => {
+    if (before === undefined) return;
+    queueMicrotask(() => void animateElement(stepContent, [{ opacity: .4, transform: `translateX(${next > before ? 12 : -12}px)` }, { opacity: 1, transform: "none" }], 240));
+  }));
   return <Show when={props.open}><div class="new-project-overlay" onKeyDown={(event) => { if (event.key === "Escape") close(); }}>
     <div ref={shellRef} tabindex={-1} class="new-project-shell" role="dialog" aria-modal="true" aria-label="Create new project">
       <header class="new-project-header"><div><span class="new-project-kicker">NEW PROJECT</span><h1>{titles[step()]}</h1></div><button class="new-project-close" onclick={close} aria-label="Close wizard">×</button></header>
       <div class="new-project-progress"><For each={titles}>{(_, index) => <span classList={{ active: index() <= step() }}/>}</For></div>
-      <main class="new-project-body">
+      <main ref={stepContent} class="new-project-body">
         <Show when={step() === 0}><div class="new-project-card-grid"><For each={CATEGORIES}>{(item) => <button class="new-project-category" classList={{ selected: categoryId() === item.id }} style={{ "--project-accent": item.accent }} onclick={() => chooseCategory(item.id)}><ProjectArt id={item.id} accent={item.accent}/><span class="new-project-category-name">{item.name}</span><span class="new-project-category-tagline">{item.tagline}</span></button>}</For></div></Show>
         <Show when={step() === 1 && category()}>{(selected) => <div class="new-project-stack-layout"><div class="new-project-hero" style={{ "--project-accent": selected().accent }}><ProjectArt id={selected().id} accent={selected().accent}/><h2>{selected().name}</h2><p>{selected().tagline}</p></div><div class="new-project-stack-grid"><For each={selected().stacks}>{(item) => <button class="new-project-stack-card" classList={{ selected: stack() === item }} onclick={() => setStack(item)}><span>{item}</span><small>{item.startsWith("Custom") ? "Bring your own technology" : "Start with this stack"}</small></button>}</For><Show when={needsCustomStack()}><label class="new-project-field wide"><span>Technology or engine</span><input autofocus value={customStack()} onInput={(e) => setCustomStack(e.currentTarget.value)} placeholder="e.g. Elixir + Phoenix"/></label></Show></div></div>}</Show>
         <Show when={step() === 2 && category()}>{(selected) => <div class="new-project-details"><p>Select everything that matters. You can leave any group blank.</p><For each={selected().details}>{(detail) => <section><h3>{detail.label}</h3><div class="new-project-chip-row"><For each={detail.options}>{(option) => <button classList={{ selected: (answers()[detail.label] ?? []).includes(option) }} onclick={() => toggleDetail(detail.label, option)}>{option}</button>}</For></div></section>}</For></div>}</Show>

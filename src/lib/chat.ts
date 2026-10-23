@@ -1,9 +1,10 @@
-import { batch, createSignal } from "solid-js";
+import { batch, createSignal, createRoot, createEffect } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   chatCancel,
   chatRuntimeState,
+  chatSetMode,
   chatRespond,
   type AgentRuntimeState,
   type AgentInteraction,
@@ -328,7 +329,7 @@ export function reduceTranscript(entries: ChatEntry[], runtime?: AgentRuntimeSta
   const a = lastAssistant(view);
   // A webview reload can reconnect to a still-running native process. The
   // persisted request alone is never authority to reactivate a responder.
-  if (runtime?.connected && runtime.active_turn_id === a?.id && a?.status === "running") {
+  if (runtime && (runtime.connected || runtime.permission_mode) && runtime.active_turn_id === a?.id && a?.status === "running") {
     view.runtime = runtime;
     return view;
   }
@@ -347,6 +348,20 @@ export function reduceTranscript(entries: ChatEntry[], runtime?: AgentRuntimeSta
 
 type TurnEndHandler = (sessionId: string, status: TurnStatus) => void;
 const turnEndHandlers = new Set<TurnEndHandler>();
+export interface LivePresentation {
+  kind: "user" | "flip" | "start" | "text" | "tool" | "tool-result" | "request" | "request-result" | "finish";
+  messageId: string;
+  itemId?: string;
+  status?: string;
+}
+type PresentationHandler = (sessionId: string, hints: readonly LivePresentation[], sequence: number) => void;
+const presentationHandlers = new Set<PresentationHandler>();
+let presentationSequence = 0;
+/** Live-only, transient UI hints. Loading/importing/reducing history never emits. */
+export function onLivePresentation(handler: PresentationHandler) {
+  presentationHandlers.add(handler);
+  return () => { presentationHandlers.delete(handler); };
+}
 
 /** Be told whenever any session finishes a turn (used by the orchestrator). */
 export function onTurnEnd(handler: TurnEndHandler): () => void {
@@ -407,20 +422,52 @@ function flushLiveEntries() {
   pendingEntries.clear();
   for (const [id, entries] of batches) {
     if (!chat.views[id]) continue;
+    const present = presentationHandlers.size > 0 && chat.activeId === id && chat.views[id].loaded && !document.hidden;
+    const hints: LivePresentation[] = [];
+    const modeChanges = new Set<ChatEntry>();
     batch(() => {
-      setChat("views", id, produce((view) => { for (const e of entries) applyEntry(view, e); }));
+      setChat("views", id, produce((view) => {
+        for (const e of entries) {
+          const oldLength = view.messages.length;
+          const hadText = present && e.kind === "event" && e.event.type === "text" && lastAssistant(view)?.blocks.some((b) => b.kind === "text");
+          if (e.kind === "event" && e.event.type === "runtime_updated" &&
+            (e.event.state.current_mode !== view.runtime?.current_mode || e.event.state.agent_id !== view.runtime?.agent_id || e.event.state.permission_mode !== view.runtime?.permission_mode)) modeChanges.add(e);
+          applyEntry(view, e);
+          if (!present) continue;
+          const added = view.messages[oldLength];
+          if (added) hints.push({ kind: added.role === "user" ? "user" : added.role === "divider" ? "flip" : "start", messageId: added.id });
+          if (e.kind !== "event") continue;
+          const assistant = lastAssistant(view);
+          if (!assistant) continue;
+          const event = e.event;
+          if (event.type === "text" && !hadText) hints.push({ kind: "text", messageId: assistant.id });
+          if (event.type === "tool_call") hints.push({ kind: "tool", messageId: assistant.id, itemId: event.id });
+          if (event.type === "tool_result") hints.push({ kind: "tool-result", messageId: assistant.id, itemId: event.id, status: event.ok ? "done" : "error" });
+          if (event.type === "interaction_requested") hints.push({ kind: "request", messageId: assistant.id, itemId: event.request.id });
+          if (event.type === "interaction_resolved") hints.push({ kind: "request-result", messageId: assistant.id, itemId: event.id, status: event.outcome });
+          if (event.type === "turn_ended") hints.push({ kind: "finish", messageId: assistant.id, status: event.status });
+        }
+      }));
       const last = entries[entries.length - 1];
       setChat("sessions", (s) => s.id === id, "updated_at", last.kind === "event" ? last.ts : Date.now());
     });
+    if (hints.length) {
+      const sequence = ++presentationSequence;
+      for (const handler of presentationHandlers) {
+        try { handler(id, hints, sequence); } catch (error) { console.error("Presentation listener failed:", error); }
+      }
+    }
     for (const e of entries) {
       if (e.kind !== "event") continue;
       if (e.event.type === "turn_ended") void onTurnEnded(id, e.event.status);
-      if (e.event.type === "runtime_updated") {
+      // Catalog/usage updates repeat the current native mode. They must not
+      // re-enable YOLO after the user has chosen the next turn's permissions.
+      if (e.event.type === "runtime_updated" && e.event.state.connected && modeChanges.has(e)) {
         const nativeMode = e.event.state.current_mode;
-        const mode: PermissionMode | undefined = nativeMode === "plan" ? "plan" : nativeMode === "bypassPermissions" ? "full" : ["acceptEdits", "agent", "code"].includes(nativeMode ?? "") ? "auto_edit" : undefined;
+        const mode: PermissionMode | undefined = e.event.state.permission_mode ?? (nativeMode === "plan" ? "plan" : nativeMode === "bypassPermissions" ? "full" : ["acceptEdits", "agent", "code"].includes(nativeMode ?? "") ? "auto_edit" : undefined);
         // Cursor Full access uses agent mode with app-managed permission
         // responses. Preserve that explicit policy unless a plan was approved.
-        if (mode && !(mode === "auto_edit" && chat.composer.mode === "full")) {
+        if (mode && !permissionUpdates().has(id) && !(e.event.state.permission_mode == null && e.event.state.agent_id === "cursor" && mode === "auto_edit" && chat.composer.mode === "full")) {
           setChat("sessions", (s) => s.id === id, "mode", mode);
           if (chat.activeId === id) setChat("composer", "mode", mode);
         }
@@ -575,7 +622,65 @@ export function setDraftProject(project: { path: string }) {
 
 // ── Composer preferences ─────────────────────────────────────────────────────
 
+// Remember the non-YOLO choice per conversation without adding another persisted
+// permission state. `composer.mode` and the session's existing mode stay canonical.
+const beforeYolo = new Map<string, "plan" | "auto_edit">();
+
+const [permissionUpdates, setPermissionUpdates] = createSignal<Set<string>>(new Set());
+export const permissionModeUpdating = () => permissionUpdates().has(chat.activeId ?? "new");
+export const sessionModePending = () => {
+  const view = activeView();
+  return !!(view?.running && view.runtime?.permission_mode && view.runtime.permission_mode !== chat.composer.mode);
+};
+
+export function setYolo(enabled: boolean) {
+  return setPermissionMode(enabled ? "full" : beforeYolo.get(chat.activeId ?? "new") ?? "auto_edit");
+}
+
+export async function setPermissionMode(mode: PermissionMode): Promise<boolean> {
+  const id = chat.activeId, scope = id ?? "new", previous = chat.composer.mode;
+  if (permissionUpdates().has(scope)) return false;
+  if (mode === previous) return true;
+  const remember = () => { if (mode === "full" && previous !== "full") beforeYolo.set(scope, previous); };
+  if (!id) {
+    remember(); setChat("composer", "mode", mode);
+    writePref(COMPOSER_KEY, { ...chat.composer });
+    return true;
+  }
+  setPermissionUpdates((pending) => new Set(pending).add(scope));
+  try {
+    const result = await chatSetMode(id, mode);
+    // Native events are queued before the command acknowledgement. Reduce them
+    // before installing the acknowledged snapshot, so an older queued catalog
+    // cannot overwrite the newly confirmed permission policy.
+    flushLiveEntries();
+    remember();
+    setChat("sessions", (session) => session.id === id, "mode", result.session.mode);
+    if (chat.views[id]) setChat("views", id, "runtime", result.runtime);
+    if (chat.activeId === id) setChat("composer", "mode", result.session.mode);
+    if (isRunning(id) && result.runtime.permission_mode && result.runtime.permission_mode !== mode) {
+      toast("Session permissions updated. This running CLI keeps its launch permissions until the next turn.", "info");
+    }
+    return true;
+  } catch (error) {
+    toast(`Couldn't change session permissions: ${String(error)}`, "error");
+    const runtime = await chatRuntimeState(id).catch(() => undefined);
+    flushLiveEntries();
+    if (runtime && chat.views[id]) setChat("views", id, "runtime", runtime);
+    if (runtime?.connected && runtime.permission_mode && chat.activeId === id) setChat("composer", "mode", runtime.permission_mode);
+    return false;
+  } finally {
+    setPermissionUpdates((pending) => { const next = new Set(pending); next.delete(scope); return next; });
+  }
+}
+
 export function setComposer(patch: Partial<ComposerPrefs>) {
+  if (patch.mode) {
+    const { mode, ...rest } = patch;
+    void setPermissionMode(mode);
+    patch = rest;
+    if (Object.keys(patch).length === 0) return;
+  }
   setChat("composer", patch);
   const id = chat.activeId;
   if (id) {
@@ -585,7 +690,7 @@ export function setComposer(patch: Partial<ComposerPrefs>) {
     if (patch.mode) sessionPatch.mode = patch.mode;
     if (patch.agentId) sessionPatch.agent_id = patch.agentId;
     if (Object.keys(sessionPatch).length > 0) {
-      void chatUpdateSession(id, sessionPatch).then((meta) => setChat("sessions", (s) => s.id === id, meta)).catch(() => {});
+      void chatUpdateSession(id, sessionPatch).then(() => setChat("sessions", (s) => s.id === id, sessionPatch)).catch((error) => toast(`Couldn't save session settings: ${String(error)}`, "error"));
     }
   } else {
     writePref(COMPOSER_KEY, { ...chat.composer });
@@ -601,7 +706,15 @@ export function setComposerAgent(agentId: string) {
 // ── Sending ──────────────────────────────────────────────────────────────────
 
 async function sendTurn(sessionId: string, text: string, attachments: Attachment[] = [], recoverContext = false): Promise<boolean> {
-  const c = chat.composer;
+  if (permissionUpdates().has(sessionId)) await new Promise<void>((resolve) => {
+    createRoot((dispose) => createEffect(() => {
+      if (!permissionUpdates().has(sessionId)) { dispose(); resolve(); }
+    }));
+  });
+  const meta = chat.sessions.find((session) => session.id === sessionId);
+  const c = chat.activeId === sessionId || !meta ? chat.composer : {
+    agentId: meta.agent_id, model: meta.model, effort: meta.effort, mode: meta.mode,
+  };
   try {
     await chatSend({
       session_id: sessionId,
@@ -648,6 +761,7 @@ export async function retryLastTurn(sessionId: string) {
 /** Send from the composer: creates the session on first use. Returns false if
  *  nothing was sent (the composer keeps its text). */
 export async function submitPrompt(text: string, attachments: Attachment[] = []): Promise<boolean> {
+  if (permissionModeUpdating()) { toast("Session permissions are still updating.", "info"); return false; }
   const prompt = text.trim();
   if (!prompt && attachments.length === 0) return false;
   const c = chat.composer;
@@ -729,6 +843,10 @@ export async function startSessionTurn(o: StartTurnOptions): Promise<SessionMeta
     parent_id: o.parentId,
     title: o.title,
   });
+  if (o.activate && !chat.activeId && o.mode === "full") {
+    const previous = beforeYolo.get("new");
+    if (previous) beforeYolo.set(meta.id, previous);
+  }
   setChat("sessions", (s) => [meta, ...s]);
   setChat("views", meta.id, { messages: [], loaded: true, running: false });
   await subscribe(meta.id);
@@ -810,6 +928,7 @@ export async function deleteSession(id: string) {
     return;
   }
   unsubscribe(id);
+  beforeYolo.delete(id);
   const wasActive = chat.activeId === id;
   const project = chat.sessions.find((s) => s.id === id)?.project_path;
   setChat("sessions", (s) => s.filter((x) => x.id !== id));

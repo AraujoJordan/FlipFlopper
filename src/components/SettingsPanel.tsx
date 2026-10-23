@@ -1,7 +1,7 @@
 import { Component, For, Show, createSignal, onMount } from "solid-js";
 import { getVersion } from "@tauri-apps/api/app";
 import { chat, setComposer } from "../lib/chat";
-import { layout, setTheme, type ThemePref } from "../lib/layout";
+import { layout, setTheme, setMotion, type MotionPref, type ThemePref } from "../lib/layout";
 import { notifyOnFinish, setNotifyOnFinish } from "../lib/settings";
 import { SHORTCUT_GROUPS } from "../lib/shortcuts";
 import { store, addTerminal, setStore, effectiveRoot } from "../lib/store";
@@ -12,7 +12,7 @@ import { AgentLogo } from "../lib/agentMeta";
 import { agentRuntimeInfo, openTerminal, ptySendLine, getAgents, type AgentRuntimeInfo, type PermissionMode } from "../lib/ipc";
 import { candidates, scanImportable, scanning, setImportOpen } from "../lib/importer";
 import { installAgent, installable, installing, loadInstallable } from "../lib/install";
-import { Checkbox, Spinner, toast } from "./ui";
+import { Checkbox, Spinner, toast, useValueMotion, useSelectionMotion } from "./ui";
 import { Icon, type IconName } from "./shell/Icon";
 
 type Section = "general" | "appearance" | "agents" | "shortcuts" | "about";
@@ -50,6 +50,10 @@ const Row: Component<{ title: string; hint?: string; children: any }> = (props) 
 /** Settings window: left nav (General · Appearance · Agents · Shortcuts · About). */
 const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props) => {
   const [section, setSection] = createSignal<Section>("general");
+  let content: HTMLDivElement | undefined;
+  let navigation: HTMLElement | undefined;
+  useValueMotion(() => content, section);
+  useSelectionMotion(() => navigation, section, ".settings-nav-on");
   const [version, setVersion] = createSignal("");
   const [runtimes, setRuntimes] = createSignal<Record<string, AgentRuntimeInfo>>({});
   const [refreshingAgents, setRefreshingAgents] = createSignal(false);
@@ -98,7 +102,7 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
     <Show when={props.open}>
       <div class="overlay-backdrop-in settings-backdrop" onClick={props.onClose}>
         <div class="overlay-pop-in settings" tabIndex={-1} onClick={(e) => e.stopPropagation()} onKeyDown={onKeyDown}>
-          <nav class="settings-nav">
+          <nav ref={navigation} class="settings-nav">
             <div class="settings-nav-title">Settings</div>
             <For each={SECTIONS}>
               {(s) => (
@@ -109,14 +113,14 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
             </For>
           </nav>
 
-          <div class="settings-body">
+          <div ref={content} class="settings-body">
             <button class="icon-btn settings-close" onClick={props.onClose} title="Close" aria-label="Close settings">
               <Icon name="x" size={16} />
             </button>
 
             <Show when={section() === "general"}>
               <h2>General</h2>
-              <Row title="Default permissions" hint="Used for new sessions. You can change it per session from the composer.">
+              <Row title={chat.activeId ? "Session permissions" : "Default permissions"} hint={chat.activeId ? "Changes this conversation. Native agents update live; other running CLIs apply the change next turn." : "Used for new sessions. You can change it per session from the composer."}>
                 <div class="seg">
                   <For each={MODES}>
                     {(m) => (
@@ -161,6 +165,16 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
               </Row>
             </Show>
 
+            <Show when={section() === "appearance"}>
+              <Row title="Motion" hint="System follows your OS. Reduced keeps brief fades; Off settles immediately.">
+                <div class="seg" role="group" aria-label="Motion">
+                  <For each={["system", "reduced", "off"] as MotionPref[]}>
+                    {(m) => <button class="seg-btn" aria-pressed={layout.motion === m} classList={{ "seg-on": layout.motion === m }} onClick={() => setMotion(m)}>{m[0].toUpperCase() + m.slice(1)}</button>}
+                  </For>
+                </div>
+              </Row>
+            </Show>
+
             <Show when={section() === "agents"}>
               <h2>Agents</h2>
               <p class="settings-lead">
@@ -170,7 +184,7 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
               <div class="agent-list">
                 <For each={store.agents}>
                   {(a) => (
-                    <div class="agent-item">
+                    <div class="agent-item" data-ready={a.installed}>
                       <AgentLogo agentId={a.id} icon={a.icon} size={28} radius={7} />
                       <div class="agent-item-text">
                         <div class="agent-item-name">{a.name}</div>

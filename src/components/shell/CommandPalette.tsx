@@ -1,5 +1,5 @@
 import { Component, For, Show, createEffect, createMemo, createResource, createSignal, on } from "solid-js";
-import { chat, projectName, selectSession, setComposer, startNewSession } from "../../lib/chat";
+import { chat, projectName, selectSession, setComposer, setYolo, startNewSession } from "../../lib/chat";
 import { chatSearch } from "../../lib/ipc";
 import { setImportOpen, pendingCandidates } from "../../lib/importer";
 import { cycleTheme, layout, toggleSide, toggleSidebar } from "../../lib/layout";
@@ -7,6 +7,7 @@ import { paletteOpen, setPaletteOpen } from "../../lib/palette";
 import { openProjectPath } from "../../lib/projects";
 import { runAction } from "../../lib/shortcuts";
 import { openReview, store } from "../../lib/store";
+import { Presence, useSelectionMotion, useValueMotion } from "../ui";
 import { AgentLogo } from "../../lib/agentMeta";
 import { Icon, type IconName } from "./Icon";
 
@@ -53,6 +54,9 @@ const CommandPalette: Component = () => {
   const [selected, setSelected] = createSignal(0);
   let input: HTMLInputElement | undefined;
   let timer: number | undefined;
+  let list: HTMLDivElement | undefined;
+  useSelectionMotion(() => list, selected, ".palette-item-on");
+  useValueMotion(() => list, debounced);
 
   createEffect(on(paletteOpen, (open) => {
     if (open) {
@@ -87,6 +91,7 @@ const CommandPalette: Component = () => {
     { id: "a-review", section: "Actions", label: "Review working changes", icon: "diff", run: act(() => store.currentProject && openReview(undefined, "Working changes")) },
     { id: "a-plan", section: "Actions", label: "Switch to Plan mode", icon: "clipboard", run: act(() => setComposer({ mode: "plan" })) },
     { id: "a-auto", section: "Actions", label: "Switch to Auto-edit mode", icon: "pencil", run: act(() => setComposer({ mode: "auto_edit" })) },
+    { id: "a-yolo", section: "Actions", label: `${chat.composer.mode === "full" ? "Turn off" : "Turn on"} YOLO mode`, icon: "zap", run: act(() => setYolo(chat.composer.mode !== "full")) },
     { id: "a-theme", section: "Actions", label: `Change theme (now ${layout.theme})`, icon: "eye", run: act(cycleTheme) },
     ...(pendingCandidates().length > 0
       ? [{ id: "a-import", section: "Actions" as const, label: `Import ${pendingCandidates().length} CLI sessions…`, icon: "download" as IconName, run: act(() => setImportOpen(true)) }]
@@ -138,7 +143,7 @@ const CommandPalette: Component = () => {
   }));
 
   return (
-    <Show when={paletteOpen()}>
+    <Presence when={paletteOpen()}>
       <div class="overlay-backdrop-in palette-backdrop" onClick={close}>
         <div class="overlay-pop-in palette" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Command palette">
           <div class="palette-input-row">
@@ -157,7 +162,7 @@ const CommandPalette: Component = () => {
             />
             <kbd>esc</kbd>
           </div>
-          <div class="palette-list" id="palette-list" role="listbox">
+          <div ref={list} class="palette-list" id="palette-list" role="listbox">
             <Show when={items().length > 0} fallback={<div class="palette-empty">{hits.loading ? "Searching…" : "No results"}</div>}>
               <For each={items()}>
                 {(item, i) => (
@@ -196,7 +201,7 @@ const CommandPalette: Component = () => {
           </div>
         </div>
       </div>
-    </Show>
+    </Presence>
   );
 };
 

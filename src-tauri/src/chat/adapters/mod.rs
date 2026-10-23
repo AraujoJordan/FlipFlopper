@@ -26,7 +26,8 @@ pub enum PermissionMode {
     Plan,
     /// Edit files in the workspace; shell is limited by the agent's sandbox.
     AutoEdit,
-    /// No approval or sandbox restrictions.
+    /// Auto-approve tools using the CLI's full-access mode. Native security
+    /// policies may still reject an action.
     Full,
 }
 
@@ -198,8 +199,8 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
         "kimi" => {
             args.extend(["--output-format", "stream-json"].map(String::from));
             push_opt(&mut args, "-m", req.model);
-            // `--yolo` is rejected together with `-p`; prompt mode already
-            // runs tools without asking.
+            // `--yolo` / `--auto` are rejected together with `-p`; prompt mode
+            // already uses auto permission (Kimi Code 2.x).
             push_opt(&mut args, "-S", req.resume_id);
             args.push("-p".into());
             args.push(with_plan_preamble(req.prompt, req.mode));
@@ -258,6 +259,27 @@ mod tests {
         for agent in ["claude", "cursor"] {
             assert!(build_invocation(agent, &req(PermissionMode::Full, Some("abc"))).unwrap_err().contains("native ACP"));
         }
+    }
+
+    #[test]
+    fn yolo_uses_each_headless_agents_native_policy() {
+        for (agent, flag) in [
+            ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+            ("agy", "--dangerously-skip-permissions"),
+            ("qwen", "--yolo"),
+            ("opencode", "--auto"),
+            ("droid", "--skip-permissions-unsafe"),
+            ("grok", "--always-approve"),
+            ("aider", "--yes-always"),
+        ] {
+            let inv = build_invocation(agent, &req(PermissionMode::Full, None)).unwrap();
+            assert!(inv.args.iter().any(|arg| arg == flag), "{agent}: {:?}", inv.args);
+        }
+        let goose = build_invocation("goose", &req(PermissionMode::Full, None)).unwrap();
+        assert!(goose.env.contains(&("GOOSE_MODE".into(), "auto".into())));
+        let kimi = build_invocation("kimi", &req(PermissionMode::Full, None)).unwrap();
+        assert!(kimi.args.iter().any(|arg| arg == "-p"));
+        assert!(!kimi.args.iter().any(|arg| arg == "--yolo" || arg == "--auto"));
     }
 
     #[test]

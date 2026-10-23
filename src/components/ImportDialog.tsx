@@ -1,9 +1,10 @@
+import { Presence } from "./ui";
 import { Component, For, Show, createMemo, createSignal } from "solid-js";
 import { candidates, importSessions, importing, importOpen, setImportOpen } from "../lib/importer";
 import { projectName } from "../lib/chat";
 import { store } from "../lib/store";
 import { AgentLogo } from "../lib/agentMeta";
-import { Checkbox, Spinner } from "./ui";
+import { Checkbox, Spinner, useValueMotion } from "./ui";
 import { Icon } from "./shell/Icon";
 
 function ago(ts: number): string {
@@ -35,8 +36,10 @@ const ImportDialog: Component = () => {
   const toggleAll = () => setPicked(allSelected() ? new Set<string>() : new Set<string>(candidates().map((c) => c.native_id)));
   const agentIcon = (id: string) => store.agents.find((a) => a.id === id)?.icon ?? null;
 
+  let list: HTMLDivElement | undefined;
+  useValueMotion(() => list, () => candidates().map((candidate) => candidate.path).join());
   return (
-    <Show when={importOpen()}>
+    <Presence when={importOpen()}>
       <div class="overlay-backdrop-in settings-backdrop" onClick={() => !importing() && setImportOpen(false)}>
         <div
           class="overlay-pop-in import-dialog"
@@ -57,7 +60,7 @@ const ImportDialog: Component = () => {
             </button>
           </div>
 
-          <div class="import-list">
+          <div ref={list} class="import-list">
             <Show when={candidates().length > 0} fallback={<div class="pane-empty">No importable sessions found.</div>}>
               <For each={groups()}>
                 {(g) => (
@@ -92,7 +95,7 @@ const ImportDialog: Component = () => {
           </div>
         </div>
       </div>
-    </Show>
+    </Presence>
   );
 };
 

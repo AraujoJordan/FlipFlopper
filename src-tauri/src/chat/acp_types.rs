@@ -15,6 +15,10 @@ pub struct RuntimeState {
     pub config_options: Vec<Value>,
     pub modes: Vec<Value>,
     pub current_mode: Option<String>,
+    /// Effective tool policy of this connection/turn, distinct from the saved
+    /// session policy when a headless process cannot change after launch.
+    #[serde(default)]
+    pub permission_mode: Option<super::adapters::PermissionMode>,
     pub commands: Vec<Value>,
     pub pending: Vec<Interaction>,
 }

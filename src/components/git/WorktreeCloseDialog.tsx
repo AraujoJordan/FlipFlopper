@@ -1,3 +1,4 @@
+import { RetainedPresence } from "../ui";
 import { Component, Show, createSignal } from "solid-js";
 import { bumpGitStatus } from "../../lib/store";
 import { cancelSession, chat, detachWorktree } from "../../lib/chat";
@@ -94,7 +95,7 @@ export const WorktreeCloseDialogHost: Component = () => {
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }
 
-  return <Show when={state()}>{(s) => <div class="overlay-backdrop-in" onclick={close} style={{ position: "fixed", inset: 0, "z-index": "var(--z-dialog)", display: "flex", "align-items": "center", "justify-content": "center", background: "rgba(0,0,0,.5)" }}>
+  return <RetainedPresence value={state()}>{(s) => <div class="overlay-backdrop-in" onclick={close} style={{ position: "fixed", inset: 0, "z-index": "var(--z-dialog)", display: "flex", "align-items": "center", "justify-content": "center", background: "rgba(0,0,0,.5)" }}>
     <div class="overlay-pop-in" onclick={(e) => e.stopPropagation()} style={{ width: "440px", background: "var(--surface-3)", border: "1px solid var(--border-default)", "border-radius": "var(--radius-xl)", "box-shadow": "var(--shadow-menu)", padding: "18px" }}>
       <div style={{ "font-size": "13.5px", color: "var(--fg-default)", "font-weight": "600", "margin-bottom": "7px" }}>Merge isolated work</div>
       <div style={{ "font-family": "var(--font-mono)", "font-size": "11px", color: "var(--fg-muted)", "margin-bottom": "12px" }}>{s().session.worktree!.branch} → {s().target}</div>
@@ -108,5 +109,5 @@ export const WorktreeCloseDialogHost: Component = () => {
         <Button variant="solid" onClick={mergeBack} disabled={busy() || generating()}><Show when={busy()}><Spinner size={12} /></Show>Merge into {s().target}</Button>
       </div>
     </div>
-  </div>}</Show>;
+  </div>}</RetainedPresence>;
 };

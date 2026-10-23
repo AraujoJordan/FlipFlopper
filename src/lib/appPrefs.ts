@@ -59,5 +59,8 @@ export async function readPref<T>(
 export function writePref(key: string, value: unknown) {
   void initAppPrefs()
     .then(() => store.set(key, value))
-    .catch((error) => console.error(`Failed to persist preference ${key}:`, error));
+    .catch((error) => {
+      console.error(`Failed to persist preference ${key}:`, error);
+      window.dispatchEvent(new Event("flipflopper:preference-error"));
+    });
 }

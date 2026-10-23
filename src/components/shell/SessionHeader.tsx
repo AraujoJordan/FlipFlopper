@@ -1,3 +1,4 @@
+import { useValueMotion, useSelectionMotion } from "../ui";
 import { Component, Show, createSignal } from "solid-js";
 import { activeSession, activeView, projectName, renameSession } from "../../lib/chat";
 import { layout, openSide, toggleSidebar, toggleSide, type SideTab } from "../../lib/layout";
@@ -20,6 +21,10 @@ const PANE_BUTTONS: { tab: SideTab; icon: IconName; label: string; keys?: string
 const SessionHeader: Component<{ changeCount: number }> = (props) => {
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal("");
+  let badge: HTMLSpanElement | undefined;
+  let toggles: HTMLDivElement | undefined;
+  useValueMotion(() => badge, () => props.changeCount);
+  useSelectionMotion(() => toggles, () => layout.sideOpen ? layout.sideTab : "", ".pane-toggle-on", true);
   const session = () => activeSession();
   const project = () => store.currentProject?.path ?? session()?.project_path ?? null;
 
@@ -76,7 +81,7 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
         <Show when={project()}>
           <BranchIndicator />
         </Show>
-        <div class="pane-toggles">
+        <div ref={toggles} class="pane-toggles">
           {PANE_BUTTONS.map((b) => (
             <button
               class="pane-toggle"
@@ -88,7 +93,7 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
             >
               <Icon name={b.icon} size={15} />
               <Show when={b.tab === "changes" && props.changeCount > 0}>
-                <span class="pane-toggle-badge">{props.changeCount}</span>
+                <span ref={badge} class="pane-toggle-badge">{props.changeCount}</span>
               </Show>
             </button>
           ))}

@@ -322,7 +322,7 @@ fn build_app_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
             &menu_item(handle, MENU_COMMAND_PALETTE, "Command Palette...", Some("CmdOrCtrl+K"))?,
             &menu_item(handle, MENU_FOCUS_PROMPT, "Focus Composer", Some("CmdOrCtrl+L"))?,
             &menu_item(handle, MENU_STOP_TURN, "Stop Running Turn", Some("CmdOrCtrl+."))?,
-            &check_menu_item(handle, MENU_FULL_ACCESS, "Full Access (no sandbox)", false, None::<&str>)?,
+            &check_menu_item(handle, MENU_FULL_ACCESS, "YOLO Mode (Full Access)", false, None::<&str>)?,
             &separator(handle)?,
             &menu_item(handle, MENU_PREV_SESSION, "Previous Session", Some("CmdOrCtrl+Shift+["))?,
             &menu_item(handle, MENU_NEXT_SESSION, "Next Session", Some("CmdOrCtrl+Shift+]"))?,
@@ -1275,7 +1275,13 @@ fn chat_detach_native(state: State<'_, std::sync::Arc<chat::ChatManager>>, sessi
 
 #[tauri::command]
 fn chat_runtime_state(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String) -> chat::acp_types::RuntimeState {
-    state.native.state(&session_id)
+    state.runtime_state(&session_id)
+}
+
+#[tauri::command]
+async fn chat_set_mode(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, mode: chat::adapters::PermissionMode) -> Result<chat::ModeUpdate, String> {
+    let manager = state.inner().clone();
+    run_blocking(move || manager.set_mode(&session_id, mode)).await?
 }
 
 #[tauri::command]
@@ -1292,13 +1298,17 @@ fn agent_runtime_info(agent_id: String) -> chat::acp::RuntimeInfo {
 async fn chat_update_session(
     state: State<'_, std::sync::Arc<chat::ChatManager>>,
     session_id: String,
-    patch: chat::SessionPatch,
+    mut patch: chat::SessionPatch,
 ) -> Result<chat::store::SessionMeta, String> {
     if patch.archived == Some(true) || patch.cwd.is_some() || patch.worktree.is_some() {
         state.cancel(&session_id);
         state.native.close_session(&session_id);
     }
-    run_blocking(move || chat::update_session(&session_id, patch)).await?
+    let manager = state.inner().clone();
+    run_blocking(move || {
+        if let Some(mode) = patch.mode.take() { manager.set_mode(&session_id, mode)?; }
+        chat::update_session(&session_id, patch)
+    }).await?
 }
 
 #[tauri::command]
@@ -1797,6 +1807,7 @@ pub fn run() {
             chat_import,
             chat_send,
             chat_runtime_state,
+            chat_set_mode,
             chat_detach_native,
             chat_respond,
             agent_runtime_info,

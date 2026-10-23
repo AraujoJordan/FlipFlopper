@@ -120,7 +120,7 @@ const FlowView: Component = () => {
               "font-weight": "500",
               cursor: "pointer",
               "margin-left": "8px",
-              transition: "all var(--dur-fast) var(--ease-standard)",
+              transition: "background var(--dur-fast), color var(--dur-fast)",
             }}
           >
             <Show when={clearConfirm()} fallback={

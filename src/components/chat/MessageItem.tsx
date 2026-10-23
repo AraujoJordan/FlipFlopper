@@ -11,7 +11,7 @@ import { runAction } from "../../lib/shortcuts";
 import { agentLabel } from "./agentLabel";
 import { AgentLogo } from "../../lib/agentMeta";
 import { openSide } from "../../lib/layout";
-import { Menu, MenuItem, MenuLabel, Spinner } from "../ui";
+import { Menu, MenuItem, MenuLabel, Spinner, Disclosure, useValueMotion, toast } from "../ui";
 import { Icon } from "../shell/Icon";
 import Markdown from "./Markdown";
 import ToolCallRow from "./ToolCallRow";
@@ -22,11 +22,21 @@ const agentIcon = (id: string) => store.agents.find((a) => a.id === id)?.icon ??
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
 
-const ActionButton: Component<{ icon: Parameters<typeof Icon>[0]["name"]; label: string; onClick: () => void }> = (props) => (
-  <button type="button" class="msg-action" title={props.label} aria-label={props.label} onClick={props.onClick}>
-    <Icon name={props.icon} size={14} />
-  </button>
-);
+const ActionButton: Component<{ icon: Parameters<typeof Icon>[0]["name"]; label: string; onClick: () => void | Promise<unknown> }> = (props) => {
+  const [copied, setCopied] = createSignal(false);
+  let button: HTMLButtonElement | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
+  useValueMotion(() => button, copied);
+  onCleanup(() => { disposed = true; clearTimeout(timer); });
+  const run = async () => {
+    try {
+      await props.onClick();
+      if (props.icon === "copy" && !disposed) { setCopied(true); clearTimeout(timer); timer = setTimeout(() => setCopied(false), 1200); }
+    } catch (error) { toast(`Couldn't ${props.label.toLowerCase()}: ${String(error)}`, "error"); }
+  };
+  return <button ref={button} type="button" class="msg-action" title={copied() ? "Copied" : props.label} aria-label={copied() ? "Copied" : props.label} onClick={() => void run()}><Icon name={copied() ? "check" : props.icon} size={14} /></button>;
+};
 
 function formatElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -40,7 +50,7 @@ function formatTokens(n: number): string {
 // ── User / divider ───────────────────────────────────────────────────────────
 
 export const UserBubble: Component<{ message: UserMessage }> = (props) => (
-  <div class="msg-user">
+  <div class="msg-user" data-message-id={props.message.id}>
     <div class="msg-user-stack">
       <Show when={props.message.attachments.length > 0}>
         <div class="msg-attachments">
@@ -50,7 +60,7 @@ export const UserBubble: Component<{ message: UserMessage }> = (props) => (
       <Show when={props.message.text}><div class="msg-user-body">{props.message.text}</div></Show>
     </div>
     <div class="msg-actions">
-      <ActionButton icon="copy" label="Copy" onClick={() => void writeClipboardText(props.message.text, "message")} />
+      <ActionButton icon="copy" label="Copy" onClick={() => writeClipboardText(props.message.text, "message")} />
       <ActionButton
         icon="pencil"
         label="Edit in composer"
@@ -61,11 +71,12 @@ export const UserBubble: Component<{ message: UserMessage }> = (props) => (
 );
 
 export const Divider: Component<{ message: DividerMessage }> = (props) => (
-  <div class="msg-divider">
+  <div class="msg-divider" data-message-id={props.message.id}>
     <span class="msg-divider-line" />
     <span class="msg-divider-label">
       <AgentLogo agentId={props.message.to} icon={agentIcon(props.message.to)} size={14} radius={4} />
-      Continued with {agentLabel(props.message.to)} · conversation carried over
+      <span>{agentLabel(props.message.from)} → {agentLabel(props.message.to)} · agent changed</span>
+      <span class="handoff-rail" aria-hidden="true"><span class="handoff-marker" /></span>
     </span>
     <span class="msg-divider-line" />
   </div>
@@ -80,16 +91,16 @@ const Thinking: Component<{ block: ThinkingBlock; live: boolean }> = (props) => 
     const end = props.block.endedAt;
     return end ? `Thought for ${Math.max(1, Math.round((end - props.block.startedAt) / 1000))}s` : "Thought process";
   };
+  let heading: HTMLSpanElement | undefined;
+  useValueMotion(() => heading, label);
   return (
     <div class="thinking">
       <button type="button" class="thinking-head" onClick={() => setOpen((v) => !v)} aria-expanded={open()}>
         <Icon name="sparkle" size={13} />
-        <span>{label()}</span>
+        <span ref={heading}>{label()}</span>
         <Icon name="chevronRight" size={12} style={{ transform: open() ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast)" }} />
       </button>
-      <Show when={open()}>
-        <div class="thinking-body">{props.block.text}</div>
-      </Show>
+      <Disclosure open={open()} class="thinking-body">{props.block.text}</Disclosure>
     </div>
   );
 };
@@ -132,22 +143,22 @@ const ToolGroupRow: Component<{ group: ToolGroup; blocks: () => Block[] }> = (pr
   });
   const running = () => tools().some((t) => t.status === "running");
   const failed = () => tools().filter((t) => t.status === "error").length;
+  let count: HTMLSpanElement | undefined;
+  useValueMotion(() => count, () => `${tools().length}:${running()}`);
   return (
     <div class="tool-group">
       <button type="button" class="tool-group-head" onClick={() => setOpen((v) => !v)} aria-expanded={open()}>
         <Show when={running()} fallback={<Icon name="wrench" size={14} />}><Spinner size={12} /></Show>
-        <span class="tool-group-title">
+        <span ref={count} class="tool-group-title">
           {running() ? "Working" : "Ran"} {tools().length} tools
         </span>
         <Show when={failed() > 0}><span class="tool-group-failed">{failed()} failed</span></Show>
         <Show when={!open()}><span class="tool-group-last">{tools()[tools().length - 1]?.title}</span></Show>
         <Icon name="chevronRight" size={13} style={{ transform: open() ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast)" }} />
       </button>
-      <Show when={open()}>
-        <div class="tool-group-body">
+      <Disclosure open={open()} class="tool-group-body">
           <For each={tools()}>{(t) => <ToolCallRow block={t} />}</For>
-        </div>
-      </Show>
+      </Disclosure>
     </div>
   );
 };
@@ -175,6 +186,8 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
     return b.kind === "text" ? "Writing" : "Working";
   };
 
+  let activityLabel: HTMLSpanElement | undefined;
+  useValueMotion(() => activityLabel, activity);
   const fullText = () =>
     props.message.blocks.filter((b): b is Extract<Block, { kind: "text" }> => b.kind === "text").map((b) => b.text).join("\n\n");
 
@@ -184,7 +197,7 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
     store.agents.filter((a) => a.installed && a.chat_supported && a.id !== props.message.agentId);
 
   return (
-    <div class="msg-assistant">
+    <div class="msg-assistant" data-message-id={props.message.id}>
       <div class="msg-assistant-head">
         <AgentLogo agentId={props.message.agentId} icon={agentIcon(props.message.agentId)} size={18} radius={5} />
         <span class="msg-assistant-name">{agentLabel(props.message.agentId)}</span>
@@ -193,7 +206,7 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
         </Show>
         <Show when={running()}>
           <span class="msg-live">
-            <span class="msg-live-activity">{activity()}</span>
+            <span class="msg-live-activity" ref={activityLabel}>{activity()}</span>
             <span class="msg-live-time">{formatElapsed(now() - props.message.startedAt)}</span>
             <Show when={chat.activeId}>
               <button type="button" class="msg-live-stop" onClick={cancelTurn} title="Stop (Esc)" aria-label="Stop">
@@ -203,6 +216,7 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
             </Show>
           </span>
         </Show>
+        <Show when={!running() && props.message.status === "done"}><span class="msg-done"><Icon name="check" size={12} /> Done</span></Show>
       </div>
 
       <For each={items()}>
@@ -267,7 +281,7 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
       <Show when={!running()}>
         <div class="msg-footer">
           <div class="msg-actions msg-actions-inline">
-            <ActionButton icon="copy" label="Copy response" onClick={() => void writeClipboardText(fullText(), "response")} />
+            <ActionButton icon="copy" label="Copy response" onClick={() => writeClipboardText(fullText(), "response")} />
             <Show when={props.isLast && chat.activeId}>
               <ActionButton icon="refresh" label="Retry" onClick={() => void retryLastTurn(chat.activeId!)} />
             </Show>

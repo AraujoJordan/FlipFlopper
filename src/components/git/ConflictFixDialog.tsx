@@ -1,3 +1,4 @@
+import { RetainedPresence } from "../ui";
 import { Icon } from "../shell/Icon";
 import { Component, For, Show, createSignal } from "solid-js";
 import { store } from "../../lib/store";
@@ -76,7 +77,7 @@ export const ConflictFixDialogHost: Component = () => {
   }
 
   return (
-    <Show when={state()}>
+    <RetainedPresence value={state()}>
       {(s) => (
         <div
           class="overlay-backdrop-in"
@@ -165,6 +166,6 @@ export const ConflictFixDialogHost: Component = () => {
           </div>
         </div>
       )}
-    </Show>
+    </RetainedPresence>
   );
 };

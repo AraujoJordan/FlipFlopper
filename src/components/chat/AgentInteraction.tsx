@@ -1,3 +1,4 @@
+import { useValueMotion } from "../ui";
 import { Component, For, Show, Switch, Match, createSignal, createEffect } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { FormField, InteractionResponse } from "../../lib/ipc";
@@ -19,6 +20,7 @@ const AgentInteraction: Component<{ block: InteractionBlock; sessionId: string }
   const [answers, setAnswers] = createSignal<Record<string, string[]>>({});
   let section: HTMLDivElement | undefined;
   let focused = false;
+  useValueMotion(() => section?.querySelector<HTMLElement>(".agent-request-outcome") ?? section, () => props.block.outcome ?? (busy() ? "sending" : active() ? "waiting" : "historical"));
   createEffect(() => {
     if (!active() || focused) return;
     focused = true;
@@ -54,7 +56,7 @@ const AgentInteraction: Component<{ block: InteractionBlock; sessionId: string }
     setAnswers((all) => ({ ...all, [questionId]: multiple ? checked ? [...(all[questionId] ?? []), option] : (all[questionId] ?? []).filter((id) => id !== option) : [option] }));
   }
   return (
-    <div class="agent-request" classList={{ "agent-request-pending": active() }} ref={section} tabIndex={-1} role="group" aria-label={request().title}>
+    <div class="agent-request" data-motion-id={request().id} classList={{ "agent-request-pending": active() }} ref={section} tabIndex={-1} role="group" aria-label={request().title}>
       <div class="agent-request-head"><strong>{request().title}</strong><span role="status">{active() ? "Needs input" : props.block.outcome ?? (submitted() ? "Response sent" : "No longer active")}</span></div>
       <Show when={payload().message && payload().message !== request().title}><Markdown text={payload().message!} /></Show>
       <Switch>

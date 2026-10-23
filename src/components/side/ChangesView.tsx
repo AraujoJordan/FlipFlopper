@@ -4,6 +4,7 @@ import { gitChangedCount, gitLoading, gitStatus, gitSync, gitTick } from "../../
 import { activeSession } from "../../lib/chat";
 import { openWorktreeDialog } from "../git/WorktreeCloseDialog";
 import { Icon } from "../shell/Icon";
+import { useValueMotion, useSelectionMotion } from "../ui";
 import SyncHeader from "../git/SyncHeader";
 import ChangesTab from "../git/ChangesTab";
 import HistoryTab from "../git/HistoryTab";
@@ -14,8 +15,11 @@ const DiffPane = lazy(() => import("../DiffPane"));
  *  history. Selecting a file or commit drills into its diff (DiffPane) with a
  *  back button. */
 const ChangesView: Component = () => {
+  let view: HTMLDivElement | undefined;
+  useValueMotion(() => view?.querySelector<HTMLElement>(".changes-diff-body, .changes-tabs") ?? undefined, () => `${store.review?.rev ?? ""}:${store.review?.path ?? ""}:${store.gitPanelTab}`);
+  useSelectionMotion(() => view, () => store.gitPanelTab, ".changes-tab-on", true);
   return (
-    <div class="changes-view">
+    <div ref={view} class="changes-view">
       <Show
         when={store.review}
         fallback={

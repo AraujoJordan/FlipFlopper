@@ -5,18 +5,13 @@ import {
   gitStage, gitUnstage, gitDiscard, gitCommit, gitStashPush, gitStashPop, getGitLog,
   type StatusEntry, type SyncStatus, triggerHaptic,
 } from "../../lib/ipc";
-import { Button, Spinner, Textarea, confirmDialog, toast } from "../ui";
+import { Button, Spinner, Textarea, confirmDialog, toast, useListMotion } from "../ui";
 import { isProtectedBranch } from "../../lib/constants";
 
 const iconBtnStyle = {
   display: "flex", "align-items": "center", "justify-content": "center",
   color: "var(--fg-subtle)", padding: "3px", "border-radius": "var(--radius-sm)",
 } as const;
-
-/** Matches the .git-row exit transition duration in App.css (--dur-base) —
- *  the row collapses locally before the status refetch actually removes it,
- *  so the stage/unstage/discard action reads as landing rather than snapping. */
-const ROW_EXIT_MS = 160;
 
 function basename(path: string): string {
   return path.split("/").pop() || path;
@@ -31,7 +26,7 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
 
   function settle() {
     setRemoving(true);
-    setTimeout(bumpGitStatus, ROW_EXIT_MS);
+    bumpGitStatus();
   }
 
   const letter = () => {
@@ -111,7 +106,7 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
 
   return (
     <div
-      class="git-row"
+      class="git-row" data-motion-key={props.entry.path}
       classList={{ "git-row-removing": removing() }}
       onclick={openDiff}
       title={props.entry.path}
@@ -180,6 +175,8 @@ const ChangesTab: Component<{
   sync: () => SyncStatus | null | undefined;
 }> = (props) => {
   const entries = () => props.status() ?? [];
+  let rows: HTMLDivElement | undefined;
+  useListMotion(() => rows, () => entries().map((e) => `${e.path}:${e.index_status}:${e.worktree_status}`).join("|"), ".git-row");
   const staged = () => entries().filter(isStaged);
   const unstaged = () => entries().filter(isUnstaged);
 
@@ -326,7 +323,7 @@ const ChangesTab: Component<{
   }
 
   return (
-    <div style={{ flex: "1", display: "flex", "flex-direction": "column", "min-height": 0 }}>
+    <div ref={rows} style={{ flex: "1", display: "flex", "flex-direction": "column", "min-height": 0 }}>
       <div style={{ flex: "1", overflow: "auto", "padding-bottom": "6px" }}>
         <Show when={props.statusLoading() && !props.status()}>
           <div style={{ padding: "24px 0", display: "flex", "justify-content": "center" }}>

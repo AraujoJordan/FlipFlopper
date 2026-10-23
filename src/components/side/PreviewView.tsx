@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { getSessionUrl, onPreviewUrl, onPtyExit } from "../../lib/ipc";
 import { openSide } from "../../lib/layout";
 import { setRunSessionId, store } from "../../lib/store";
+import { useValueMotion, animateElement } from "../ui";
 import RunButton from "../RunButton";
 import { Icon } from "../shell/Icon";
 
@@ -36,11 +37,13 @@ const PreviewView: Component = () => {
     })();
   }));
 
+  let address: HTMLDivElement | undefined;
+  useValueMotion(() => address, url);
   return (
     <div class="preview-view">
       <div class="preview-bar">
         <RunButton />
-        <div class="preview-url" title={url() ?? undefined}>
+        <div ref={address} class="preview-url" title={url() ?? undefined}>
           <Icon name="globe" size={13} />
           <span>{url() ?? "No server running"}</span>
         </div>
@@ -66,7 +69,7 @@ const PreviewView: Component = () => {
       >
         {/* Keying on the reload counter forces a fresh iframe. */}
         <For each={[nonce()]}>
-          {() => <iframe class="preview-frame" src={url()!} title="Live preview" />}
+          {() => <iframe class="preview-frame" src={url()!} title="Live preview" onLoad={(event) => void animateElement(event.currentTarget, [{ opacity: .4 }, { opacity: 1 }], 180)} />}
         </For>
       </Show>
     </div>

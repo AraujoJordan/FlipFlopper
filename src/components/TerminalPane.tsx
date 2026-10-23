@@ -1,5 +1,6 @@
 import { onMount, onCleanup, createEffect, type Component } from "solid-js";
 import { Terminal, type ITheme } from "@xterm/xterm";
+import { MOTION_EVENT, layout, resolvedMotion, motionForeground } from "../lib/layout";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { onPtyOutput, onPtyExit, ptyInput, ptyResize, ptyAttach } from "../lib/ipc";
@@ -20,29 +21,29 @@ function cssVar(name: string, fallback: string): string {
 /** xterm palette derived from the current app theme tokens. */
 function terminalTheme(): ITheme {
   const light = getComputedStyle(document.documentElement).colorScheme === "light";
-  const bg = cssVar("--surface-1", "#262624");
+  const bg = cssVar("--surface-1", "#141A1F");
   return {
     background: bg,
-    foreground: cssVar("--fg-body", "#e8e6dc"),
-    cursor: cssVar("--accent", "#d97757"),
+    foreground: cssVar("--fg-body", "#CCD8DD"),
+    cursor: cssVar("--accent", "#54E0BA"),
     cursorAccent: bg,
-    selectionBackground: `rgba(${cssVar("--accent-rgb", "217, 119, 87")}, 0.28)`,
-    black: light ? "#3d3d3a" : "#5e5d59",
+    selectionBackground: `rgba(${cssVar("--accent-rgb", "84, 224, 186")}, 0.28)`,
+    black: light ? "#142129" : "#91A5B0",
     red: cssVar("--status-del", "#e5675d"),
     green: cssVar("--status-add", "#6fbf73"),
     yellow: cssVar("--status-mod", "#d9a441"),
     blue: cssVar("--status-renamed", "#7aa7e0"),
-    magenta: light ? "#8a4fb8" : "#c39be0",
-    cyan: light ? "#1f8a96" : "#5fc4cf",
-    white: light ? "#8a8880" : "#b0aea5",
-    brightBlack: light ? "#6b6a63" : "#8b8980",
-    brightRed: light ? "#d44a3f" : "#f08a82",
-    brightGreen: light ? "#3c9d4b" : "#8ad48e",
-    brightYellow: light ? "#b9801f" : "#e8bd62",
-    brightBlue: light ? "#4a82c9" : "#9bc0f0",
-    brightMagenta: light ? "#a064d0" : "#d6b6ec",
-    brightCyan: light ? "#2ba1ae" : "#86d9e3",
-    brightWhite: light ? "#141413" : "#faf9f5",
+    magenta: light ? "#6044B8" : "#B2A2FF",
+    cyan: light ? "#006C52" : "#8BEBCF",
+    white: light ? "#4D626F" : "#CCD8DD",
+    brightBlack: light ? "#4D626F" : "#A2B3BC",
+    brightRed: light ? "#AD243B" : "#FF929C",
+    brightGreen: light ? "#236C3C" : "#8CE0A7",
+    brightYellow: light ? "#815900" : "#EAC06B",
+    brightBlue: light ? "#315DA8" : "#8DB7FF",
+    brightMagenta: light ? "#6044B8" : "#B2A2FF",
+    brightCyan: light ? "#006C52" : "#8BEBCF",
+    brightWhite: light ? "#142129" : "#F1F6F7",
   };
 }
 
@@ -57,7 +58,7 @@ function createCachedTerminal(sessionId: string): CachedTerminal {
     fontFamily: cssVar("--font-mono", "ui-monospace, Menlo, monospace"),
     fontSize: 13,
     lineHeight: 1.0,
-    cursorBlink: true,
+    cursorBlink: resolvedMotion() === "full" && motionForeground(),
     allowProposedApi: true,
     scrollback: 5000,
   });
@@ -71,6 +72,8 @@ function createCachedTerminal(sessionId: string): CachedTerminal {
 
   const onThemeChanged = () => { terminal.options.theme = terminalTheme(); };
   window.addEventListener(THEME_EVENT, onThemeChanged);
+  const onMotionChanged = () => { terminal.options.cursorBlink = resolvedMotion() === "full" && motionForeground() && layout.sideOpen && layout.sideTab === "terminal" && container.getClientRects().length > 0; };
+  window.addEventListener(MOTION_EVENT, onMotionChanged);
   const media = window.matchMedia("(prefers-color-scheme: light)");
   media.addEventListener("change", onThemeChanged);
 
@@ -110,6 +113,7 @@ function createCachedTerminal(sessionId: string): CachedTerminal {
       if (disposed) return;
       disposed = true;
       window.removeEventListener(THEME_EVENT, onThemeChanged);
+      window.removeEventListener(MOTION_EVENT, onMotionChanged);
       media.removeEventListener("change", onThemeChanged);
       unlistenOutput?.();
       unlistenExit?.();
@@ -167,18 +171,26 @@ const TerminalPane: Component<Props> = (props) => {
     }
   });
 
+  let fitFrame: number | undefined;
   function fitAndResize() {
-    try {
+    if (fitFrame !== undefined) return;
+    fitFrame = requestAnimationFrame(() => {
+      fitFrame = undefined;
+      if (!wrapperRef?.getClientRects().length) { terminal.options.cursorBlink = false; return; }
+      terminal.options.cursorBlink = props.active && resolvedMotion() === "full" && motionForeground() && layout.sideOpen && layout.sideTab === "terminal";
+      try {
       fitAddon.fit();
       const { cols, rows } = terminal;
       ptyResize(props.sessionId, cols, rows).catch(console.error);
-    } catch { /* terminal not ready yet */ }
+      } catch { /* terminal not ready yet */ }
+    });
   }
 
   onCleanup(() => {
     // The Terminal, its container, and its PTY listeners live on in
     // terminalCache; disposeCachedTerminal() on the close paths tears them down.
     resizeObserver?.disconnect();
+    if (fitFrame !== undefined) cancelAnimationFrame(fitFrame);
   });
 
   return (

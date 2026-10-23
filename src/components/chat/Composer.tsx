@@ -2,14 +2,14 @@ import {
   Component, For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from "solid-js";
 import {
-  agentTuning, nativeCommands, cancelTurn, chat, projectName, setComposer, setComposerAgent, startNewSession, submitPrompt, isRunning,
+  agentTuning, nativeCommands, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, permissionModeUpdating, sessionModePending, startNewSession, submitPrompt, isRunning,
 } from "../../lib/chat";
 import { AgentLogo } from "../../lib/agentMeta";
 import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMode } from "../../lib/ipc";
 import { openSide } from "../../lib/layout";
 import { registerShortcutHandler } from "../../lib/shortcuts";
 import { effectiveRoot, setStore, store } from "../../lib/store";
-import { Menu, MenuDivider, MenuItem, MenuLabel, confirmDialog } from "../ui";
+import { Menu, MenuDivider, MenuItem, MenuLabel, animateElement, useValueMotion, useListMotion, usePresence, useSelectionMotion } from "../ui";
 import { Icon, type IconName } from "../shell/Icon";
 import { getFileIcon } from "../../lib/fileIcons";
 import {
@@ -118,10 +118,13 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
 
   function resize() {
     if (!textarea) return;
+    const before = textarea.getBoundingClientRect().height;
     textarea.style.height = "auto";
     const max = 220;
     textarea.style.height = `${Math.min(textarea.scrollHeight, max)}px`;
     textarea.style.overflowY = textarea.scrollHeight > max ? "auto" : "hidden";
+    const after = textarea.getBoundingClientRect().height;
+    if (before && Math.abs(before - after) > 1 && Math.abs(before - after) < 100) void animateElement(textarea, [{ height: `${before}px` }, { height: `${after}px` }], 120);
   }
 
   // ── Completion ──
@@ -283,15 +286,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   };
   const modeInfo = () => MODES.find((m) => m.id === chat.composer.mode) ?? MODES[1];
 
-  async function chooseMode(mode: PermissionMode) {
+  function chooseMode(mode: PermissionMode) {
     setModeMenu(false);
-    if (mode === "full" && chat.composer.mode !== "full") {
-      const ok = await confirmDialog(
-        "Full access allows tool actions automatically. The agent’s own security policies still apply. Continue?",
-        "Allow full access",
-      );
-      if (!ok) return;
-    }
     setComposer({ mode });
   }
 
@@ -309,11 +305,21 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     return parts.length > 0 ? parts.join(" · ") : null;
   };
 
+  let composerElement: HTMLDivElement | undefined;
+  let suggestions: HTMLDivElement | undefined;
+  const suggestionsPresent = usePresence(menuOpen, () => suggestions);
+  useValueMotion(() => composerElement?.querySelector<HTMLElement>(".composer-send") ?? undefined, () => `${running()}:${!!value().trim() || attachments().length > 0}`);
+  useValueMotion(() => agentAnchor, () => chat.composer.agentId, true);
+  useValueMotion(() => modeAnchor, () => chat.composer.mode);
+  useValueMotion(() => agentAnchor?.querySelector<HTMLElement>(".pill-sub") ?? undefined, modelSummary);
+  useValueMotion(() => composerElement?.querySelector<HTMLElement>(".composer-chips-left .pill") ?? undefined, () => chat.sessions.find((s) => s.id === chat.activeId)?.worktree?.branch);
+  useListMotion(() => composerElement, () => attachments().map((a) => a.path).join("|"), ".attach-chip");
+  useSelectionMotion(() => suggestions, selected, ".mention-item-active");
   return (
-    <div class="composer">
+    <div ref={composerElement} class="composer">
       <div class="composer-box" classList={{ "composer-box-full": chat.composer.mode === "full" }}>
-        <Show when={menuOpen()}>
-          <div class="mention-menu" role="listbox">
+        <Show when={suggestionsPresent()}>
+          <div ref={suggestions} class="mention-menu" role="listbox">
             <For each={items()}>
               {(item, i) => (
                 <button
@@ -408,7 +414,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                 <button
                   type="button"
                   class="send-btn"
-                  disabled={!hasText() || submitting()}
+                  disabled={!hasText() || submitting() || permissionModeUpdating()}
                   onClick={() => void send()}
                   title={running() ? "Queue follow-up (Enter)" : "Send (Enter)"}
                   aria-label="Send"
@@ -469,8 +475,9 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
             type="button"
             class="pill"
             classList={{ "pill-full": chat.composer.mode === "full" }}
+            disabled={permissionModeUpdating()}
             onClick={() => setModeMenu((v) => !v)}
-            title="Permissions (⇧Tab)"
+            title={permissionModeUpdating() ? "Updating session permissions…" : "Session permissions (⇧Tab)"}
           >
             <Icon name={modeInfo().icon} size={13} />
             {modeInfo().label}
@@ -491,6 +498,26 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
               )}
             </For>
           </Menu>
+          <button
+            type="button"
+            class="pill yolo-switch"
+            classList={{ "yolo-switch-on": chat.composer.mode === "full" }}
+            role="switch"
+            aria-label="YOLO mode"
+            aria-checked={chat.composer.mode === "full"}
+            aria-describedby={sessionModePending() ? "session-permission-status" : undefined}
+            disabled={permissionModeUpdating()}
+            aria-busy={permissionModeUpdating()}
+            title={permissionModeUpdating() ? "Updating session permissions…" : sessionModePending()
+              ? "Session updated. This running CLI keeps its launch permissions until the next turn."
+              : "YOLO: auto-approve tools for this session. Applies live to Claude/Cursor. CLI and system policies still apply."}
+            onClick={() => setYolo(chat.composer.mode !== "full")}
+          >
+            <Icon name="zap" size={13} />
+            YOLO
+            <span class="yolo-switch-track" aria-hidden="true"><span /></span>
+          </button>
+          <Show when={sessionModePending()}><span id="session-permission-status" class="pill pill-static" role="status" title={`Current task: ${MODES.find((mode) => mode.id === chat.views[chat.activeId!]?.runtime?.permission_mode)?.label ?? "previous permissions"}. Session permissions apply next turn.`}>Next turn</span></Show>
         </div>
 
         <div class="composer-chips-right">

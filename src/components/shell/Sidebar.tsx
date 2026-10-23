@@ -10,7 +10,7 @@ import { store } from "../../lib/store";
 import { updateInfo } from "../../lib/updater";
 import { openPalette } from "../../lib/palette";
 import { AgentLogo } from "../../lib/agentMeta";
-import { ContextMenu, Menu, MenuDivider, MenuItem, MenuLabel, Spinner, confirmDialog, toast } from "../ui";
+import { ContextMenu, Menu, MenuDivider, MenuItem, MenuLabel, Spinner, confirmDialog, toast, Disclosure, useListMotion, useSelectionMotion, useValueMotion } from "../ui";
 import { Icon } from "./Icon";
 
 function ago(ts: number): string {
@@ -43,6 +43,8 @@ const SessionRow: Component<{
   const waiting = () => pendingInputCount(props.session.id) > 0;
   const [draft, setDraft] = createSignal(props.session.title);
 
+  let row: HTMLDivElement | undefined;
+  useValueMotion(() => row?.querySelector<HTMLElement>(".session-row-text, .session-row-input") ?? undefined, () => `${props.renaming}:${props.session.title}`);
   const commit = () => {
     void renameSession(props.session.id, draft());
     props.onRenameDone();
@@ -50,7 +52,7 @@ const SessionRow: Component<{
 
   return (
     <div
-      class="session-row"
+      ref={row} class="session-row" data-motion-key={props.session.id}
       classList={{ "session-row-active": active(), "session-row-archived": props.session.archived, "session-row-child": props.depth > 0 }}
       role="button"
       tabIndex={0}
@@ -133,6 +135,11 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
   const filterLabel = () => projects().find((p) => p.path === layout.projectFilter)?.name ?? "All projects";
   const themeIcon = () => (layout.theme === "dark" ? "sparkle" : layout.theme === "light" ? "eye" : "settings") as "sparkle" | "eye" | "settings";
   const archivedCount = () => chat.sessions.filter((s) => s.archived).length;
+  let sidebar: HTMLElement | undefined;
+  let themeButton: HTMLButtonElement | undefined;
+  useListMotion(() => sidebar, () => groups().map((g) => g.sessions.map((s) => s.id).join()).join("|"), ".session-row");
+  useSelectionMotion(() => sidebar, () => chat.activeId, ".session-row-active");
+  useValueMotion(() => themeButton, () => layout.theme, true);
 
   async function confirmDelete(session: SessionMeta) {
     if (!(await confirmDialog(`Delete “${session.title || "this session"}”? The conversation can't be recovered.`, "Delete"))) return;
@@ -154,7 +161,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
   }
 
   return (
-    <aside class="sidebar">
+    <aside ref={sidebar} class="sidebar">
       <div class="sidebar-top">
         <div class="sidebar-top-actions">
           <button class="icon-btn sidebar-toggle" onClick={toggleSidebar} title="Hide sidebar (⌘B)" aria-label="Hide sidebar">
@@ -252,7 +259,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                     </button>
                   </Show>
                 </div>
-                <Show when={!collapsed()[group.key]}>
+                <Disclosure open={!collapsed()[group.key]}>
                   <For each={nestSessions(group.sessions)}>
                     {({ session, depth }) => (
                       <SessionRow
@@ -267,7 +274,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                       />
                     )}
                   </For>
-                </Show>
+                </Disclosure>
               </section>
             )}
           </For>

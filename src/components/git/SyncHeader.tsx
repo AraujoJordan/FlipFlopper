@@ -2,7 +2,7 @@ import { Icon } from "../shell/Icon";
 import { Component, Show, createSignal } from "solid-js";
 import { store, bumpGitStatus, updateCurrentBranch, effectiveRoot } from "../../lib/store";
 import { gitFetch, gitPull, gitPush, gitCheckoutPrevious, commitsAheadOfRemote, type SyncStatus, triggerHaptic } from "../../lib/ipc";
-import { Button, Spinner, toast } from "../ui";
+import { Button, Spinner, toast, useValueMotion } from "../ui";
 import { openConflictDialog } from "./ConflictFixDialog";
 import { openSquashPushDialog } from "./SquashPushDialog";
 import { isProtectedBranch } from "../../lib/constants";
@@ -14,6 +14,8 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
   const [busyOp, setBusyOp] = createSignal<BusyOp>(null);
   const [pushFlash, setPushFlash] = createSignal(false);
 
+  let strip: HTMLDivElement | undefined;
+  useValueMotion(() => strip, () => `${busyOp()}:${pushFlash()}:${props.sync()?.ahead}:${props.sync()?.behind}`);
   const s = () => props.sync();
   const detached = () => s()?.detached ?? false;
   const hasRemote = () => s()?.has_remote ?? false;
@@ -115,7 +117,7 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
   }
 
   return (
-    <div style={{
+    <div ref={strip} style={{
       display: "flex", "align-items": "center", gap: "8px",
       padding: "9px 12px",
       "border-bottom": "1px solid var(--border-muted)",
