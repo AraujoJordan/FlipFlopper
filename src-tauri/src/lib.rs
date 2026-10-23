@@ -1412,6 +1412,15 @@ async fn chat_delete_session(
     run_blocking(move || manager.delete_session(&session_id)).await?
 }
 
+#[tauri::command]
+async fn chat_clear_session(
+    state: State<'_, std::sync::Arc<chat::ChatManager>>,
+    session_id: String,
+) -> Result<chat::ClearResult, String> {
+    let manager = state.inner().clone();
+    run_blocking(move || manager.clear_session(&session_id)).await?
+}
+
 // ════════════════════════════════════════════════
 // Native diff review
 // ════════════════════════════════════════════════
@@ -1911,6 +1920,7 @@ pub fn run() {
             chat_cancel,
             chat_update_session,
             chat_delete_session,
+            chat_clear_session,
             // Review
             get_review_diff,
             // Handoff

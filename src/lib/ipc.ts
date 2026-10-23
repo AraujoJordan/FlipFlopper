@@ -644,6 +644,8 @@ export const chatUpdateSession = (sessionId: string, patch: SessionPatch): Promi
 
 export const chatDeleteSession = (sessionId: string): Promise<void> =>
   invoke("chat_delete_session", { sessionId });
+export const chatClearSession = (sessionId: string): Promise<{ session: SessionMeta; archived: SessionMeta | null }> =>
+  invoke("chat_clear_session", { sessionId });
 
 export interface ChatSearchHit {
   session_id: string;

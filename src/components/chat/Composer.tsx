@@ -2,7 +2,7 @@ import {
   Component, For, Show, batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from "solid-js";
 import {
-  agentTuning, nativeCommands, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, submitPrompt, isRunning,
+  agentTuning, nativeCommands, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, isRunning,
 } from "../../lib/chat";
 import { AgentLogo } from "../../lib/agentMeta";
 import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMode } from "../../lib/ipc";
@@ -158,6 +158,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     { name: "edit", detail: "Switch to Auto-edit mode", run: () => setComposer({ mode: "auto_edit" }) },
     ...(modeAvailable("manual") ? [{ name: "manual", detail: "Switch to Manual mode", run: () => setComposer({ mode: "manual" }) }] : []),
     { name: "new", detail: "Start a new session", run: () => startNewSession() },
+    { name: "clear", detail: "Clear the conversation and start with fresh context", run: () => clearConversation() },
     { name: "terminal", detail: "Open the terminal pane", run: () => openSide("terminal") },
     {
       name: "commit",
@@ -228,12 +229,28 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     queueMicrotask(() => { textarea?.focus(); textarea?.setSelectionRange(np, np); setCaret(np); resize(); });
   }
 
+  function clearConversation() {
+    batch(() => { setValue(""); clearAttachments(); setCaret(0); setHistoryIndex(null); });
+    drafts.delete(draftKey());
+    attachmentDrafts.delete(draftKey());
+    queueMicrotask(resize);
+    if (chat.activeId) void clearSession(chat.activeId);
+  }
+
   // ── Sending ──
   async function send() {
     if (submitting() || permissionModeUpdating()) return;
     const original = value();
     const text = original.trim();
     const files = [...attachments()];
+    // A typed `/command` behaves like picking it from the menu.
+    const typed = files.length === 0 && /^\/\S+$/.test(text) ? slashCommands().find((c) => c.run && `/${c.name}` === text) : undefined;
+    if (typed?.run) {
+      batch(() => { setValue(""); setCaret(0); setDismissedKey(null); });
+      queueMicrotask(resize);
+      typed.run();
+      return;
+    }
     if (!text && files.length === 0) return;
     const source = draftKey();
     let target = source;

@@ -10,6 +10,7 @@ import {
   type AgentInteraction,
   type InteractionResponse,
   chatCreateSession,
+  chatClearSession,
   chatDeleteSession,
   chatListSessions,
   chatLoadTranscript,
@@ -960,6 +961,40 @@ export async function archiveSession(id: string, archived: boolean) {
     const meta = await chatUpdateSession(id, { archived });
     setChat("sessions", (s) => s.id === id, meta);
     if (archived && chat.activeId === id) startNewSession(meta.project_path);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+type ClearMotion = (swap: () => void) => Promise<void>;
+let clearMotion: ClearMotion | undefined;
+/** The transcript view registers how a clear is presented: it fades the old
+ *  conversation out, runs `swap`, then fades the empty session in. */
+export function onClearMotion(handler: ClearMotion) {
+  clearMotion = handler;
+  return () => { if (clearMotion === handler) clearMotion = undefined; };
+}
+
+/** `/clear`: empty the session in place; the previous conversation is archived. */
+export async function clearSession(id: string) {
+  if (isRunning(id)) { toast("Stop the current turn before clearing", "info"); return; }
+  flushLiveEntries();
+  try {
+    const request = chatClearSession(id);
+    // Animate only after the backend confirmed, so a refusal leaves the transcript intact.
+    const result = await request;
+    const archived = result.archived;
+    const swap = () => {
+      setChat("sessions", (s) => s.id === id, result.session);
+      if (archived) setChat("sessions", (s) => [archived, ...s]);
+      setChat("views", id, { messages: [], loaded: true, running: false, runtime: undefined });
+      setChat("queued", produce((q) => { delete q[id]; }));
+    };
+    if (clearMotion && chat.activeId === id) await clearMotion(swap); else swap();
+    toast(archived ? "Conversation cleared — previous one archived" : "Conversation cleared", "info", archived ? {
+      actionLabel: "Undo",
+      onAction: () => void archiveSession(archived.id, false),
+    } : undefined);
   } catch (e) {
     toast(String(e), "error");
   }

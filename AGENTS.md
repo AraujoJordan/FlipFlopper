@@ -61,6 +61,7 @@ Currently implemented:
   model-dependent option updates. `/agent:<command>` distinguishes native
   commands from local app actions. Images up to 20 MiB use structured ACP image
   blocks when supported; other attachments remain accessible by prompt paths.
+- `/clear` resets the session in place (empty transcript and title, new native context) and archives the previous transcript as a `(cleared)` session; typed local `/commands` run on Enter instead of being sent.
 - Sessions sidebar grouped by project; transcript with markdown, collapsible
   tool rows and inline diffs; composer with `@` mentions, `/` commands and
   skills, queued follow-ups, agent/model/effort and permission pickers, and a

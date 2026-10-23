@@ -52,6 +52,12 @@ pub struct ModeUpdate {
     runtime: acp_types::RuntimeState,
 }
 
+#[derive(serde::Serialize)]
+pub struct ClearResult {
+    session: SessionMeta,
+    archived: Option<SessionMeta>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct NewSession {
     pub project_path: String,
@@ -225,6 +231,46 @@ impl ChatManager {
         }
         let session = store::update_session(session_id, |meta| meta.mode = mode)?.ok_or("Session was removed while changing permissions")?;
         Ok(ModeUpdate { session, runtime: self.runtime_state(session_id) })
+    }
+
+    /// `/clear`: empty the session in place and start a fresh native context.
+    /// The previous conversation is kept as an archived copy so it can be resumed.
+    pub fn clear_session(&self, session_id: &str) -> Result<ClearResult, String> {
+        let operation = self.session_operation(session_id);
+        let _clear = operation.lock().unwrap();
+        if self.is_running(session_id) || self.native.state(session_id).active_turn_id.is_some() {
+            return Err("Stop the current turn before clearing".into());
+        }
+        let meta = store::get_session(session_id).ok_or("Session not found")?;
+        self.native.close_session(session_id);
+        let entries = store::load_entries(session_id);
+        let archived = if entries.is_empty() {
+            None
+        } else {
+            let mut copy = meta.clone();
+            copy.id = Uuid::new_v4().to_string();
+            copy.archived = true;
+            copy.pinned = false;
+            copy.worktree = None;
+            copy.parent_id = None;
+            copy.acp_sessions.clear();
+            copy.title = if meta.title.is_empty() { "Cleared conversation".into() } else { format!("{} (cleared)", meta.title) };
+            store::insert_session(copy.clone())?;
+            store::write_entries(&copy.id, &entries)?;
+            Some(copy)
+        };
+        store::write_entries(session_id, &[])?;
+        let session = store::update_session(session_id, |m| {
+            m.title.clear();
+            m.native_ids.clear();
+            m.acp_sessions.clear();
+            m.agent_last_entry.clear();
+            m.entry_count = 0;
+            m.status = "idle".into();
+            m.updated_at = store::now_ms();
+        })?
+        .ok_or("Session was removed while clearing")?;
+        Ok(ClearResult { session, archived })
     }
 
     pub fn is_running(&self, session_id: &str) -> bool {
@@ -755,6 +801,35 @@ mod tests {
         store::delete_session(&meta.id).unwrap();store::append_entry(&meta.id,&started);
         assert!(store::load_entries(&meta.id).is_empty());
         assert!(!data.join("flipflopper/chat").join(format!("{}.jsonl",meta.id)).exists());
+        match previous {Some(value)=>std::env::set_var("FLIPFLOPPER_DATA_DIR",value),None=>std::env::remove_var("FLIPFLOPPER_DATA_DIR")}
+        let _=std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn clear_session_resets_in_place_and_archives_the_old_conversation() {
+        let _env=store::ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let data=std::env::temp_dir().join(format!("ff-clear-{}",Uuid::new_v4()));
+        let previous=std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR",&data);
+        let manager=ChatManager::default();
+        let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,parent_id:None,title:Some("Fix bug".into())}).unwrap();
+        store::append_entry(&meta.id,&Entry::User {text:"hi".into(),agent_id:"claude".into(),ts:1,attachments:vec![]});
+        store::update_session(&meta.id,|m|{m.native_ids.insert("claude".into(),"native-1".into());m.entry_count=1;}).unwrap();
+
+        let result=manager.clear_session(&meta.id).unwrap();
+        assert!(result.session.title.is_empty() && result.session.native_ids.is_empty() && result.session.entry_count==0);
+        assert!(store::load_entries(&meta.id).is_empty());
+        let archived=result.archived.unwrap();
+        assert!(archived.archived && archived.id!=meta.id && archived.title=="Fix bug (cleared)");
+        assert_eq!(archived.native_ids.get("claude").map(String::as_str),Some("native-1"));
+        assert_eq!(store::load_entries(&archived.id).len(),1);
+
+        // Nothing to archive the second time.
+        assert!(manager.clear_session(&meta.id).unwrap().archived.is_none());
+
+        manager.running.lock().unwrap().insert(meta.id.clone(),Running {pid:0,cancelled:Arc::new(AtomicBool::new(false)),agent_id:"claude".into(),mode:PermissionMode::AutoEdit,turn_id:"t".into()});
+        assert!(manager.clear_session(&meta.id).is_err());
+
         match previous {Some(value)=>std::env::set_var("FLIPFLOPPER_DATA_DIR",value),None=>std::env::remove_var("FLIPFLOPPER_DATA_DIR")}
         let _=std::fs::remove_dir_all(data);
     }

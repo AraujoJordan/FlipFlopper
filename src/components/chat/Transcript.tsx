@@ -1,5 +1,5 @@
 import { Component, For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
-import { activeView, chat, pendingInputCount, dropQueued, isRunning, sendQueuedNow, onLivePresentation } from "../../lib/chat";
+import { activeView, chat, pendingInputCount, dropQueued, isRunning, sendQueuedNow, onLivePresentation, onClearMotion } from "../../lib/chat";
 import { resolvedMotion } from "../../lib/layout";
 import { animateElement, reveal, cancelMotion, useListMotion } from "../ui";
 import { Icon } from "../shell/Icon";
@@ -53,7 +53,16 @@ const Transcript: Component = () => {
         targets.forEach((target) => void reveal(target, 180));
       });
     });
-    onCleanup(() => { disposed = true; off(); content?.querySelectorAll<HTMLElement>("[data-message-id], [data-motion-id], .md, .msg-assistant-head, .handoff-marker, .msg-done, .turn-changes").forEach(cancelMotion); seen.clear(); });
+    // /clear: the conversation lifts away and softens, then the empty session settles in.
+    const offClear = onClearMotion(async (swap) => {
+      await animateElement(content, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-10px) scale(.992)" }], 200);
+      swap();
+      seen.clear();
+      if (scroller) scroller.scrollTop = 0;
+      setStuck(true);
+      await animateElement(content, [{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "none" }], 260);
+    });
+    onCleanup(() => { offClear(); disposed = true; off(); content?.querySelectorAll<HTMLElement>("[data-message-id], [data-motion-id], .md, .msg-assistant-head, .handoff-marker, .msg-done, .turn-changes").forEach(cancelMotion); seen.clear(); });
   });
 
   const toBottom = (smooth = false) => {
