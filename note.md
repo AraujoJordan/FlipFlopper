@@ -399,3 +399,12 @@ Shared primitives cover the following IDs; adaptations preserve current app beha
   isolated public demo. Capture preferences restored and QA app closed.
 - Release checks: TypeScript and 18 frontend tests pass; Rust suite 104 passed,
   six opt-in tests skipped. Workflow YAML parses and staged diff checks pass.
+
+- Published release 0.12.0 from commit 09f15c3:
+  https://github.com/AraujoJordan/FlipFlopper/releases/tag/0.12.0
+- Release workflow 39970969237 passed on Apple Silicon macOS, Intel macOS,
+  Windows and Linux; publication and automated Homebrew tap update succeeded.
+- Downloaded both public DMGs through the cask updater and verified their SHA256
+  values against GitHub's asset digests. The repository cask matches the live tap.
+  Public latest.json reports 0.12.0 with signatures and versioned URLs for every
+  supported updater platform. Final metadata sync changes only the cask and log.
