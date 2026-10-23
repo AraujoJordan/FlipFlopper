@@ -699,15 +699,20 @@ async fn get_agents(include_versions: Option<bool>) -> Vec<AgentInfo> {
 // Project commands
 // ════════════════════════════════════════════════
 
-// Async + spawn_blocking: scaffolding shells out to git and writes files.
+// Opening only inspects the folder. Setup is a separate explicit action.
 #[tauri::command]
 async fn open_project(path: String) -> Result<ProjectInfo, String> {
     run_blocking(move || {
-        let info = project::scaffold(&path)?;
+        let info = project::inspect_project(&path)?;
         project::add_recent_project(&info);
         Ok(info)
     })
     .await?
+}
+
+#[tauri::command]
+async fn setup_project(path: String) -> Result<ProjectInfo, String> {
+    run_blocking(move || project::scaffold(&path)).await?
 }
 
 #[tauri::command]
@@ -1744,6 +1749,7 @@ pub fn run() {
             get_agents,
             // Project
             open_project,
+            setup_project,
             get_recent_projects,
             remove_recent_project,
             search_prompt_files,

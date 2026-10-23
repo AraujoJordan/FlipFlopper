@@ -91,8 +91,13 @@ Currently implemented:
   override native title-bar double-click behavior.
   Window-state restoration excludes `StateFlags::DECORATIONS` so legacy saved
   frameless state cannot remove native controls after an upgrade.
-- Project picker, recent projects, per-project `.agents/` scaffolding, the New
-  Project wizard, Settings window (permissions, notifications, theme, agents,
+- Project picker and recent projects: opening an existing folder only inspects
+  it; never initialize Git or create agent files on open. Optional agent setup
+  is explicit under Settings → General → Set up locally. It preserves existing
+  and tracked files and locally excludes only newly generated files through
+  Git's resolved `info/exclude` (including nested projects and worktrees).
+  New Project creates a new folder and initializes Git when available; agent
+  setup remains opt-in. Settings window (permissions, notifications, theme, agents,
   shortcuts, about), keyboard shortcut reference (`?`), light/dark theme.
 - In-app auto-updater (Windows/Linux only; macOS is gated out and updates via
   Homebrew). Signing keypair lives in GitHub secrets (`TAURI_PRIVATE_KEY` /
@@ -228,7 +233,7 @@ src-tauri/src/
   pty.rs                     portable-pty shell sessions
   agents.rs                  static agent registry, PATH/version detection,
                              headless one-shot helper
-  project.rs                 AGENTS.md/.agents scaffolding, recents, skills,
+  project.rs                 read-only inspection, opt-in local agent setup, recents, skills,
                              prompt file search
   git.rs / review.rs         shell-based git ops; diff parser for DiffPane
   worktree.rs                isolated git worktrees (pure git plumbing)
@@ -283,8 +288,13 @@ requires generated output.
 - Shell PTYs: output is bridged to `pty://{session_id}` and
   `pty-exit://{session_id}`. `pty::kill_session` kills the child directly; do
   not regress this to only dropping PTY handles.
-- `project::scaffold` must be idempotent and must not overwrite user-created
-  `AGENTS.md`, `.agents/settings.json`, or `.agents/context.md`.
+- `project::inspect_project` must not write project files or initialize Git.
+  `project::scaffold` is explicit opt-in only: require Git, preserve existing
+  entries (including broken symlinks) and tracked paths even when deleted,
+  install exact-file local exclusions before creating missing defaults, and
+  never modify the shared root `.gitignore`. Do not blanket-ignore `.agents/`
+  or retroactively hide existing files of unknown ownership. Resolve metadata
+  with `git rev-parse --git-path`; `.git` may be a file in linked worktrees.
 - `review.rs` shells out to `git diff` and parses unified diff text; keep it
   tolerant of malformed lines.
 - `worktree.rs` is pure git plumbing and does not know how agents run. The

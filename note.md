@@ -389,6 +389,30 @@ Shared primitives cover the following IDs; adaptations preserve current app beha
   correction; Cursor's authenticated ACP limitation remains unverified/unchanged.
 
 
+# Local project setup follow-up (2026-10-23)
+
+- User chose to leave existing projects untouched on open and create setup files
+  only when explicitly requested. Opening previously called `project::scaffold`,
+  which created instructions, aliases, `.agents/` defaults and sometimes Git.
+- Opening now only inspects the folder; Settings → General → Set up locally
+  provides explicit setup in an existing Git repository. New Project still
+  creates its requested folder and initializes Git, but agent files are opt-in.
+- Setup excludes only missing, untracked files it plans to create, using Git's
+  resolved local `info/exclude`, before creating them. Exact-file patterns leave
+  shared skills and other `.agents/` content visible. Existing files, deleted
+  tracked paths, broken aliases, root `.gitignore` and existing exclude bytes
+  are preserved; redirected `.agents/`/exclude writes are refused.
+- Existing files created by older versions are not automatically deleted,
+  hidden or untracked: ownership cannot be inferred safely. Git ignores apply
+  to untracked files; already tracked files remain visible to the team.
+- Setup also verifies ignore rules before creating files: shared `.gitignore`
+  negations can override local exclusions, so those conflicts stop setup.
+- Validation: TypeScript check, production Vite build, chat regressions (18),
+  Rust check and library tests (112 passed, 6 opt-in tests ignored). Filesystem
+  cases cover read-only opening, opt-in/idempotent creation, preserved tracked
+  and existing files, nested roots, linked worktrees, exclusion failures and
+  broken/redirected symlinks. No release or commit in this follow-up.
+
 # Release 0.12.0 preparation (2026-10-23)
 
 - User requested commit, push, GitHub release and Homebrew update. Version aligned

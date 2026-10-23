@@ -212,6 +212,9 @@ export const getAgents = (includeVersions = true): Promise<AgentInfo[]> =>
 export const openProject = (path: string): Promise<ProjectInfo> =>
   invoke("open_project", { path });
 
+export const setupProject = (path: string): Promise<ProjectInfo> =>
+  invoke("setup_project", { path });
+
 export const createProject = (parentPath: string, name: string): Promise<ProjectInfo> =>
   invoke("create_project", { parentPath, name });
 

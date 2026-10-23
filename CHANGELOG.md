@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Stop creating agent instructions, `.agents/` defaults and Git repositories when opening existing projects. Make agent setup an explicit Settings action, preserve existing/tracked files and exclude only newly generated files through Git's local metadata. New projects also leave agent setup optional.
+
 ## 0.12.0 - 2026-10-23
 
 ### Added

@@ -2,7 +2,9 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 // ────────────────────────────────────────────────
 // Types
@@ -84,98 +86,218 @@ const SETTINGS_TEMPLATE: &str = r#"{
 // Scaffold
 // ────────────────────────────────────────────────
 
-/// Idempotently set up `.agents/` + `AGENTS.md` for a project.
-/// Never overwrites files the user has already created.
-pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
+/// Inspect an existing folder without creating files or initializing Git.
+pub fn inspect_project(project_path: &str) -> Result<ProjectInfo, String> {
     let root = Path::new(project_path);
-    if !root.exists() {
-        return Err(format!("Path does not exist: {project_path}"));
+    if !root.is_dir() {
+        return Err(format!("Project folder does not exist: {project_path}"));
     }
-
-    // Create AGENTS.md if absent
-    let agents_md = root.join("AGENTS.md");
-    if !agents_md.exists() {
-        fs::write(&agents_md, AGENTS_MD_TEMPLATE)
-            .map_err(|e| format!("Failed to write AGENTS.md: {e}"))?;
-    }
-
-    // Create .agents/ directory
-    let dot_agents = root.join(".agents");
-    if !dot_agents.exists() {
-        fs::create_dir_all(&dot_agents).map_err(|e| format!("Failed to create .agents/: {e}"))?;
-    }
-
-    // settings.json
-    let settings_path = dot_agents.join("settings.json");
-    if !settings_path.exists() {
-        fs::write(&settings_path, SETTINGS_TEMPLATE)
-            .map_err(|e| format!("Failed to write settings.json: {e}"))?;
-    }
-
-    // context.md (rolling handoff journal)
-    let context_path = dot_agents.join("context.md");
-    if !context_path.exists() {
-        fs::write(&context_path, "# Agent context journal\n\n")
-            .map_err(|e| format!("Failed to write context.md: {e}"))?;
-    }
-
-    // .gitignore — keep generated handoff.md out of the user's repo
-    let gitignore_path = dot_agents.join(".gitignore");
-    if !gitignore_path.exists() {
-        fs::write(&gitignore_path, "handoff.md\n")
-            .map_err(|e| format!("Failed to write .agents/.gitignore: {e}"))?;
-    }
-
-    // Create CLAUDE.md symlink → AGENTS.md (macOS/Linux only; skip on Windows without elevation)
-    #[cfg(unix)]
-    {
-        let claude_md = root.join("CLAUDE.md");
-        if !claude_md.exists() {
-            let _ = std::os::unix::fs::symlink("AGENTS.md", &claude_md);
-        }
-        let agy_md = root.join("AGY.md");
-        if !agy_md.exists() {
-            let _ = std::os::unix::fs::symlink("AGENTS.md", &agy_md);
-        }
-    }
-    // On Windows fall back to a copy (no privilege requirement for files)
-    #[cfg(windows)]
-    {
-        let claude_md = root.join("CLAUDE.md");
-        if !claude_md.exists() {
-            let _ = fs::copy(&agents_md, &claude_md);
-        }
-        let agy_md = root.join("AGY.md");
-        if !agy_md.exists() {
-            let _ = fs::copy(&agents_md, &agy_md);
-        }
-    }
-
-    // Auto-init git for a plain, ungitted folder so the app's git-centric
-    // features (status, timeline, review) work out of the box. Skip if the
-    // path is already inside a work tree (its own repo or a subfolder of a
-    // parent repo) so we never create a nested `.git`. Best-effort: a missing
-    // git binary must not fail project open.
-    let is_git = if crate::git::is_inside_work_tree(project_path) {
-        true
-    } else {
-        crate::git::init_repo(project_path).is_ok()
-    };
-    let name = root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| project_path.to_string());
-
     Ok(ProjectInfo {
-        path: project_path.to_string(),
-        name,
-        has_agents_md: true,
-        is_git,
+        path: project_path.into(),
+        name: root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project_path.into()),
+        has_agents_md: root.join("AGENTS.md").is_file(),
+        is_git: crate::git::is_inside_work_tree(project_path),
     })
 }
 
-/// Create a new project as one direct child of an existing parent, then apply
-/// the same idempotent FlipFlopper scaffold used by `open_project`.
+static SETUP_LOCK: Mutex<()> = Mutex::new(());
+const SETUP_FILES: &[&str] = &[
+    "AGENTS.md",
+    "CLAUDE.md",
+    "AGY.md",
+    ".agents/settings.json",
+    ".agents/context.md",
+    ".agents/.gitignore",
+];
+
+fn missing_path(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false), // Preserve symlinks too, including broken ones.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(format!("Cannot inspect {}: {error}", path.display())),
+    }
+}
+
+/// Exclude only the planned new files, using Git's actual metadata location
+/// (also works with subfolders, linked worktrees and submodules).
+fn exclude_local_setup(project_path: &str, files: &[&str]) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let repo = crate::git::git(project_path, &["rev-parse", "--show-toplevel"])?;
+    let repo = Path::new(&repo)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let root = Path::new(project_path)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let relative = root
+        .strip_prefix(&repo)
+        .map_err(|error| error.to_string())?;
+    let mut prefix = String::new();
+    for component in relative.components() {
+        for ch in component.as_os_str().to_string_lossy().chars() {
+            if ch == '\n' || ch == '\r' {
+                return Err("Local setup cannot exclude paths containing newlines".into());
+            }
+            if "\\ !#*?[]".contains(ch) {
+                prefix.push('\\');
+            }
+            prefix.push(ch);
+        }
+        prefix.push('/');
+    }
+    // Keep Git's default path form: --path-format=absolute canonicalizes the
+    // final symlink, which would hide a redirected exclude file from this check.
+    let exclude = crate::git::git(project_path, &["rev-parse", "--git-path", "info/exclude"])?;
+    let exclude = PathBuf::from(exclude);
+    let exclude = if exclude.is_absolute() {
+        exclude
+    } else {
+        root.join(exclude)
+    };
+    if fs::symlink_metadata(&exclude).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err("Local Git exclude file is a symlink; leaving its target untouched. Configure local excludes manually.".into());
+    }
+    let original = match fs::read(&exclude) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("Cannot read local Git excludes: {error}")),
+    };
+    let patterns: Vec<_> = files
+        .iter()
+        .map(|file| format!("/{prefix}{file}"))
+        .filter(|pattern| {
+            !original
+                .split(|byte| *byte == b'\n')
+                .any(|line| line.strip_suffix(b"\r").unwrap_or(line) == pattern.as_bytes())
+        })
+        .collect();
+    if patterns.is_empty() {
+        return Ok(());
+    }
+    let mut addition = Vec::new();
+    if !original.is_empty() && !original.ends_with(b"\n") {
+        addition.push(b'\n');
+    }
+    addition.extend_from_slice(b"# FlipFlopper local agent setup (not shared)\n");
+    for pattern in patterns {
+        addition.extend_from_slice(pattern.as_bytes());
+        addition.push(b'\n');
+    }
+    if let Some(parent) = exclude.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Cannot create local Git exclude folder: {error}"))?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude)
+        .and_then(|mut file| file.write_all(&addition))
+        .map_err(|error| {
+            format!("Cannot write local Git excludes; no setup files were created: {error}")
+        })
+}
+
+/// Explicit opt-in only. Preserve existing/tracked files and install local
+/// excludes before creating anything, so an ignore failure leaves no scaffold.
+pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
+    let _setup = SETUP_LOCK.lock().map_err(|error| error.to_string())?;
+    let info = inspect_project(project_path)?;
+    if !info.is_git {
+        return Err(
+            "Local agent setup requires an existing Git repository. Initialize Git first.".into(),
+        );
+    }
+    let root = Path::new(project_path);
+    let tracked = crate::git::git(
+        project_path,
+        &[
+            "ls-files",
+            "-z",
+            "--",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "AGY.md",
+            ".agents",
+        ],
+    )?;
+    let tracked: HashSet<_> = tracked
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
+    let agents_md = root.join("AGENTS.md");
+    if !info.has_agents_md && (!missing_path(&agents_md)? || tracked.contains("AGENTS.md")) {
+        return Err("Existing AGENTS.md is missing or is not a readable file; restore it before setting up agent files.".into());
+    }
+    let dot_agents = root.join(".agents");
+    if tracked.contains(".agents") {
+        return Err(
+            "Existing .agents path is a tracked file or symlink; leaving it untouched.".into(),
+        );
+    }
+    if !missing_path(&dot_agents)? {
+        let metadata = fs::symlink_metadata(&dot_agents).map_err(|error| error.to_string())?;
+        if !metadata.is_dir() {
+            return Err(
+                "Existing .agents path is not a regular directory; leaving it untouched.".into(),
+            );
+        }
+    }
+    let mut planned = Vec::new();
+    for file in SETUP_FILES {
+        if !tracked.contains(file) && missing_path(&root.join(file))? {
+            planned.push(*file);
+        }
+    }
+    exclude_local_setup(project_path, &planned)?;
+    for file in &planned {
+        // Shared .gitignore negations take precedence over info/exclude. Do
+        // not create files that would still appear in the team's Git status.
+        crate::git::git(project_path, &["check-ignore", "--quiet", "--", file])
+            .map_err(|_| format!("Git could not locally exclude {file}; shared ignore rules may override local excludes. No setup files were created."))?;
+    }
+    for file in &planned {
+        let path = root.join(file);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
+        }
+        #[cfg(unix)]
+        if *file == "CLAUDE.md" || *file == "AGY.md" {
+            match std::os::unix::fs::symlink("AGENTS.md", &path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(format!("Cannot create {}: {error}", path.display())),
+            }
+            continue;
+        }
+        let content = match *file {
+            "AGENTS.md" => AGENTS_MD_TEMPLATE.as_bytes().to_vec(),
+            ".agents/settings.json" => SETTINGS_TEMPLATE.as_bytes().to_vec(),
+            ".agents/context.md" => b"# Agent context journal\n\n".to_vec(),
+            ".agents/.gitignore" => b"handoff.md\n".to_vec(),
+            _ => fs::read(&agents_md).map_err(|error| error.to_string())?, // Windows aliases are copies.
+        };
+        match fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(mut output) => output
+                .write_all(&content)
+                .map_err(|error| format!("Cannot write {}: {error}", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(format!("Cannot create {}: {error}", path.display())),
+        }
+    }
+    inspect_project(project_path)
+}
+
+/// Create one new folder with Git when available. Agent files remain opt-in.
 pub fn create_project(parent_path: &str, name: &str) -> Result<ProjectInfo, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -201,15 +323,11 @@ pub fn create_project(parent_path: &str, name: &str) -> Result<ProjectInfo, Stri
     }
     fs::create_dir(&target).map_err(|e| format!("Failed to create project folder: {e}"))?;
 
-    match scaffold(&target.to_string_lossy()) {
-        Ok(info) => Ok(info),
-        Err(error) => {
-            // Only remove a still-empty directory. Partial scaffold output is
-            // intentionally retained so no successful write is hidden.
-            let _ = fs::remove_dir(&target);
-            Err(error)
-        }
+    let target_path = target.to_string_lossy();
+    if !crate::git::is_inside_work_tree(&target_path) {
+        let _ = crate::git::init_repo(&target_path);
     }
+    inspect_project(&target_path)
 }
 
 // ────────────────────────────────────────────────
@@ -945,14 +1063,289 @@ mod create_project_tests {
     }
 
     #[test]
-    fn creates_and_scaffolds_a_direct_child() {
+    fn creates_a_direct_child_without_automatic_agent_files() {
         let parent = temp_parent();
         let info = create_project(parent.to_str().unwrap(), "sample-app").unwrap();
         let target = parent.join("sample-app");
         assert_eq!(Path::new(&info.path), target);
-        assert!(target.join("AGENTS.md").is_file());
-        assert!(target.join(".agents/settings.json").is_file());
+        assert!(info.is_git);
+        assert!(!info.has_agents_md);
+        assert!(!target.join("AGENTS.md").exists());
+        assert!(!target.join(".agents").exists());
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn inspecting_existing_folders_never_adds_setup_or_git_files() {
+        let root = temp_parent();
+        let path = root.to_str().unwrap();
+        fs::write(root.join("project.txt"), "existing project").unwrap();
+        let info = inspect_project(path).unwrap();
+        assert!(!info.is_git);
+        assert!(!info.has_agents_md);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        assert!(scaffold(path).is_err());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+
+        crate::git::init_repo(path).unwrap();
+        fs::write(root.join("AGENTS.md"), "team instructions").unwrap();
+        let exclude = fs::read(root.join(".git/info/exclude")).unwrap();
+        let before =
+            crate::git::git(path, &["status", "--porcelain", "--untracked-files=all"]).unwrap();
+        let info = inspect_project(path).unwrap();
+        assert!(info.is_git && info.has_agents_md);
+        assert_eq!(fs::read(root.join(".git/info/exclude")).unwrap(), exclude);
+        assert_eq!(
+            crate::git::git(path, &["status", "--porcelain", "--untracked-files=all"]).unwrap(),
+            before
+        );
+        assert!(!root.join("AGY.md").exists());
+        assert!(!root.join(".agents").exists());
+        assert!(inspect_project(root.join("project.txt").to_str().unwrap()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_setup_is_locally_ignored_and_idempotent() {
+        let root = temp_parent();
+        let path = root.to_str().unwrap();
+        crate::git::init_repo(path).unwrap();
+        let exclude = root.join(".git/info/exclude");
+        let previous = b"# existing local rules\r\n/local-only\xff";
+        fs::write(&exclude, previous).unwrap();
+        assert!(scaffold(path).unwrap().has_agents_md);
+        for file in SETUP_FILES {
+            assert!(root.join(file).is_file(), "missing {file}");
+            assert!(
+                crate::git::git(path, &["check-ignore", "--", file]).is_ok(),
+                "not excluded: {file}"
+            );
+        }
+        assert!(
+            crate::git::git(path, &["status", "--porcelain", "--untracked-files=all"])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!root.join(".gitignore").exists());
+        let first = fs::read(&exclude).unwrap();
+        assert!(first.starts_with(previous));
+        scaffold(path).unwrap();
+        assert_eq!(fs::read(&exclude).unwrap(), first);
+
+        fs::create_dir_all(root.join(".agents/skills")).unwrap();
+        fs::write(root.join(".agents/skills/team.md"), "shared skill").unwrap();
+        assert!(crate::git::git(path, &["check-ignore", "--", ".agents/skills/team.md"]).is_err());
+        assert!(
+            crate::git::git(path, &["status", "--porcelain", "--untracked-files=all"])
+                .unwrap()
+                .contains(".agents/skills/team.md")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_preserves_existing_and_deleted_tracked_files() {
+        let root = temp_parent();
+        let path = root.to_str().unwrap();
+        crate::git::init_repo(path).unwrap();
+        fs::create_dir(root.join(".agents")).unwrap();
+        fs::write(root.join("AGENTS.md"), "team instructions").unwrap();
+        fs::write(root.join("AGY.md"), "personal instructions").unwrap();
+        fs::write(root.join(".agents/settings.json"), "team settings").unwrap();
+        fs::write(root.join(".agents/context.md"), "team context").unwrap();
+        fs::write(root.join(".gitignore"), "build/\n").unwrap();
+        crate::git::git(
+            path,
+            &[
+                "add",
+                "--",
+                "AGENTS.md",
+                ".agents/settings.json",
+                ".agents/context.md",
+            ],
+        )
+        .unwrap();
+        fs::remove_file(root.join(".agents/context.md")).unwrap();
+        scaffold(path).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("AGENTS.md")).unwrap(),
+            "team instructions"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("AGY.md")).unwrap(),
+            "personal instructions"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".agents/settings.json")).unwrap(),
+            "team settings"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".gitignore")).unwrap(),
+            "build/\n"
+        );
+        assert!(!root.join(".agents/context.md").exists());
+        let exclude = fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+        for file in [
+            "AGENTS.md",
+            "AGY.md",
+            ".agents/settings.json",
+            ".agents/context.md",
+        ] {
+            assert!(!exclude.lines().any(|line| line == format!("/{file}")));
+        }
+        fs::write(root.join("AGENTS.md"), "changed team instructions").unwrap();
+        assert!(crate::git::git(path, &["diff", "--", "AGENTS.md"])
+            .unwrap()
+            .contains("changed team instructions"));
+        fs::remove_file(root.join("AGENTS.md")).unwrap();
+        assert!(scaffold(path).is_err());
+        assert!(!root.join("AGENTS.md").exists());
+        fs::remove_dir_all(root).unwrap();
+
+        let root = temp_parent();
+        let path = root.to_str().unwrap();
+        crate::git::init_repo(path).unwrap();
+        fs::write(root.join(".agents"), "tracked file").unwrap();
+        crate::git::git(path, &["add", "--", ".agents"]).unwrap();
+        fs::remove_file(root.join(".agents")).unwrap();
+        assert!(scaffold(path).is_err());
+        assert!(!root.join(".agents").exists());
+        assert!(!root.join("AGENTS.md").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_setup_excludes_only_the_selected_folder() {
+        let root = temp_parent();
+        let path = root.to_str().unwrap();
+        crate::git::init_repo(path).unwrap();
+        let nested = root.join("workspace [one]");
+        fs::create_dir(&nested).unwrap();
+        scaffold(nested.to_str().unwrap()).unwrap();
+        for file in SETUP_FILES {
+            let relative = format!("workspace [one]/{file}");
+            assert!(
+                crate::git::git(path, &["check-ignore", "--", &relative]).is_ok(),
+                "not excluded: {relative}"
+            );
+        }
+        fs::write(root.join("AGY.md"), "unrelated instructions").unwrap();
+        assert!(crate::git::git(path, &["check-ignore", "--", "AGY.md"]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_resolves_linked_worktree_metadata() {
+        let root = temp_parent();
+        let repo = root.join("repo");
+        let worktree = root.join("worktree");
+        fs::create_dir(&repo).unwrap();
+        let path = repo.to_str().unwrap();
+        crate::git::init_repo(path).unwrap();
+        let hooks = root.join("empty-hooks");
+        fs::create_dir(&hooks).unwrap();
+        crate::git::git(path, &["config", "core.hooksPath", hooks.to_str().unwrap()]).unwrap();
+        crate::git::git(
+            path,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        )
+        .unwrap();
+        crate::git::git(
+            path,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        )
+        .unwrap();
+        let marker = fs::read(worktree.join(".git")).unwrap();
+        let worktree_path = worktree.to_str().unwrap();
+        scaffold(worktree_path).unwrap();
+        assert_eq!(fs::read(worktree.join(".git")).unwrap(), marker);
+        assert!(crate::git::git(worktree_path, &["check-ignore", "--", "AGY.md"]).is_ok());
+        assert!(fs::read_to_string(repo.join(".git/info/exclude"))
+            .unwrap()
+            .contains("/AGY.md"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exclude_failure_creates_no_agent_files() {
+        let root = temp_parent();
+        let path = root.to_str().unwrap();
+        crate::git::init_repo(path).unwrap();
+        let exclude = root.join(".git/info/exclude");
+        fs::remove_file(&exclude).unwrap();
+        fs::create_dir(&exclude).unwrap();
+        assert!(scaffold(path).is_err());
+        assert!(!root.join("AGENTS.md").exists());
+        assert!(!root.join(".agents").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_unignore_rules_prevent_visible_setup_files() {
+        let root = temp_parent();
+        let path = root.to_str().unwrap();
+        crate::git::init_repo(path).unwrap();
+        fs::write(root.join(".gitignore"), "!AGY.md\n").unwrap();
+        let error = scaffold(path).unwrap_err();
+        assert!(error.contains("AGY.md"));
+        assert!(!root.join("AGENTS.md").exists());
+        assert!(!root.join(".agents").exists());
+        assert_eq!(
+            fs::read_to_string(root.join(".gitignore")).unwrap(),
+            "!AGY.md\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_preserves_broken_aliases_and_refuses_redirected_writes() {
+        let root = temp_parent();
+        let path = root.to_str().unwrap();
+        crate::git::init_repo(path).unwrap();
+        std::os::unix::fs::symlink("missing-instructions.md", root.join("AGY.md")).unwrap();
+        scaffold(path).unwrap();
+        assert_eq!(
+            fs::read_link(root.join("AGY.md")).unwrap(),
+            Path::new("missing-instructions.md")
+        );
+        assert!(crate::git::git(path, &["check-ignore", "--", "AGY.md"]).is_err());
+        fs::remove_dir_all(root).unwrap();
+
+        for redirect_agents_dir in [false, true] {
+            let root = temp_parent();
+            let path = root.to_str().unwrap();
+            crate::git::init_repo(path).unwrap();
+            let external = root.join("external");
+            if redirect_agents_dir {
+                fs::create_dir(&external).unwrap();
+                std::os::unix::fs::symlink(&external, root.join(".agents")).unwrap();
+            } else {
+                fs::write(&external, "existing rules").unwrap();
+                let exclude = root.join(".git/info/exclude");
+                fs::remove_file(&exclude).unwrap();
+                std::os::unix::fs::symlink(&external, &exclude).unwrap();
+            }
+            assert!(scaffold(path).is_err());
+            assert!(!root.join("AGENTS.md").exists());
+            if redirect_agents_dir {
+                assert_eq!(fs::read_dir(&external).unwrap().count(), 0);
+            } else {
+                assert_eq!(fs::read_to_string(&external).unwrap(), "existing rules");
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

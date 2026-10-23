@@ -11,7 +11,7 @@ export async function refreshRecentProjects() {
   }
 }
 
-/** Open (and scaffold) a project, make it the current one, and aim the next
+/** Inspect a project without adding files, make it current, and aim the next
  *  new session at it. */
 export async function openProjectPath(path: string): Promise<ProjectInfo | null> {
   try {

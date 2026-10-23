@@ -9,7 +9,7 @@ import { openSide } from "../lib/layout";
 import { homeDir } from "@tauri-apps/api/path";
 import { checkForUpdates, isUpdaterEnabled } from "../lib/updater";
 import { AgentLogo } from "../lib/agentMeta";
-import { agentRuntimeInfo, openTerminal, ptySendLine, getAgents, type AgentRuntimeInfo, type PermissionMode } from "../lib/ipc";
+import { agentRuntimeInfo, openTerminal, ptySendLine, getAgents, setupProject, type AgentRuntimeInfo, type PermissionMode } from "../lib/ipc";
 import { candidates, scanImportable, scanning, setImportOpen } from "../lib/importer";
 import { installAgent, installable, installing, loadInstallable } from "../lib/install";
 import { Checkbox, Spinner, toast, useValueMotion, useSelectionMotion } from "./ui";
@@ -57,6 +57,18 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
   const [version, setVersion] = createSignal("");
   const [runtimes, setRuntimes] = createSignal<Record<string, AgentRuntimeInfo>>({});
   const [refreshingAgents, setRefreshingAgents] = createSignal(false);
+  const [settingUpProject, setSettingUpProject] = createSignal(false);
+  async function setupLocalAgentFiles() {
+    const project = store.currentProject;
+    if (!project || settingUpProject()) return;
+    setSettingUpProject(true);
+    try {
+      const info = await setupProject(project.path);
+      if (store.currentProject?.path === project.path) setStore("currentProject", info);
+      toast("Local agent setup is ready. Existing files were preserved.", "success");
+    } catch (error) { toast(`Could not set up local agent files: ${String(error)}`, "error"); }
+    finally { setSettingUpProject(false); }
+  }
   async function refreshAgents() {
     setRefreshingAgents(true);
     try {
@@ -120,6 +132,16 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
 
             <Show when={section() === "general"}>
               <h2>General</h2>
+              <Show when={store.currentProject}>
+                {(project) => <Row title={`Local agent setup · ${project().name}`} hint={project().is_git
+                  ? "Optional: creates missing AGENTS.md, CLAUDE.md, AGY.md and .agents defaults. Newly generated files are excluded only in this local Git clone; existing files stay unchanged."
+                  : "Opening a folder adds no files. Initialize Git first to enable local-only agent setup."}>
+                  <button class="ui-btn ui-btn-outline settings-btn" disabled={settingUpProject() || !project().is_git} onClick={() => void setupLocalAgentFiles()}>
+                    <Show when={settingUpProject()}><Spinner size={12} /></Show>
+                    {settingUpProject() ? "Setting up…" : "Set up locally"}
+                  </button>
+                </Row>}
+              </Show>
               <Row title={chat.activeId ? "Session permissions" : "Default permissions"} hint={chat.activeId ? "Changes this conversation. Native agents update live; other running CLIs apply the change next turn." : "Used for new sessions. You can change it per session from the composer."}>
                 <div class="seg">
                   <For each={MODES}>
