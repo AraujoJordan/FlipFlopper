@@ -57,6 +57,14 @@ Currently implemented:
   Claude's typed `incomplete_tool_call` failure ends the turn with an error but
   retains the native connection for an explicit follow-up; never automatically
   replay that prompt because the unfinished tool may already have run.
+- The ACP client opts in to Claude's `session.notices`, `session.compaction` and
+  `subagents` capabilities. They become additive `notice`, `compaction`,
+  `subagent` and `subagent_tool` events (subagent tool calls render inside the
+  subagent card; its permission requests are accepted for announced child
+  sessions; `chat_cancel_subagent` stops one child). `session_info_update`
+  becomes `title_changed`, applied unless the user renamed the session
+  (`SessionMeta.title_locked`). The composer shows a context ring from
+  `context_usage`; clicking it runs `/agent:compact`.
 - Native model/effort/command catalogs come from the connected agent, including
   model-dependent option updates. `/agent:<command>` distinguishes native
   commands from local app actions. Images up to 20 MiB use structured ACP image

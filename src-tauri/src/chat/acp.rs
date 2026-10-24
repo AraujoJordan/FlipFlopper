@@ -189,6 +189,8 @@ struct Live {
     defaults: Vec<Value>,
     tools: HashMap<String, Value>,
     seen_tools: std::collections::HashSet<String>,
+    /// Native subagent session ids announced during this connection.
+    children: std::collections::HashSet<String>,
 }
 impl Live {
     fn flush(&mut self) {
@@ -288,11 +290,31 @@ impl Live {
         if self.current.is_none() && self.state.native_session_id.is_none() {
             self.state.native_session_id = params["sessionId"].as_str().map(String::from);
         }
-        if params["sessionId"].as_str() != self.state.native_session_id.as_deref() {
+        let sid = params["sessionId"].as_str();
+        if sid != self.state.native_session_id.as_deref() {
+            if let Some(child) = sid.filter(|s| self.children.contains(*s)) {
+                self.child_update(child, &params["update"]);
+            }
             return;
         }
         let u = &params["update"];
         match u["sessionUpdate"].as_str().unwrap_or("") {
+            "subagent_update" => {
+                if let Some(id) = u["sessionId"].as_str() {
+                    self.children.insert(id.into());
+                    let text = |v: &Value| v.as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
+                    self.emit(ChatEvent::Subagent {
+                        id: id.into(),
+                        title: text(&u["title"]),
+                        description: text(&u["description"]),
+                        prompt: None,
+                        state: text(&u["state"]["state"]),
+                        stop_reason: text(&u["state"]["stopReason"]),
+                        error: text(&u["state"]["error"]["message"]),
+                        launched_by: None,
+                    });
+                }
+            }
             "agent_message_chunk" => {
                 if let Some(t) = u["content"]["text"].as_str() {
                     self.delta(t, false);
@@ -334,6 +356,36 @@ impl Live {
                 };
                 self.publish();
             }
+            "session_info_update" => {
+                if let Some(title) = u["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+                    self.emit(ChatEvent::TitleChanged { title: title.chars().take(120).collect() });
+                }
+            }
+            "notice" => {
+                if let Some(title) = u["title"].as_str() {
+                    self.emit(ChatEvent::Notice {
+                        severity: u["severity"].as_str().unwrap_or("info").into(),
+                        title: title.into(),
+                        description: u["description"].as_str().map(String::from),
+                    });
+                }
+            }
+            "compaction_update" => {
+                if let Some(id) = u["compactionId"].as_str() {
+                    let summary = content_text_blocks(&u["summary"]);
+                    self.emit(ChatEvent::Compaction {
+                        id: id.into(),
+                        status: u["status"].as_str().unwrap_or("in_progress").into(),
+                        summary: (!summary.is_empty()).then_some(summary),
+                        error: u["error"].as_str().map(String::from),
+                    });
+                }
+            }
+            "compaction_summary_chunk" => {
+                if let (Some(id), Some(text)) = (u["compactionId"].as_str(), u["content"]["text"].as_str()) {
+                    self.emit(ChatEvent::Compaction { id: id.into(), status: "in_progress".into(), summary: Some(text.into()), error: None });
+                }
+            }
             "usage_update" => {
                 if let (Some(used), Some(size)) = (u["used"].as_u64(), u["size"].as_u64()) {
                     self.emit(ChatEvent::ContextUsage {
@@ -345,6 +397,21 @@ impl Live {
                             None
                         },
                     });
+                }
+            }
+            _ => {}
+        }
+    }
+    /// Updates addressed to a subagent's own session: its tool calls and the
+    /// prompt it was given. Its prose is left out; the parent's tool result
+    /// carries the final answer.
+    fn child_update(&mut self, child: &str, u: &Value) {
+        match u["sessionUpdate"].as_str().unwrap_or("") {
+            "tool_call" | "tool_call_update" => self.tool_for(u, Some(child)),
+            "session_message" => {
+                let prompt = content_text_blocks(&u["content"]);
+                if !prompt.is_empty() {
+                    self.emit(ChatEvent::Subagent { id: child.into(), title: None, description: None, prompt: Some(prompt), state: None, stop_reason: None, error: None, launched_by: u["messageId"].as_str().filter(|m| !m.contains(":prompt:")).map(String::from) });
                 }
             }
             _ => {}
@@ -373,6 +440,9 @@ impl Live {
         }
     }
     fn tool(&mut self, u: &Value) {
+        self.tool_for(u, None);
+    }
+    fn tool_for(&mut self, u: &Value, owner: Option<&str>) {
         if self.current.is_none() {
             return;
         }
@@ -415,6 +485,9 @@ impl Live {
                 title,
                 input,
             });
+            if let Some(owner) = owner {
+                self.emit(ChatEvent::SubagentTool { id: id.clone(), subagent: owner.into() });
+            }
         } else {
             self.emit(ChatEvent::ToolUpdated {
                 id: id.clone(),
@@ -446,6 +519,12 @@ impl Live {
             });
         }
     }
+}
+/// Text of a bare `[{type:"text",text}]` content list (compaction summaries).
+fn content_text_blocks(v: &Value) -> String {
+    v.as_array()
+        .map(|a| a.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default()
 }
 fn content_text(v: &Value) -> String {
     v.as_array()
@@ -537,6 +616,16 @@ impl Connection {
                 }
             }
         });
+    }
+    /// Cancel one subagent without ending the parent's turn.
+    pub fn cancel_subagent(&self, child: &str) -> Result<(), String> {
+        if !self.live.lock().unwrap().children.contains(child) {
+            return Err("Unknown subagent".into());
+        }
+        let cx = self.cx.lock().unwrap();
+        let cx = cx.as_ref().ok_or("The agent is not connected")?;
+        cx.send_notification(UntypedMessage::new("session/cancel", json!({"sessionId":child})).unwrap())
+            .map_err(|e| e.to_string())
     }
     pub fn respond(
         &self,
@@ -740,6 +829,18 @@ impl Pool {
             .ok_or("This request is no longer active")?;
         c.respond(turn, id, response)
     }
+    pub fn cancel_subagent(&self, session: &str, child: &str) -> Result<(), String> {
+        let c = self
+            .connections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| key.starts_with(&format!("{session}:")))
+            .map(|(_, c)| c.clone())
+            .find(|c| c.live.lock().unwrap().children.contains(child))
+            .ok_or("This subagent is no longer active")?;
+        c.cancel_subagent(child)
+    }
     pub fn cancel(&self, session: &str) {
         let list: Vec<_> = self
             .connections
@@ -866,6 +967,7 @@ fn start_connection(
             defaults: Vec::new(),
             tools: HashMap::new(),
             seen_tools: Default::default(),
+            children: Default::default(),
         })),
         cx: Mutex::new(None),
         mode_lock: tokio::sync::Mutex::new(()),
@@ -1032,7 +1134,7 @@ async fn run_agent(
     ready: mpsc::SyncSender<Result<(), String>>,
 ) -> Result<(), agent_client_protocol::Error> {
     *foreground.cx.lock().unwrap() = Some(cx.clone());
-    let init=request(&cx,"initialize",json!({"protocolVersion":1,"clientInfo":{"name":"FlipFlopper","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{"_meta":{"parameterizedModelPicker":true},"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"elicitation":{"form":{},"url":{}}}})).await.map_err(acp_error)?;
+    let init=request(&cx,"initialize",json!({"protocolVersion":1,"clientInfo":{"name":"FlipFlopper","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{"_meta":{"parameterizedModelPicker":true},"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"elicitation":{"form":{},"url":{}},"session":{"notices":{},"compaction":{}},"subagents":{}}})).await.map_err(acp_error)?;
     if init["protocolVersion"] != 1 {
         return Err(acp_error("Incompatible ACP protocol; update the agent CLI"));
     }
@@ -1406,7 +1508,7 @@ fn handle_request(
         .params
         .get("sessionId")
         .and_then(Value::as_str)
-        .is_some_and(|id| Some(id) != live.state.native_session_id.as_deref())
+        .is_some_and(|id| Some(id) != live.state.native_session_id.as_deref() && !live.children.contains(id))
     {
         return responder.respond_with_error(acp_error("Unknown session"));
     }
@@ -1539,6 +1641,7 @@ mod tests {
                 defaults: Vec::new(),
                 tools: HashMap::new(),
                 seen_tools: Default::default(),
+                children: Default::default(),
             },
             rx,
         )
@@ -1564,6 +1667,46 @@ mod tests {
         assert!(
             matches!(rx.recv().unwrap(),Message::Event(ChatEvent::Text{delta}) if delta=="hello")
         );
+    }
+    #[test]
+    fn native_titles_notices_and_compaction_become_events() {
+        let (mut l, rx) = live();
+        for update in [
+            json!({"sessionUpdate":"session_info_update","title":"  Fix the login bug "}),
+            json!({"sessionUpdate":"notice","severity":"warning","title":"Rate limited","description":"Retrying"}),
+            json!({"sessionUpdate":"compaction_update","compactionId":"c1","status":"in_progress"}),
+            json!({"sessionUpdate":"compaction_summary_chunk","compactionId":"c1","content":{"type":"text","text":"Summary"}}),
+            json!({"sessionUpdate":"compaction_update","compactionId":"c1","status":"completed","summary":[{"type":"text","text":"Tail"}]}),
+        ] {
+            l.notification("session/update", &json!({"sessionId":"native","update":update}));
+        }
+        let events: Vec<_> = rx.try_iter().filter_map(|m| match m { Message::Event(e) => Some(e), _ => None }).collect();
+        assert!(matches!(&events[0], ChatEvent::TitleChanged { title } if title == "Fix the login bug"));
+        assert!(matches!(&events[1], ChatEvent::Notice { severity, description: Some(d), .. } if severity == "warning" && d == "Retrying"));
+        assert!(matches!(&events[2], ChatEvent::Compaction { status, summary: None, .. } if status == "in_progress"));
+        assert!(matches!(&events[3], ChatEvent::Compaction { summary: Some(t), .. } if t == "Summary"));
+        assert!(matches!(&events[4], ChatEvent::Compaction { status, summary: Some(t), .. } if status == "completed" && t == "Tail"));
+    }
+    #[test]
+    fn subagent_lifecycle_and_child_tools_are_routed_to_the_subagent() {
+        let (mut l, rx) = live();
+        let send = |l: &mut Live, session: &str, update: Value| l.notification("session/update", &json!({"sessionId":session,"update":update}));
+        // Child traffic before the announcement is not ours.
+        send(&mut l, "child", json!({"sessionUpdate":"tool_call","toolCallId":"early","title":"Read","kind":"read","status":"completed"}));
+        assert!(rx.try_recv().is_err());
+        send(&mut l, "native", json!({"sessionUpdate":"subagent_update","sessionId":"child","title":"Explorer","description":"List files","state":{"state":"running"}}));
+        send(&mut l, "child", json!({"sessionUpdate":"session_message","messageId":"m","content":[{"type":"text","text":"List the files"}]}));
+        send(&mut l, "child", json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"ls","kind":"execute","status":"in_progress"}));
+        send(&mut l, "child", json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ignored"}}));
+        send(&mut l, "native", json!({"sessionUpdate":"subagent_update","sessionId":"child","state":{"state":"idle","stopReason":"end_turn"}}));
+        l.flush();
+        let events: Vec<_> = rx.try_iter().filter_map(|m| match m { Message::Event(e) => Some(e), _ => None }).collect();
+        assert!(matches!(&events[0], ChatEvent::Subagent { id, title: Some(t), state: Some(s), .. } if id == "child" && t == "Explorer" && s == "running"));
+        assert!(matches!(&events[1], ChatEvent::Subagent { prompt: Some(p), launched_by: Some(m), .. } if p == "List the files" && m == "m"));
+        assert!(matches!(&events[2], ChatEvent::ToolCall { id, .. } if id == "t1"));
+        assert!(matches!(&events[3], ChatEvent::SubagentTool { id, subagent } if id == "t1" && subagent == "child"));
+        assert!(matches!(&events[4], ChatEvent::Subagent { state: Some(s), stop_reason: Some(r), .. } if s == "idle" && r == "end_turn"));
+        assert_eq!(events.len(), 5);
     }
     #[test]
     fn tool_updates_keep_one_call_and_preserve_file_diff() {

@@ -76,6 +76,32 @@ test("request resolution and turn completion do not replay or duplicate tools", 
   assert.equal(assistant.contextUsage.used, 123);
   assert.equal(view.runtime.pending.length, 0);
 });
+test("notices, compaction and subagents reduce into blocks; old transcripts are unaffected", async () => {
+  const chat = await loadChat();
+  const view = chat.reduceTranscript([
+    event({ type: "turn_started", turn_id: "turn", agent_id: "claude" }),
+    event({ type: "notice", severity: "warning", title: "Rate limited", description: "Retrying" }),
+    event({ type: "compaction", id: "c", status: "in_progress" }),
+    event({ type: "compaction", id: "c", status: "in_progress", summary: "Sum" }),
+    event({ type: "compaction", id: "c", status: "completed", summary: "mary" }),
+    event({ type: "subagent", id: "child", title: "Explorer", state: "running" }),
+    event({ type: "tool_call", id: "launch", kind: "other", title: "Task", input: {} }),
+    event({ type: "subagent", id: "child", prompt: "List files", launched_by: "launch" }),
+    event({ type: "tool_call", id: "t1", kind: "bash", title: "ls", input: {} }),
+    event({ type: "subagent_tool", id: "t1", subagent: "child" }),
+    event({ type: "title_changed", title: "ignored by the transcript" }),
+    event({ type: "turn_ended", turn_id: "turn", status: "done", changed_files: [] }),
+  ]);
+  const blocks = view.messages[0].blocks;
+  assert.equal(blocks.find((b) => b.kind === "notice").description, "Retrying");
+  const compaction = blocks.filter((b) => b.kind === "compaction");
+  assert.equal(compaction.length, 1);
+  assert.deepEqual([compaction[0].status, compaction[0].summary], ["completed", "Summary"]);
+  const sub = blocks.find((b) => b.kind === "subagent");
+  assert.deepEqual([sub.title, sub.prompt, sub.state], ["Explorer", "List files", "idle"]);
+  assert.equal(blocks.find((b) => b.id === "t1").subagent, "child");
+  assert.equal(blocks.find((b) => b.id === "launch").subagent, "child");
+});
 test("model, effort and command pickers use the active provider catalog", async () => {
   const chat = await loadChat();
   const state = { ...runtime(), config_options: [
@@ -448,7 +474,7 @@ async function composerFixture(activeId = 's') {
     'solid-js': { ...solid, createSignal: (...args) => { const signal=solid.createSignal(...args); signals.push(signal); return signal; } },
     '../../lib/chat': {
       chat, isRunning: () => false, cycleMode() {}, modeAvailable: () => true, permissionModeUpdating: () => false, sessionModePending: () => false,
-      agentTuning: () => ({ models:[], efforts:[] }), nativeCommands: () => [],
+      agentTuning: () => ({ models:[], efforts:[] }), nativeCommands: () => [], contextUsage: () => undefined,
       submitPrompt: (...args) => { submissions.push(args); return new Promise((done) => { resolve=done; }); },
     },
     '../../lib/store': { store: { agents:[], currentProject:null }, effectiveRoot: () => null },

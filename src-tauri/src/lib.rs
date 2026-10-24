@@ -1359,6 +1359,11 @@ fn chat_cancel(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: 
 }
 
 #[tauri::command]
+fn chat_cancel_subagent(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, subagent_id: String) -> Result<(), String> {
+    state.native.cancel_subagent(&session_id, &subagent_id)
+}
+
+#[tauri::command]
 fn chat_detach_native(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String) -> Result<(), String> {
     if state.is_running(&session_id) { return Err("Stop the current turn before opening its terminal UI".into()); }
     state.native.close_session(&session_id);
@@ -1918,6 +1923,7 @@ pub fn run() {
             chat_respond,
             agent_runtime_info,
             chat_cancel,
+            chat_cancel_subagent,
             chat_update_session,
             chat_delete_session,
             chat_clear_session,

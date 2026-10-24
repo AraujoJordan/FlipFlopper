@@ -529,6 +529,7 @@ pub fn import(requests: Vec<ImportRequest>) -> Vec<SessionMeta> {
             cwd: req.cwd,
             worktree: None,
             title: req.title,
+            title_locked: false,
             agent_id: req.agent_id.clone(),
             model: None,
             effort: None,

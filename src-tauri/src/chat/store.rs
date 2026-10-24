@@ -43,6 +43,9 @@ pub struct SessionMeta {
     #[serde(default)]
     pub worktree: Option<WorktreeRef>,
     pub title: String,
+    /// Set once the user renames the session; agent-generated titles then stop applying.
+    #[serde(default)]
+    pub title_locked: bool,
     /// Agent that handles the next turn.
     pub agent_id: String,
     #[serde(default)]
@@ -599,7 +602,7 @@ mod tests {
         let meta = SessionMeta {
             id: id.into(), project_path: "/p".into(), cwd: "/p".into(), worktree: None,
             title: "Fix pty".into(), agent_id: "claude".into(), model: None, effort: None,
-            mode: PermissionMode::AutoEdit, native_ids: HashMap::new(), acp_sessions: HashMap::new(), agent_last_entry: HashMap::new(),
+            mode: PermissionMode::AutoEdit, title_locked: false, native_ids: HashMap::new(), acp_sessions: HashMap::new(), agent_last_entry: HashMap::new(),
             entry_count: 2, status: "idle".into(), archived: false, pinned: false, parent_id: None,
             created_at: 1, updated_at: 2,
         };

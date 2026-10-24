@@ -50,9 +50,26 @@ export interface ToolBlock {
   input: unknown;
   status: "running" | "ok" | "error";
   output?: string;
+  /** Set when a subagent made this call; it renders inside that subagent's card. */
+  subagent?: string;
 }
 export interface InteractionBlock { kind: "interaction"; request: AgentInteraction; outcome?: string }
-export type Block = TextBlock | ThinkingBlock | ToolBlock | InteractionBlock;
+export interface NoticeBlock { kind: "notice"; severity: string; title: string; description?: string }
+export interface CompactionBlock { kind: "compaction"; id: string; status: string; summary: string; error?: string }
+export interface SubagentBlock {
+  kind: "subagent";
+  id: string;
+  title: string;
+  description?: string;
+  prompt?: string;
+  state: string;
+  stopReason?: string;
+  error?: string;
+  /** Parent Task/Agent tool call that launched it; that row renders inside the card. */
+  launchedBy?: string;
+  startedAt: number;
+}
+export type Block = TextBlock | ThinkingBlock | ToolBlock | InteractionBlock | NoticeBlock | CompactionBlock | SubagentBlock;
 
 export interface UserMessage { id: string; role: "user"; text: string; agentId: string; ts: number; attachments: Attachment[] }
 export interface DividerMessage { id: string; role: "divider"; from: string; to: string; ts: number }
@@ -268,6 +285,7 @@ function applyEvent(view: SessionView, ev: ChatEvent, ts: number) {
     case "tool_call":
       a.blocks.push({
         kind: "tool", id: ev.id, toolKind: ev.kind, title: ev.title, input: ev.input, status: "running",
+        subagent: a.blocks.find((b): b is SubagentBlock => b.kind === "subagent" && b.launchedBy === ev.id)?.id,
       });
       break;
     case "interaction_requested":
@@ -292,6 +310,38 @@ function applyEvent(view: SessionView, ev: ChatEvent, ts: number) {
       }
       break;
     }
+    case "subagent": {
+      let block = a.blocks.find((b): b is SubagentBlock => b.kind === "subagent" && b.id === ev.id);
+      if (!block) { block = { kind: "subagent", id: ev.id, title: "", state: "running", startedAt: ts }; a.blocks.push(block); }
+      if (ev.title) block.title = ev.title;
+      if (ev.description) block.description = ev.description;
+      if (ev.prompt) block.prompt = ev.prompt;
+      if (ev.state) block.state = ev.state;
+      if (ev.stop_reason) block.stopReason = ev.stop_reason;
+      if (ev.error) block.error = ev.error;
+      if (ev.launched_by) {
+        block.launchedBy = ev.launched_by;
+        const launcher = a.blocks.find((b): b is ToolBlock => b.kind === "tool" && b.id === ev.launched_by);
+        if (launcher) launcher.subagent = ev.id;
+      }
+      break;
+    }
+    case "subagent_tool": {
+      const block = a.blocks.find((b): b is ToolBlock => b.kind === "tool" && b.id === ev.id);
+      if (block) block.subagent = ev.subagent;
+      break;
+    }
+    case "notice":
+      a.blocks.push({ kind: "notice", severity: ev.severity, title: ev.title, description: ev.description ?? undefined });
+      break;
+    case "compaction": {
+      let block = a.blocks.find((b): b is CompactionBlock => b.kind === "compaction" && b.id === ev.id);
+      if (!block) { block = { kind: "compaction", id: ev.id, status: ev.status, summary: "" }; a.blocks.push(block); }
+      block.status = ev.status;
+      if (ev.summary) block.summary += ev.summary;
+      if (ev.error) block.error = ev.error;
+      break;
+    }
     case "model":
       a.model = ev.name;
       break;
@@ -310,6 +360,7 @@ function applyEvent(view: SessionView, ev: ChatEvent, ts: number) {
       a.endedAt = ts;
       for (const b of a.blocks) {
         if (b.kind === "tool" && b.status === "running") b.status = ev.status === "done" ? "ok" : "error";
+        if (b.kind === "subagent" && (b.state === "running" || b.state === "requires_action")) { b.state = "idle"; if (ev.status !== "done") b.stopReason ??= "cancelled"; }
       }
       view.running = false;
       if (view.runtime) { view.runtime.pending = []; view.runtime.active_turn_id = null; }
@@ -470,6 +521,7 @@ function flushLiveEntries() {
     }
     for (const e of entries) {
       if (e.kind !== "event") continue;
+      if (e.event.type === "title_changed" && !chat.sessions.find((s) => s.id === id)?.title_locked) setChat("sessions", (s) => s.id === id, "title", e.event.title);
       if (e.event.type === "turn_ended") void onTurnEnded(id, e.event.status);
       // Catalog/usage updates repeat the current native mode. They must not
       // re-enable YOLO after the user has chosen the next turn's permissions.
@@ -1149,6 +1201,15 @@ export function agentTuning(agentId: string): AgentTuning | undefined {
     return (c?.options ?? []).flatMap((o) => o.options ?? (o.value ? [{ value: o.value, name: o.name ?? o.value }] : [])).map((o) => ({ id: o.value, label: o.name }));
   };
   return { models: choices("model"), efforts: choices("thought_level") };
+}
+/** Latest context-window usage reported in the active conversation. */
+export function contextUsage(): { used: number; size: number; cost: number | null } | undefined {
+  const messages = activeView()?.messages ?? [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "assistant" && m.contextUsage) return m.contextUsage;
+  }
+  return undefined;
 }
 export function nativeCommands(): { name: string; description: string }[] {
   const runtime = chat.activeId ? chat.views[chat.activeId]?.runtime : undefined;

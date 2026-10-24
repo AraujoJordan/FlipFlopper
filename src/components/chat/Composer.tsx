@@ -2,7 +2,7 @@ import {
   Component, For, Show, batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from "solid-js";
 import {
-  agentTuning, nativeCommands, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, isRunning,
+  agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, isRunning,
 } from "../../lib/chat";
 import { AgentLogo } from "../../lib/agentMeta";
 import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMode } from "../../lib/ipc";
@@ -82,6 +82,9 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   let draftMove: { from: string; to: string } | undefined;
 
   const running = () => (chat.activeId ? isRunning(chat.activeId) : false);
+  const canCompact = () => !running() && !submitting() && nativeCommands().some((c) => c.name === "compact");
+  const compactNow = () => { if (canCompact()) void submitPrompt("/agent:compact"); };
+  const fmtTokens = (n: number) => n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n);
   const projectRoot = () => effectiveRoot() ?? store.currentProject?.path ?? null;
 
   // ── Drafts follow the session ──
@@ -609,6 +612,27 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
         </div>
 
         <div class="composer-chips-right">
+          <Show when={contextUsage()}>
+            {(usage) => {
+              const ratio = () => Math.min(1, usage().used / Math.max(1, usage().size));
+              return (
+                <button
+                  type="button"
+                  class="context-ring"
+                  data-level={ratio() >= 0.9 ? "high" : ratio() >= 0.7 ? "mid" : "low"}
+                  disabled={!canCompact()}
+                  onClick={compactNow}
+                  title={`${fmtTokens(usage().used)} / ${fmtTokens(usage().size)} context tokens${usage().cost != null ? ` · $${usage().cost!.toFixed(2)}` : ""}${canCompact() ? " — click to compact" : ""}`}
+                  aria-label={`Context ${Math.round(ratio() * 100)}% used${canCompact() ? ". Compact" : ""}`}
+                >
+                  <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+                    <circle cx="9" cy="9" r="7" class="context-ring-track" />
+                    <circle cx="9" cy="9" r="7" class="context-ring-fill" stroke-dasharray={`${ratio() * 43.98} 43.98`} transform="rotate(-90 9 9)" />
+                  </svg>
+                </button>
+              );
+            }}
+          </Show>
           <button ref={agentAnchor} type="button" class="pill" onClick={() => setAgentMenu((v) => !v)} title="Agent and model">
             <AgentLogo agentId={chat.composer.agentId} icon={currentAgent()?.icon} size={16} radius={4} />
             {currentAgent()?.name ?? chat.composer.agentId}

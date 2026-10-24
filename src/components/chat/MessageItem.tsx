@@ -3,9 +3,10 @@ import {
 } from "solid-js";
 import {
   cancelTurn, retryLastTurn, setComposerAgent, chat,
-  pendingInputCount, type InteractionBlock, type AssistantMessage, type Block, type DividerMessage, type ThinkingBlock, type ToolBlock, type UserMessage,
+  pendingInputCount, type InteractionBlock, type AssistantMessage, type Block, type CompactionBlock, type DividerMessage, type NoticeBlock, type SubagentBlock, type ThinkingBlock, type ToolBlock, type UserMessage,
 } from "../../lib/chat";
 import { store, setPendingPromptSeed } from "../../lib/store";
+import { chatCancelSubagent } from "../../lib/ipc";
 import { writeClipboardText } from "../../lib/native";
 import { runAction } from "../../lib/shortcuts";
 import { agentLabel } from "./agentLabel";
@@ -105,6 +106,75 @@ const Thinking: Component<{ block: ThinkingBlock; live: boolean }> = (props) => 
   );
 };
 
+const NoticeRow: Component<{ block: NoticeBlock }> = (props) => (
+  <div class="notice-row" data-severity={props.block.severity}>
+    <Icon name={props.block.severity === "info" ? "help" : "alert"} size={14} />
+    <span class="notice-title">{props.block.title}</span>
+    <Show when={props.block.description}><span class="notice-desc">{props.block.description}</span></Show>
+  </div>
+);
+
+const CompactionRow: Component<{ block: CompactionBlock }> = (props) => {
+  const [open, setOpen] = createSignal(false);
+  const working = () => props.block.status === "in_progress";
+  const label = () => working() ? "Compacting context…" : props.block.status === "completed" ? "Context compacted" : props.block.status === "failed" ? "Compaction failed" : "Compaction cancelled";
+  return (
+    <div class="compaction-row" data-status={props.block.status}>
+      <div class="msg-divider">
+        <span class="msg-divider-line" />
+        <button type="button" class="msg-divider-label compaction-label" disabled={!props.block.summary} onClick={() => setOpen((v) => !v)} aria-expanded={open()}>
+          <Show when={working()} fallback={<Icon name="layers" size={13} />}><Spinner size={12} /></Show>
+          {label()}
+          <Show when={props.block.summary}><Icon name="chevronRight" size={11} style={{ transform: open() ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast)" }} /></Show>
+        </button>
+        <span class="msg-divider-line" />
+      </div>
+      <Show when={props.block.error}><div class="notice-row" data-severity="error"><Icon name="alert" size={14} /><span class="notice-desc">{props.block.error}</span></div></Show>
+      <Disclosure open={open()} class="thinking-body"><Markdown text={props.block.summary} /></Disclosure>
+    </div>
+  );
+};
+
+const SubagentCard: Component<{ block: SubagentBlock; blocks: () => Block[]; sessionId: string }> = (props) => {
+  const [open, setOpen] = createSignal(false);
+  const tools = createMemo(() => props.blocks().filter((b): b is ToolBlock => b.kind === "tool" && b.subagent === props.block.id));
+  const own = () => tools().filter((t) => t.id !== props.block.launchedBy);
+  const [now, setNow] = createSignal(Date.now());
+  createEffect(() => {
+    if (!working()) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    onCleanup(() => clearInterval(timer));
+  });
+  const working = () => props.block.state === "running" || props.block.state === "requires_action";
+  const failed = () => props.block.stopReason === "error";
+  const label = () => props.block.state === "requires_action" ? "Needs input" : working() ? "Running" : failed() ? "Failed" : props.block.stopReason === "cancelled" ? "Stopped" : "Done";
+  const stop = (e: MouseEvent) => {
+    e.stopPropagation();
+    chatCancelSubagent(props.sessionId, props.block.id).catch((error) => toast(`Couldn't stop the subagent: ${String(error)}`, "error"));
+  };
+  return (
+    <div class="subagent-card" data-state={working() ? "running" : failed() ? "error" : "done"}>
+      <button type="button" class="subagent-head" onClick={() => setOpen((v) => !v)} aria-expanded={open()}>
+        <Show when={working()} fallback={<Icon name={failed() ? "alert" : "check"} size={14} />}><Spinner size={12} /></Show>
+        <span class="subagent-title">{props.block.title || "Subagent"}</span>
+        <Show when={props.block.description}><span class="subagent-desc">{props.block.description}</span></Show>
+        <span class="subagent-meta">{own().length > 0 ? `${own().length} tool${own().length === 1 ? "" : "s"} · ` : ""}{label()}<Show when={working()}> · {formatElapsed(now() - props.block.startedAt)}</Show></span>
+        <Show when={working()}>
+          <span class="msg-live-stop" role="button" tabindex="0" title="Stop this subagent" onClick={stop} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); chatCancelSubagent(props.sessionId, props.block.id).catch(() => {}); } }}>
+            <Icon name="stop" size={11} /> Stop
+          </span>
+        </Show>
+        <Icon name="chevronRight" size={12} style={{ transform: open() ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast)" }} />
+      </button>
+      <Disclosure open={open()} class="subagent-body">
+        <Show when={props.block.prompt}><div class="subagent-prompt">{props.block.prompt}</div></Show>
+        <For each={tools()}>{(t) => <ToolCallRow block={t} />}</For>
+        <Show when={props.block.error}><div class="notice-row" data-severity="error"><Icon name="alert" size={14} /><span class="notice-desc">{props.block.error}</span></div></Show>
+      </Disclosure>
+    </div>
+  );
+};
+
 /** Four or more consecutive tool calls collapse into one expandable row. */
 const GROUP_MIN = 4;
 interface ToolGroup { isGroup: true; first: ToolBlock }
@@ -169,7 +239,9 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
   const running = () => props.message.status === "running";
   const lastBlock = (): Block | undefined => props.message.blocks[props.message.blocks.length - 1];
   const showPulse = () => running() && !pendingInputCount(props.sessionId) && lastBlock()?.kind !== "text";
-  const items = createMemo(() => buildItems(props.message.blocks));
+  // A subagent's own tool calls render inside its card, not in the main flow.
+  const visible = createMemo(() => props.message.blocks.filter((b) => !(b.kind === "tool" && b.subagent)));
+  const items = createMemo(() => buildItems(visible()));
 
   const [now, setNow] = createSignal(Date.now());
   createEffect(() => {
@@ -223,7 +295,7 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
         {(item) => (
           <Switch>
             <Match when={"isGroup" in item && (item as ToolGroup)}>
-              {(g) => <ToolGroupRow group={g()} blocks={() => props.message.blocks} />}
+              {(g) => <ToolGroupRow group={g()} blocks={visible} />}
             </Match>
             <Match when={!("isGroup" in item) && (item as Block).kind === "text" && (item as Block)}>
               {(b) => <Markdown text={(b() as Extract<Block, { kind: "text" }>).text} />}
@@ -238,6 +310,15 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
             </Match>
             <Match when={!("isGroup" in item) && (item as Block).kind === "interaction" && (item as Block)}>
               {(b) => <AgentInteraction block={b() as InteractionBlock} sessionId={props.sessionId} />}
+            </Match>
+            <Match when={!("isGroup" in item) && (item as Block).kind === "subagent" && (item as Block)}>
+              {(b) => <SubagentCard block={b() as SubagentBlock} blocks={() => props.message.blocks} sessionId={props.sessionId} />}
+            </Match>
+            <Match when={!("isGroup" in item) && (item as Block).kind === "notice" && (item as Block)}>
+              {(b) => <NoticeRow block={b() as NoticeBlock} />}
+            </Match>
+            <Match when={!("isGroup" in item) && (item as Block).kind === "compaction" && (item as Block)}>
+              {(b) => <CompactionRow block={b() as CompactionBlock} />}
             </Match>
             <Match when={!("isGroup" in item) && (item as Block).kind === "tool" && (item as Block)}>
               {(b) => <ToolCallRow block={b() as ToolBlock} />}

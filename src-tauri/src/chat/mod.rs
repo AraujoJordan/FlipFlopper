@@ -151,6 +151,7 @@ pub fn create_session(args: NewSession) -> Result<SessionMeta, String> {
         cwd,
         worktree: args.worktree,
         title: args.title.unwrap_or_default(),
+        title_locked: false,
         agent_id: args.agent_id,
         model: args.model,
         effort: args.effort,
@@ -174,6 +175,7 @@ pub fn update_session(id: &str, patch: SessionPatch) -> Result<SessionMeta, Stri
     store::update_session(id, |m| {
         if let Some(t) = patch.title {
             m.title = t;
+            m.title_locked = true;
         }
         if let Some(a) = patch.archived {
             m.archived = a;
@@ -262,6 +264,7 @@ impl ChatManager {
         store::write_entries(session_id, &[])?;
         let session = store::update_session(session_id, |m| {
             m.title.clear();
+            m.title_locked = false;
             m.native_ids.clear();
             m.acp_sessions.clear();
             m.agent_last_entry.clear();
@@ -630,7 +633,13 @@ impl ChatManager {
                     let mut result = Err("Native agent disconnected during the turn".into());
                     for message in events {
                         match message {
-                            acp::Message::Event(event) => { emit_event(&app, &meta.id, event); count += 1; }
+                            acp::Message::Event(event) => {
+                                if let ChatEvent::TitleChanged { title } = &event {
+                                    let title = title.clone();
+                                    let _ = store::update_session(&meta.id, |m| if !m.title_locked && !title.trim().is_empty() { m.title = title; });
+                                }
+                                emit_event(&app, &meta.id, event); count += 1;
+                            }
                             acp::Message::Finished(outcome) => { result = outcome; break; }
                         }
                     }

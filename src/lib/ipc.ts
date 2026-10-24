@@ -540,6 +540,11 @@ export type ChatEvent =
   | { type: "tool_updated"; id: string; title: string | null; input: unknown | null; kind?: ToolKind | null }
   | { type: "tool_result"; id: string; ok: boolean; output: string }
   | { type: "context_usage"; used: number; size: number; cost_usd: number | null }
+  | { type: "title_changed"; title: string }
+  | { type: "subagent"; id: string; title?: string | null; description?: string | null; prompt?: string | null; state?: string | null; stop_reason?: string | null; error?: string | null; launched_by?: string | null }
+  | { type: "subagent_tool"; id: string; subagent: string }
+  | { type: "notice"; severity: string; title: string; description?: string | null }
+  | { type: "compaction"; id: string; status: string; summary?: string | null; error?: string | null }
   | { type: "usage"; input_tokens: number; output_tokens: number; cost_usd: number | null }
   | { type: "turn_ended"; turn_id: string; status: TurnStatus; changed_files: ChangedFile[] }
   | { type: "error"; message: string };
@@ -570,6 +575,8 @@ export interface SessionMeta {
   cwd: string;
   worktree: WorktreeRef | null;
   title: string;
+  /** True once the user renamed the session; agent-generated titles stop applying. */
+  title_locked?: boolean;
   agent_id: string;
   model: string | null;
   effort: string | null;
@@ -644,6 +651,8 @@ export const chatUpdateSession = (sessionId: string, patch: SessionPatch): Promi
 
 export const chatDeleteSession = (sessionId: string): Promise<void> =>
   invoke("chat_delete_session", { sessionId });
+export const chatCancelSubagent = (sessionId: string, subagentId: string): Promise<void> =>
+  invoke("chat_cancel_subagent", { sessionId, subagentId });
 export const chatClearSession = (sessionId: string): Promise<{ session: SessionMeta; archived: SessionMeta | null }> =>
   invoke("chat_clear_session", { sessionId });
 

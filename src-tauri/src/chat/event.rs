@@ -72,6 +72,42 @@ pub enum ChatEvent {
         output: String,
     },
     ContextUsage { used: u64, size: u64, cost_usd: Option<f64> },
+    /// Lifecycle of a native subagent; every field but `id` is a patch.
+    /// `state` is `running | requires_action | idle | unknown`.
+    Subagent {
+        id: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        state: Option<String>,
+        #[serde(default)]
+        stop_reason: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+        /// Id of the parent tool call (Task/Agent) that launched this subagent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launched_by: Option<String>,
+    },
+    /// Marks an already-announced tool call as belonging to a subagent.
+    SubagentTool { id: String, subagent: String },
+    /// Title the agent generated for the session (ignored once the user renames it).
+    TitleChanged { title: String },
+    /// CLI warning/info (rate limits, auth, fallbacks) kept apart from the reply text.
+    Notice { severity: String, title: String, #[serde(default)] description: Option<String> },
+    /// Context compaction lifecycle: `in_progress | completed | failed | cancelled`.
+    /// `summary` is text to append to the retained summary.
+    Compaction {
+        id: String,
+        status: String,
+        #[serde(default)]
+        summary: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
     Usage {
         input_tokens: u64,
         output_tokens: u64,
