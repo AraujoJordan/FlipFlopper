@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.15.0 - 2026-10-23
+
+### Added
+
+- **`/clear`** resets the current session in place (empty transcript and title, fresh native context) and archives the previous conversation as a `(cleared)` session with Undo. The transcript fades out and the empty session settles in. Typed local `/commands` now run on Enter instead of being sent to the agent.
+- Deeper Claude integration: CLI **notices** render as compact severity rows, **context compaction** shows as a divider with a collapsible summary, **subagents** get live cards with their prompt, nested tool calls, elapsed time and a per-subagent Stop, and Claude's generated **session titles** apply unless you renamed the session.
+- A composer **context ring** shows context-window usage and cost, and runs `/compact` on click.
+
 ## 0.14.0 - 2026-10-23
 
 ### Added
