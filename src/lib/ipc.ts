@@ -729,6 +729,9 @@ export interface NativeMenuState {
 export const syncNativeMenuState = (state: NativeMenuState): Promise<void> =>
   invoke("sync_native_menu_state", { state });
 
+export const windowTitlebarDoubleClick = (): Promise<void> =>
+  invoke("window_titlebar_double_click");
+
 export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenFn> =>
   listen<string>("native-menu-command", (e) => cb(e.payload));
 

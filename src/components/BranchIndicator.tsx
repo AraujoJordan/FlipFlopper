@@ -113,12 +113,14 @@ const BranchIndicator: Component = () => {
         }}
       >
         <span style={{
-          width: "7px", height: "7px", "border-radius": "50%",
-          background: dotColor(), "box-shadow": `0 0 7px ${dotColor()}`,
+          width: "6px", height: "6px", "border-radius": "50%", "flex-shrink": 0,
+          background: dotColor(),
         }} />
-        <Show when={activeWorktree()} fallback={branch() || "no branch"}>
-          {(wt) => <>⎇ {wt().branch.replace(/^flipflopper\//, "")}</>}
-        </Show>
+        <span style={{ "min-width": 0, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
+          <Show when={activeWorktree()} fallback={branch() || "no branch"}>
+            {(wt) => <>⎇ {wt().branch.replace(/^flipflopper\//, "")}</>}
+          </Show>
+        </span>
       </button>
 
       <Menu open={open()} onClose={() => setOpen(false)} anchorRef={toggleRef} align="right" width={240}>

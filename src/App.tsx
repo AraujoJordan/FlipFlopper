@@ -19,8 +19,9 @@ import {
   type NativeMenuState,
 } from "./lib/ipc";
 import { cancelTurn, chat, initChat, isRunning, setYolo, startNewSession } from "./lib/chat";
-import { hydrateLayout, watchMotionPreferences, layout, openSide, resetZoom, setLayout, setSidebarWidth, stepZoom, toggleSide, toggleSidebar, SIDEBAR_MAX, SIDEBAR_MIN } from "./lib/layout";
+import { PANEL_INSET, PANEL_GAP, hydrateLayout, watchMotionPreferences, watchLayoutSizes, paneIsOverlay, sidebarIsOverlay, renderedSidebarWidth, layout, openSide, resetZoom, setLayout, setSidebarWidth, stepZoom, toggleSide, toggleSidebar } from "./lib/layout";
 import { openProjectPath, forgetRecentProject, pickAndOpenProject, projectCreated } from "./lib/projects";
+import { watchNativeAppearance, isMacDesktop, handleWindowHeaderMouseDown, handleWindowHeaderDoubleClick } from "./lib/native";
 import { initAppPrefs } from "./lib/appPrefs";
 import { hydrateSettings } from "./lib/settings";
 import { gitChangedCount, startGitPolling } from "./lib/gitStatus";
@@ -57,8 +58,31 @@ const UpdateDialog = lazy(() => import("./components/UpdateDialog"));
 
 const App: Component = () => {
   const win = getCurrentWindow();
+  const macDesktop = isMacDesktop();
+  const [nativeFullscreen, setNativeFullscreen] = createSignal(false);
+  onMount(() => {
+    if (!macDesktop) return;
+    let disposed = false;
+    let revision = 0;
+    const refresh = async () => {
+      const current = ++revision;
+      try {
+        const fullscreen = await win.isFullscreen();
+        if (!disposed && current === revision) setNativeFullscreen(fullscreen);
+      } catch (error) { console.error("Could not read native fullscreen state:", error); }
+    };
+    void refresh();
+    const unlisten = win.onResized(() => void refresh());
+    onCleanup(() => { disposed = true; void unlisten.then((stop) => stop()); });
+  });
   useThemeMotion();
+  const appearance = watchNativeAppearance(() => layout.theme, () => toast("Window appearance could not be synchronized.", "error"));
+  onCleanup(appearance.dispose);
   onMount(() => onCleanup(watchMotionPreferences()));
+  let rootElement: HTMLDivElement | undefined;
+  let mainBody: HTMLDivElement | undefined;
+  let mainElement: HTMLElement | undefined;
+  onMount(() => { if (rootElement && mainBody) onCleanup(watchLayoutSizes(rootElement, mainBody)); });
   initOrchestrator();
 
   const [pickerOpen, setPickerOpen] = createSignal(false);
@@ -71,7 +95,7 @@ const App: Component = () => {
 
   const sidebarResize = useResizable({
     axis: "x",
-    getSize: () => layout.sidebarWidth,
+    getSize: renderedSidebarWidth,
     setSize: setSidebarWidth,
   });
 
@@ -179,10 +203,9 @@ const App: Component = () => {
   });
 
   onMount(async () => {
-    // Show the window before any await: nothing below is needed for the first
-    // paint — the skeleton states cover the restore gap.
-    // A hidden webview may not paint until shown; don't wait for a paint frame.
-    void win.show().then(() => win.setFocus()).catch((error) => console.error("Window activation failed:", error));
+    // Apply the native frame color before showing, without waiting for a paint
+    // frame (hidden webviews may not paint). The backend retains its show fallback.
+    void appearance.ready.then(() => win.show()).then(() => win.setFocus()).catch((error) => console.error("Window activation failed:", error));
     void initAppPrefs();
 
     const [, , , , agents, recents] = await Promise.all([
@@ -285,17 +308,37 @@ const App: Component = () => {
     });
   });
 
-  const sidebarWidth = () => Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, layout.sidebarWidth));
+  const sidebarWidth = renderedSidebarWidth;
 
   let sidebarElement: HTMLDivElement | undefined;
   const sidebarPresent = usePresence(() => layout.sidebarOpen, () => sidebarElement, {
-    axis: "width", size: sidebarWidth, duration: 240,
+    axis: "width", size: sidebarWidth, duration: 240, slide: sidebarIsOverlay,
     anchor: () => document.querySelector<HTMLElement>('[aria-label="Show sidebar"]') ?? undefined,
+  });
+  createEffect(() => {
+    const overlay = layout.sidebarOpen && sidebarIsOverlay() && !(layout.sideOpen && paneIsOverlay());
+    if (mainElement) mainElement.inert = overlay;
+    if (overlay) queueMicrotask(() => sidebarElement?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true }));
+    onCleanup(() => { if (mainElement) mainElement.inert = false; });
   });
 
   return (
-    <div class="app-root" classList={{ "app-full-access": chat.composer.mode === "full", "app-sidebar-closed": !layout.sidebarOpen }}>
-      <div hidden={!sidebarPresent()} ref={sidebarElement} class="sidebar-wrap" style={{ width: `${sidebarWidth()}px` }}>
+    <div ref={rootElement} class="app-root" style={{ "--panel-inset": `${PANEL_INSET}px`, "--panel-gap": `${PANEL_GAP}px`, "--native-controls-width": `${88 / layout.zoom}px`, "--native-title-height": `${32 / layout.zoom}px` }}
+      classList={{ "app-full-access": chat.composer.mode === "full", "app-sidebar-closed": !layout.sidebarOpen, "app-macos": macDesktop, "app-native-fullscreen": nativeFullscreen(), "app-sidebar-docked": layout.sidebarOpen && !sidebarIsOverlay() }}
+      onMouseDown={(event) => { void handleWindowHeaderMouseDown(event).catch((error) => toast(String(error), "error")); }}
+      onDblClick={(event) => { void handleWindowHeaderDoubleClick(event).catch((error) => toast(String(error), "error")); }}>
+      <Show when={layout.sidebarOpen && sidebarIsOverlay() && !(layout.sideOpen && paneIsOverlay())}><div class="sidebar-scrim" onClick={toggleSidebar} aria-hidden="true" /></Show>
+      <div hidden={!sidebarPresent()} ref={sidebarElement} class="sidebar-wrap" classList={{ "sidebar-overlay": sidebarIsOverlay() }} style={{ width: `${sidebarWidth()}px` }}
+        role={sidebarIsOverlay() ? "dialog" : undefined} aria-modal={sidebarIsOverlay() && layout.sidebarOpen ? true : undefined} aria-label="Sessions"
+        onKeyDown={(event) => {
+          if (!sidebarIsOverlay() || !layout.sidebarOpen || event.defaultPrevented) return;
+          if (event.key === "Escape") { event.stopPropagation(); toggleSidebar(); }
+          if (event.key !== "Tab" || !sidebarElement || document.querySelector('.motion-host:not([aria-hidden="true"])')) return;
+          const controls = [...sidebarElement.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')].filter((el) => el.getClientRects().length > 0);
+          const first = controls[0], last = controls[controls.length - 1];
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+        }}>
           <Sidebar
             onOpenSettings={() => setSettingsOpen(true)}
             onOpenProjects={() => setPickerOpen(true)}
@@ -310,10 +353,10 @@ const App: Component = () => {
           />
         </div>
 
-      <main class="main-col">
-        <SessionHeader changeCount={gitChangedCount()} />
-        <div class="main-body">
+      <main ref={mainElement} class="main-col">
+        <div ref={mainBody} class="main-body">
           <section class="center-col">
+            <SessionHeader changeCount={gitChangedCount()} />
             <Show
               when={chat.activeId}
               fallback={

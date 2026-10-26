@@ -6,7 +6,7 @@ import {
   projectName, renameSession, selectSession, sessionGroups, sessionProjects, startNewSession,
 } from "../../lib/chat";
 import { removeWorktree, type SessionMeta } from "../../lib/ipc";
-import { cycleTheme, layout, moveSidebarProject, setProjectDisplayName, setProjectFilter, setSidebarGroup, toggleSidebar } from "../../lib/layout";
+import { cycleTheme, layout, sidebarIsOverlay, moveSidebarProject, setProjectDisplayName, setProjectFilter, setSidebarGroup, toggleSidebar } from "../../lib/layout";
 import { openProjectPath, removeSidebarProject } from "../../lib/projects";
 import { writeClipboardText } from "../../lib/native";
 import { store } from "../../lib/store";
@@ -28,6 +28,20 @@ function ago(ts: number): string {
 }
 
 const agentIcon = (id: string) => store.agents.find((a) => a.id === id)?.icon ?? null;
+
+function closeOverlaySidebar() {
+  if (layout.sidebarOpen && sidebarIsOverlay()) toggleSidebar();
+}
+
+function visitSession(id: string) {
+  closeOverlaySidebar();
+  void selectSession(id);
+}
+
+function newConversation(path?: string) {
+  closeOverlaySidebar();
+  startNewSession(path);
+}
 
 const SessionRow: Component<{
   session: SessionMeta;
@@ -59,7 +73,7 @@ const SessionRow: Component<{
       classList={{ "session-row-active": active(), "session-row-archived": props.session.archived, "session-row-child": props.depth > 0 }}
       role="button"
       tabIndex={0}
-      onClick={() => !props.renaming && void selectSession(props.session.id)}
+      onClick={() => !props.renaming && visitSession(props.session.id)}
       onKeyDown={(e) => {
         if (props.renaming) return;
         const rows = () => [...document.querySelectorAll<HTMLElement>(".session-row")];
@@ -68,7 +82,7 @@ const SessionRow: Component<{
           const next = list[list.indexOf(e.currentTarget as HTMLElement) + dir];
           if (next) { e.preventDefault(); next.focus(); }
         };
-        if (e.key === "Enter") void selectSession(props.session.id);
+        if (e.key === "Enter") visitSession(props.session.id);
         else if (e.key === "ArrowDown") move(1);
         else if (e.key === "ArrowUp") move(-1);
         else if (e.key === "F2") { e.preventDefault(); props.onRename(); }
@@ -140,6 +154,15 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
     sessionGroups({ includeArchived: showArchived(), query: query(), group: layout.sidebarGroup, filter: layout.projectFilter }),
   );
   const projects = createMemo(sessionProjects);
+  const projectSuffix = (path: string, name: string) => {
+    const peers = projects().filter((p) => p.path !== path && p.name === name);
+    if (!peers.length) return "";
+    const parent = (value: string) => value.replace(/\\/g, "/").split("/").filter(Boolean).slice(0, -1);
+    const parts = parent(path);
+    let count = Math.min(2, parts.length);
+    while (count < parts.length && peers.some((p) => parent(p.path).slice(-count).join("/") === parts.slice(-count).join("/"))) count++;
+    return `${count < parts.length ? "…/" : "/"}${parts.slice(-count).join("/")}`;
+  };
   const [filterOpen, setFilterOpen] = createSignal(false);
   let filterAnchor: HTMLButtonElement | undefined;
   let searchInput: HTMLInputElement | undefined;
@@ -256,6 +279,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
 
   return (
     <aside ref={sidebar} class="sidebar">
+      <div class="native-window-space" data-window-header aria-hidden="true" />
       <div class="sidebar-top">
         <div class="sidebar-top-actions">
           <button class="icon-btn sidebar-toggle" onClick={toggleSidebar} title="Hide sidebar (⌘B)" aria-label="Hide sidebar">
@@ -270,7 +294,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
         </div>
       </div>
 
-      <button class="new-session-btn" onClick={() => startNewSession()}>
+      <button class="new-session-btn" onClick={() => newConversation()}>
         <Icon name="plus" size={15} />
         New session
         <kbd>⌘N</kbd>
@@ -291,14 +315,18 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
       </div>
 
       <div class="sidebar-filters">
-        <button ref={filterAnchor} class="filter-pill" onClick={() => setFilterOpen((v) => !v)} title="Filter by project">
-          <Icon name="folder" size={13} /> <span>{filterLabel()}</span> <Icon name="chevronDown" size={11} />
+        <button ref={filterAnchor} class="filter-pill" classList={{ "filter-pill-active": !!layout.projectFilter }} onClick={() => setFilterOpen((v) => !v)} title="Session view options" aria-label="Session view options" aria-haspopup="menu" aria-expanded={filterOpen()}>
+          <Icon name="list" size={15} /> <span>{layout.projectFilter ? filterLabel() : layout.sidebarGroup === "project" ? "Projects" : "Recent sessions"}</span> <Icon name="chevronDown" size={12} />
         </button>
-        <div class="seg seg-small" role="group" aria-label="Group sessions by">
-          <button class="seg-btn" classList={{ "seg-on": layout.sidebarGroup === "project" }} onClick={() => setSidebarGroup("project")}>Project</button>
-          <button class="seg-btn" classList={{ "seg-on": layout.sidebarGroup === "date" }} onClick={() => setSidebarGroup("date")}>Date</button>
-        </div>
+        <Show when={layout.projectFilter}><button class="icon-btn" aria-label="Clear project filter" title="Show all projects" onClick={() => setProjectFilter(null)}><Icon name="x" size={14} /></button></Show>
         <Menu open={filterOpen()} onClose={() => setFilterOpen(false)} anchorRef={filterAnchor} width={240}>
+          <MenuLabel>Group sessions by</MenuLabel>
+          <For each={["project", "date"] as const}>{(group) => (
+            <MenuItem onSelect={() => { setSidebarGroup(group); setFilterOpen(false); }}>
+              <span style={{ flex: 1 }}>{group === "project" ? "Project" : "Date"}</span><Show when={layout.sidebarGroup === group}><Icon name="check" size={14} /></Show>
+            </MenuItem>
+          )}</For>
+          <MenuDivider />
           <MenuLabel>Show sessions from</MenuLabel>
           <MenuItem onSelect={() => { setProjectFilter(null); setFilterOpen(false); }}>
             <span style={{ flex: 1 }}>All projects</span>
@@ -308,7 +336,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
             {(p) => (
               <MenuItem onSelect={() => { setProjectFilter(p.path); setFilterOpen(false); }}>
                 <Icon name="folder" size={14} />
-                <span style={{ flex: 1 }}>{p.name}</span>
+                <span class="project-menu-name">{p.name}<Show when={projectSuffix(p.path, p.name)}>{(suffix) => <small title={p.path}>{suffix()}</small>}</Show></span>
                 <Show when={layout.projectFilter === p.path}><Icon name="check" size={14} /></Show>
               </MenuItem>
             )}
@@ -352,7 +380,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                       style={{ transform: collapsed()[group.key] ? "none" : "rotate(90deg)", transition: "transform var(--dur-fast)" }}
                     />
                     <Icon name={group.key === "pinned" ? "sparkle" : group.projectPath ? "folder" : "history"} size={14} />
-                    <span class="session-group-name">{group.label}</span>
+                    <span class="session-group-name">{group.label}<Show when={group.projectPath && projectSuffix(group.projectPath, group.label)}>{(suffix) => <small>{suffix()}</small>}</Show></span>
                   </button>
                   }>
                     <input class="session-row-input project-name-input" aria-label="Project display name" maxLength={80} value={projectDraft()}
@@ -374,7 +402,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                       onClick={(event) => { const rect=event.currentTarget.getBoundingClientRect(); setMenu(null); setProjectMenu({path:group.projectPath!,x:rect.left,y:rect.bottom}); }}><Icon name="more" size={14} /></button>
                     <button
                       class="icon-btn session-group-add"
-                      onClick={() => startNewSession(group.projectPath)}
+                      onClick={() => newConversation(group.projectPath)}
                       title={`New session in ${group.label}`}
                       aria-label={`New session in ${group.label}`}
                     >
@@ -383,7 +411,6 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                   </Show>
                 </div>
                 <Disclosure open={!collapsed()[group.key]}>
-                  <Show when={group.projectPath && group.sessions.length === 0}><button type="button" class="project-empty-session" onClick={() => startNewSession(group.projectPath)}>Start a conversation</button></Show>
                   <For each={nestSessions(group.sessions)}>
                     {({ session, depth }) => (
                       <SessionRow
@@ -441,7 +468,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
       <ContextMenu open={!!projectMenu()} onClose={() => setProjectMenu(null)} x={projectMenu()?.x ?? 0} y={projectMenu()?.y ?? 0} width={230}>
         <Show when={projectMenu()}>{(item) => <>
           <MenuLabel>{projectName(item().path)}</MenuLabel>
-          <MenuItem onSelect={() => { const path=item().path; setProjectMenu(null); startNewSession(path); }}><Icon name="plus" size={14} />New session</MenuItem>
+          <MenuItem onSelect={() => { const path=item().path; setProjectMenu(null); newConversation(path); }}><Icon name="plus" size={14} />New session</MenuItem>
           <MenuItem onSelect={() => { const path=item().path; setProjectMenu(null); void openProjectPath(path); }}><Icon name="folder" size={14} />Open project</MenuItem>
           <MenuItem onSelect={() => renameProject(item().path)}><Icon name="pencil" size={14} />Rename…</MenuItem>
           <Show when={layout.projectNames[item().path]}><MenuItem onSelect={() => { setProjectDisplayName(item().path, ""); setProjectMenu(null); }}><Icon name="refresh" size={14} />Reset name</MenuItem></Show>

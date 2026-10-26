@@ -1,5 +1,5 @@
 import { Component, For, Show, onMount, createEffect } from "solid-js";
-import { chat, projectName } from "../../lib/chat";
+import { chat } from "../../lib/chat";
 import { openProjectPath } from "../../lib/projects";
 import { store } from "../../lib/store";
 import { layout } from "../../lib/layout";
@@ -14,7 +14,7 @@ let introduced = false;
  *  this fills the space above it with the target project and shortcuts. */
 const EmptyState: Component<{ onOpenProjects: () => void; onNewProject: () => void }> = (props) => {
   const project = () => chat.draftProject ?? store.currentProject?.path ?? null;
-  const recents = () => store.recentProjects.filter((p) => p.path !== project() && !layout.hiddenProjects.includes(p.path)).slice(0, 5);
+  const recents = () => store.recentProjects.filter((p) => !layout.hiddenProjects.includes(p.path)).slice(0, 3);
   const noAgents = () => store.agents.length > 0 && !store.agents.some((a) => a.installed && a.chat_supported);
   const suggestions = () => store.agents.filter((a) => a.chat_supported && !a.installed && installable().has(a.id)).slice(0, 4);
   onMount(() => void loadInstallable());
@@ -29,15 +29,27 @@ const EmptyState: Component<{ onOpenProjects: () => void; onNewProject: () => vo
     });
   });
   return (
-    <div ref={empty} class="empty-state">
+    <div ref={empty} class="empty-state" classList={{ "empty-state-ready": !!project() }}>
       <div class="empty-state-inner">
         <Show
           when={project()}
-          fallback={<p class="empty-lead">Choose a project to start a session.</p>}
+          fallback={<><h1 class="empty-lead">Where would you like to work?</h1><p class="empty-hint">Open a project to start a conversation with your coding agent.</p></>}
         >
-          <p class="empty-lead">
-            New session in <button class="empty-project" onClick={props.onOpenProjects}>{projectName(project()!)}</button>
-          </p>
+          <h1 class="empty-lead">What would you like to work on?</h1>
+        </Show>
+
+        <Show when={!project()}>
+          <div class="recent-row">
+            <button class="recent-chip recent-chip-primary" onClick={props.onOpenProjects}><Icon name="folder" size={16} /> Open project…</button>
+            <button class="recent-chip" onClick={props.onNewProject}><Icon name="plus" size={16} /> New project…</button>
+          </div>
+          <Show when={recents().length > 0}>
+            <div class="empty-recents"><span class="empty-hint">Recent projects</span>
+              <For each={recents()}>{(p) => (
+                <button class="recent-chip" onClick={() => void openProjectPath(p.path)} title={p.path}><Icon name="folder" size={14} />{layout.projectNames[p.path] || p.name}</button>
+              )}</For>
+            </div>
+          </Show>
         </Show>
 
         <Show when={noAgents()}>
@@ -68,19 +80,6 @@ const EmptyState: Component<{ onOpenProjects: () => void; onNewProject: () => vo
           </div>
         </Show>
 
-        <div class="recent-row">
-          <For each={recents()}>
-            {(p) => (
-              <button class="recent-chip" onClick={() => void openProjectPath(p.path)} title={p.path}>
-                <Icon name="folder" size={13} />
-                {projectName(p.path)}
-              </button>
-            )}
-          </For>
-          <button class="recent-chip recent-chip-new" onClick={props.onNewProject}>
-            <Icon name="plus" size={13} /> New project…
-          </button>
-        </div>
       </div>
     </div>
   );

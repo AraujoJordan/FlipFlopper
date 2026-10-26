@@ -1448,6 +1448,39 @@ async fn get_review_diff(
 // ════════════════════════════════════════════════
 
 #[tauri::command]
+async fn window_titlebar_double_click(window: tauri::Window) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Tauri's built-in drag region always maximizes on double-click. Respect
+        // the user's macOS setting instead, including Minimize and Do Nothing.
+        let action = run_blocking(|| -> Result<String, String> {
+            let output = std::process::Command::new("/usr/bin/defaults")
+                .args(["read", "-g", "AppleActionOnDoubleClick"])
+                .output()
+                .map_err(|e| e.to_string())?;
+            Ok(if output.status.success() {
+                String::from_utf8_lossy(&output.stdout).trim().to_owned()
+            } else {
+                String::from("Maximize") // An unset preference uses the OS default.
+            })
+        }).await??;
+        match action.as_str() {
+            "None" => Ok(()),
+            "Minimize" => window.minimize().map_err(|e| e.to_string()),
+            _ => {
+                if window.is_maximized().map_err(|e| e.to_string())? {
+                    window.unmaximize().map_err(|e| e.to_string())
+                } else {
+                    window.maximize().map_err(|e| e.to_string())
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = window; Ok(()) }
+}
+
+#[tauri::command]
 fn sync_native_menu_state(app: tauri::AppHandle, state: NativeMenuState) -> Result<(), String> {
     sync_native_menu(&app, &state);
     Ok(())
@@ -1936,6 +1969,7 @@ pub fn run() {
             trigger_haptic,
             // Menu
             sync_native_menu_state,
+            window_titlebar_double_click,
             // Project tabs (single-window session)
         ])
         .build(tauri::generate_context!())

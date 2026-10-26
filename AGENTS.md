@@ -33,9 +33,9 @@ Currently implemented:
   Qwen; there is no Claude/Cursor headless fallback. Plandex/Cline are terminal-only.
 - Permission modes are `manual | auto_edit | plan | ask | full`. `⇧Tab` cycles the first four
   (Manual is skipped for headless agents, which cannot ask mid-turn; Full stays behind
-  the YOLO switch) and `.composer-box[data-mode]` tints the composer per mode. Ask is
+  the Full access switch in Permissions) and `.composer-box[data-mode]` tints the composer per mode. Ask is
   read-only Q&A, enforced natively on Cursor and via auto-reject plus a prompt preamble
-  elsewhere. The composer YOLO switch maps
+  elsewhere. The Permissions menu’s Full access switch maps
   to `full` for every chat agent. `setYolo` restores the previous non-full choice
   per conversation (Auto-edit after reload). `chat_set_mode` applies permission
   changes live to Claude/Cursor and resolves pending tool approvals when enabling
@@ -111,9 +111,13 @@ Currently implemented:
   files/conversations and offers Undo; explicitly opening its folder restores it.
 - Native window decorations on macOS, Windows and Linux: the OS owns close,
   minimize, maximize/restore, fullscreen, title-bar dragging and window menus.
-  `tauri.conf.json` enables decorations; `tauri.macos.conf.json` keeps a visible
-  standard title bar. App toolbars must not duplicate window controls or
-  override native title-bar double-click behavior.
+  `tauri.conf.json` enables decorations; `tauri.macos.conf.json` uses an overlay native
+  title bar with hidden title text, integrating conversation/review headers into the top row.
+  The window remains opaque; native appearance and background track the Circuit theme.
+  Native traffic lights retain their standard position. CSS reserves their physical size
+  across zoom, collapsed/overlay sidebars and fullscreen. Only blank header space starts
+  native dragging; controls stay interactive. `window_titlebar_double_click` respects the
+  macOS Maximize/Minimize/None preference. Never duplicate native window controls.
   Window-state restoration excludes `StateFlags::DECORATIONS` so legacy saved
   frameless state cannot remove native controls after an upgrade.
 - Project picker and recent projects: opening an existing folder only inspects
@@ -356,9 +360,17 @@ requires generated output.
   Shared cancellable WAAPI/presence/list helpers live in `components/ui.tsx`;
   settle pending work when preferences change. Reduced allows only short opacity
   feedback; Off is immediate. Theme token pairs swap atomically, including
-  cached-terminal themes. Typography pairs `CaskaydiaCove Nerd Font Propo`
-  (`--font-sans`, `--font-display`) with `CaskaydiaCove Nerd Font Mono`
-  (`--font-mono`) using local `@font-face` weight/italic mappings.
+  cached-terminal themes. UI and prose use native system fonts (`--font-sans`,
+  `--font-display`); code, diffs and terminals use `CaskaydiaCove Nerd Font Mono`
+  (`--font-mono`) with local weight/italic mappings. Composer context sits above
+  the input; Permissions and separate agent/model pickers sit below it. Full
+  access is an explicit switch inside Permissions with a visible amber state.
+  Conversation and side-pane surfaces have 16px corners inside an 8px frame
+  with an 8px gutter; the sidebar blends into the frame. Resize handles stay
+  outside clipped surfaces. Pane sizing uses measured layout widths: preserve
+  520px for the conversation beside a 340px minimum side pane plus the gutter,
+  or overlay the pane. Saved preferred widths
+  survive temporary constraints; narrow navigation is also a focus-trapped overlay.
 - `onLivePresentation` in `lib/chat.ts` emits transient hints after live reduction.
   History/import/replay must never produce message entrances. Keep the reducer
   pure, later text deltas immediate, and backend outcomes independent of motion.

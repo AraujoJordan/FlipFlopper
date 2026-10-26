@@ -213,14 +213,20 @@ const ToolGroupRow: Component<{ group: ToolGroup; blocks: () => Block[] }> = (pr
   });
   const running = () => tools().some((t) => t.status === "running");
   const failed = () => tools().filter((t) => t.status === "error").length;
+  let previousFailures = 0;
+  createEffect(() => {
+    const count = failed();
+    if (count > previousFailures) setOpen(true);
+    previousFailures = count;
+  });
   let count: HTMLSpanElement | undefined;
   useValueMotion(() => count, () => `${tools().length}:${running()}`);
   return (
-    <div class="tool-group">
+    <div class="tool-group" classList={{ "tool-group-error": failed() > 0 }}>
       <button type="button" class="tool-group-head" onClick={() => setOpen((v) => !v)} aria-expanded={open()}>
         <Show when={running()} fallback={<Icon name="wrench" size={14} />}><Spinner size={12} /></Show>
         <span ref={count} class="tool-group-title">
-          {running() ? "Working" : "Ran"} {tools().length} tools
+          {running() ? "Working" : "Activity"} · {tools().length} tools
         </span>
         <Show when={failed() > 0}><span class="tool-group-failed">{failed()} failed</span></Show>
         <Show when={!open()}><span class="tool-group-last">{tools()[tools().length - 1]?.title}</span></Show>
@@ -349,13 +355,13 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
         <button type="button" class="turn-changes" onClick={() => openSide("changes")}>
           <Icon name="diff" size={14} />
           <span>
-            Changed {props.message.changedFiles.length} file{props.message.changedFiles.length === 1 ? "" : "s"}
+            Review changes · {props.message.changedFiles.length} file{props.message.changedFiles.length === 1 ? "" : "s"}
           </span>
           <span class="turn-changes-files">
             {props.message.changedFiles.slice(0, 3).map((f) => f.path.split("/").pop()).join(", ")}
             {props.message.changedFiles.length > 3 ? ` +${props.message.changedFiles.length - 3}` : ""}
           </span>
-          <span class="turn-changes-cta">Review</span>
+          <Icon name="chevronRight" size={16} />
         </button>
       </Show>
 
@@ -391,14 +397,21 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
               </Menu>
             </Show>
           </div>
-          <Show when={props.message.contextUsage}>{(usage) => <span class="msg-usage">{usage().used.toLocaleString()} / {usage().size.toLocaleString()} context tokens<Show when={usage().cost != null}> · ${usage().cost!.toFixed(3)}</Show></span>}</Show>
-          <Show when={props.message.usage}>
-            {(u) => (
-              <span class="msg-usage">
-                {formatTokens(u().input)} in · {formatTokens(u().output)} out
-                <Show when={u().cost != null && u().cost! > 0}> · ${u().cost!.toFixed(3)}</Show>
-              </span>
-            )}
+          <Show when={props.message.contextUsage || props.message.usage}>
+            <details class="msg-usage">
+              <summary>Usage</summary>
+              <div class="msg-usage-detail">
+                <Show when={props.message.contextUsage}>{(usage) => (
+                  <span>{usage().used.toLocaleString()} / {usage().size.toLocaleString()} context tokens<Show when={usage().cost != null}> · ${usage().cost!.toFixed(3)}</Show></span>
+                )}</Show>
+                <Show when={props.message.usage}>{(usage) => (
+                  <span>
+                    {formatTokens(usage().input)} in · {formatTokens(usage().output)} out
+                    <Show when={props.message.contextUsage?.cost == null && usage().cost != null && usage().cost! > 0}> · ${usage().cost!.toFixed(3)}</Show>
+                  </span>
+                )}</Show>
+              </div>
+            </details>
           </Show>
         </div>
       </Show>

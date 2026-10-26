@@ -419,7 +419,6 @@ interface MenuPos {
 
 const MENU_GAP = 6;
 const MENU_MAX_HEIGHT = 420;
-const MENU_MIN_HEIGHT = 120;
 
 export const Menu: Component<{
   open: boolean;
@@ -447,20 +446,18 @@ export const Menu: Component<{
     const spaceBelow = window.innerHeight - rect.bottom - MENU_GAP;
     const spaceAbove = rect.top - MENU_GAP;
     const openUpward = spaceAbove > spaceBelow;
-    const maxHeight = Math.max(
-      MENU_MIN_HEIGHT,
-      Math.min(MENU_MAX_HEIGHT, openUpward ? spaceAbove : spaceBelow)
-    );
+    const maxHeight = Math.max(0, Math.min(MENU_MAX_HEIGHT, (openUpward ? spaceAbove : spaceBelow) - MENU_GAP));
+    const width = Math.min(props.width ?? 288, window.innerWidth - MENU_GAP * 2);
+    const left = Math.max(MENU_GAP, Math.min(props.align === "right" ? rect.right - width : rect.left, window.innerWidth - width - MENU_GAP));
 
     setPos({
       ...(openUpward
         ? { bottom: window.innerHeight - rect.top + MENU_GAP }
         : { top: rect.bottom + MENU_GAP }),
-      ...(props.align === "right"
-        ? { right: window.innerWidth - rect.right }
-        : { left: rect.left }),
+      left,
       maxHeight,
     });
+    queueMicrotask(() => { if (props.open) ref?.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled)')?.focus({ preventScroll: true }); });
   });
 
   onMount(() => {
@@ -473,16 +470,34 @@ export const Menu: Component<{
     }
     function handleKey(e: KeyboardEvent) {
       if (props.open && e.key === "Escape") {
+        e.preventDefault();
         e.stopPropagation();
         props.onClose();
+        return;
       }
+      if (!props.open || !ref?.contains(document.activeElement)) return;
+      if (e.key === "Tab") {
+        const controls = [...ref.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')];
+        const index = controls.indexOf(document.activeElement as HTMLElement);
+        if ((!e.shiftKey && index === controls.length - 1) || (e.shiftKey && index === 0)) { e.preventDefault(); props.onClose(); }
+      }
+      if (document.activeElement?.matches("input, textarea")) return;
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+      const items = [...ref.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)')];
+      if (!items.length) return;
+      e.preventDefault(); e.stopPropagation();
+      const index = items.indexOf(document.activeElement as HTMLElement);
+      const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : (index + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      items[next]?.focus();
     }
     const modalOpened = () => { if (props.open) props.onClose(); };
     window.addEventListener("flipflopper:modal-opened", modalOpened);
+    window.addEventListener("resize", modalOpened);
     document.addEventListener("click", handleClick);
     document.addEventListener("keydown", handleKey, true);
     onCleanup(() => {
       window.removeEventListener("flipflopper:modal-opened", modalOpened);
+      window.removeEventListener("resize", modalOpened);
       document.removeEventListener("click", handleClick);
       document.removeEventListener("keydown", handleKey, true);
     });
@@ -503,6 +518,7 @@ export const Menu: Component<{
               ...(p().left !== undefined ? { left: `${p().left}px` } : {}),
               ...(p().right !== undefined ? { right: `${p().right}px` } : {}),
               width: `${props.width ?? 288}px`,
+              "max-width": `calc(100vw - ${MENU_GAP * 2}px)`,
               "max-height": `min(60vh, ${p().maxHeight}px)`,
               overflow: "auto",
               background: "var(--surface-3)",
@@ -524,7 +540,7 @@ export const Menu: Component<{
 export const MenuLabel: Component<{ children: JSX.Element }> = (props) => (
   <div style={{
     padding: "8px 10px 6px",
-    "font-size": "10.5px", "letter-spacing": ".5px",
+    "font-size": "12px", "letter-spacing": ".5px",
     "text-transform": "uppercase", color: "var(--fg-subtle)", "font-weight": "600",
   }}>
     {props.children}
@@ -545,7 +561,7 @@ export const MenuItem: Component<{
     style={{
       width: "100%", display: "flex", "align-items": "center",
       gap: "11px", padding: "9px 10px",
-      "border-radius": "var(--radius-lg)",
+      "border-radius": "var(--radius-md)",
       "text-align": "left",
       background: "transparent",
       opacity: props.disabled ? ".5" : "1",

@@ -72,10 +72,12 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   const [dismissedKey, setDismissedKey] = createSignal<string | null>(null);
   const [historyIndex, setHistoryIndex] = createSignal<number | null>(null);
   const [agentMenu, setAgentMenu] = createSignal(false);
+  const [modelMenu, setModelMenu] = createSignal(false);
   const [modeMenu, setModeMenu] = createSignal(false);
   const [plusMenu, setPlusMenu] = createSignal(false);
   let plusAnchor: HTMLButtonElement | undefined;
   let agentAnchor: HTMLButtonElement | undefined;
+  let modelAnchor: HTMLButtonElement | undefined;
   let modeAnchor: HTMLButtonElement | undefined;
   let sendControl: HTMLDivElement | undefined;
   let sendingStatus: HTMLSpanElement | undefined;
@@ -392,12 +394,50 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   onCleanup(() => { cancelMotion(sendControl); cancelMotion(sendingStatus); cancelMotion(textarea); });
   useValueMotion(() => agentAnchor, () => chat.composer.agentId, true);
   useValueMotion(() => modeAnchor, () => chat.composer.mode);
-  useValueMotion(() => agentAnchor?.querySelector<HTMLElement>(".pill-sub") ?? undefined, modelSummary);
-  useValueMotion(() => composerElement?.querySelector<HTMLElement>(".composer-chips-left .pill") ?? undefined, () => chat.sessions.find((s) => s.id === chat.activeId)?.worktree?.branch);
+  useValueMotion(() => modelAnchor, modelSummary);
+  useValueMotion(() => composerElement?.querySelector<HTMLElement>(".composer-context .pill") ?? undefined, () => chat.sessions.find((s) => s.id === chat.activeId)?.worktree?.branch);
   useListMotion(() => composerElement, () => attachments().map((a) => a.path).join("|"), ".attach-chip");
   useSelectionMotion(() => suggestions, selected, ".mention-item-active");
   return (
     <div ref={composerElement} class="composer">
+      <div class="composer-context" aria-label="Working location">
+        <Show
+          when={!chat.activeId}
+          fallback={
+            <span class="pill pill-static" title={session()?.worktree ? session()!.worktree!.path : "Running in the project folder"}>
+              <Icon name={session()?.worktree ? "gitBranch" : "folder"} size={13} />
+              {session()?.worktree ? session()!.worktree!.branch.replace(/^flipflopper\//, "") : "Local"}
+            </span>
+          }
+        >
+          <button
+            type="button"
+            class="pill"
+            classList={{ "pill-on": chat.composer.worktree }}
+            disabled={!canWorktree()}
+            onClick={() => setComposer({ worktree: !chat.composer.worktree })}
+            title={canWorktree()
+              ? "Run in an isolated git worktree so the agent's edits stay off your branch until you merge"
+              : "Worktrees need a git repository"}
+          >
+            <Icon name={chat.composer.worktree ? "gitBranch" : "folder"} size={13} />
+            {chat.composer.worktree ? "Worktree" : "Local"}
+          </button>
+        </Show>
+
+        <Show
+          when={!chat.activeId && props.onOpenProjects}
+          fallback={
+            <span class="pill pill-static" title={session()?.project_path ?? undefined}>
+              <Icon name="folder" size={13} /> {projectLabel()}
+            </span>
+          }
+        >
+          <button type="button" class="pill" onClick={() => props.onOpenProjects?.()} title="Choose project">
+            <Icon name="folder" size={13} /> <span class="picker-label">{projectLabel()}</span> <Icon name="chevronDown" size={11} />
+          </button>
+        </Show>
+      </div>
       <div class="composer-box" data-mode={chat.composer.mode} classList={{ "composer-box-full": chat.composer.mode === "full" }}>
         <Show when={suggestionsPresent()}>
           <div ref={suggestions} class="mention-menu" role="listbox">
@@ -488,9 +528,142 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                 <Icon name="at" size={15} /> <span style={{ flex: 1 }}>Mention a file</span>
               </MenuItem>
             </Menu>
+            <button
+              ref={modeAnchor}
+              type="button"
+              class="pill"
+              aria-label={`Permissions: ${modeInfo().label}`}
+              aria-haspopup="menu" aria-expanded={modeMenu()}
+              aria-describedby={sessionModePending() ? "session-permission-status" : undefined}
+              data-mode={chat.composer.mode}
+              classList={{ "pill-full": chat.composer.mode === "full" }}
+              disabled={permissionModeUpdating()}
+              onClick={() => setModeMenu((v) => !v)}
+              title={permissionModeUpdating() ? "Updating session permissions…" : "Session permissions (⇧Tab)"}
+            >
+              <Icon name={modeInfo().icon} size={13} />
+              {modeInfo().label}
+              <Icon name="chevronDown" size={11} />
+            </button>
+            <Menu open={modeMenu()} onClose={() => setModeMenu(false)} anchorRef={modeAnchor} width={320}>
+              <MenuLabel>Permissions</MenuLabel>
+              <For each={MODES.filter((m) => m.id !== "full")}>
+                {(m) => (
+                  <MenuItem disabled={!modeAvailable(m.id)} onSelect={() => void chooseMode(m.id)}>
+                    <Icon name={m.icon} size={16} />
+                    <span style={{ display: "flex", "flex-direction": "column", gap: "2px", flex: 1 }}>
+                      <span style={{ "font-weight": 500 }}>{m.label}</span>
+                      <span style={{ "font-size": "12px", color: "var(--fg-subtle)" }}>{!modeAvailable(m.id) ? (m.id === "manual" && !native() ? "This agent can't ask mid-turn." : "Not offered by this CLI version.") : m.hint}</span>
+                    </span>
+                    <Show when={chat.composer.mode === m.id}><Icon name="check" size={14} /></Show>
+                  </MenuItem>
+                )}
+              </For>
+              <MenuDivider />
+              <button
+                type="button"
+                class="full-access-toggle"
+                classList={{ "full-access-on": chat.composer.mode === "full" }}
+                role="switch"
+                aria-label="Full access"
+                aria-checked={chat.composer.mode === "full"}
+                disabled={permissionModeUpdating()}
+                aria-busy={permissionModeUpdating()}
+                title={permissionModeUpdating() ? "Updating session permissions…" : sessionModePending()
+                  ? "Session updated. This running CLI keeps its launch permissions until the next turn."
+                  : "Full access: auto-approve tools for this session. Applies live to Claude/Cursor. CLI and system policies still apply."}
+                onClick={() => setYolo(chat.composer.mode !== "full")}
+              >
+                <Icon name="zap" size={13} />
+                <span class="permission-description"><strong>Full access</strong><small>Auto-approve tools. CLI and system policies still apply.</small></span>
+                <span class="full-access-track" aria-hidden="true"><span /></span>
+              </button>
+            </Menu>
+            <Show when={sessionModePending()}><span id="session-permission-status" class="pill pill-static" role="status" title={`Current task: ${MODES.find((mode) => mode.id === chat.views[chat.activeId!]?.runtime?.permission_mode)?.label ?? "previous permissions"}. Session permissions apply next turn.`}>Next turn</span></Show>
           </div>
 
           <div class="composer-bar-right">
+            <Show when={contextUsage()}>
+              {(usage) => {
+                const ratio = () => Math.min(1, usage().used / Math.max(1, usage().size));
+                return (
+                  <button
+                    type="button"
+                    class="context-ring"
+                    data-level={ratio() >= 0.9 ? "high" : ratio() >= 0.7 ? "mid" : "low"}
+                    disabled={!canCompact()}
+                    onClick={compactNow}
+                    title={`${fmtTokens(usage().used)} / ${fmtTokens(usage().size)} context tokens${usage().cost != null ? ` · $${usage().cost!.toFixed(2)}` : ""}${canCompact() ? " — click to compact" : ""}`}
+                    aria-label={`Context ${Math.round(ratio() * 100)}% used${canCompact() ? ". Compact" : ""}`}
+                  >
+                    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+                      <circle cx="9" cy="9" r="7" class="context-ring-track" />
+                      <circle cx="9" cy="9" r="7" class="context-ring-fill" stroke-dasharray={`${ratio() * 43.98} 43.98`} transform="rotate(-90 9 9)" />
+                    </svg>
+                  </button>
+                );
+              }}
+            </Show>
+            <button ref={agentAnchor} type="button" class="pill composer-agent" onClick={() => setAgentMenu((v) => !v)} title="Choose agent" aria-label={`Agent: ${currentAgent()?.name ?? chat.composer.agentId}`} aria-haspopup="menu" aria-expanded={agentMenu()}>
+              <AgentLogo agentId={chat.composer.agentId} icon={currentAgent()?.icon} size={16} radius={4} />
+              <span class="picker-label">{currentAgent()?.name ?? chat.composer.agentId}</span>
+              <Icon name="chevronDown" size={11} />
+            </button>
+            <Menu open={agentMenu()} onClose={() => setAgentMenu(false)} anchorRef={agentAnchor} align="right" width={300}>
+              <MenuLabel>Agent</MenuLabel>
+              <For each={chatAgents()}>
+                {(a) => (
+                  <MenuItem
+                    disabled={!a.installed}
+                    onSelect={() => { setComposerAgent(a.id); setAgentMenu(false); setCustomModel(""); }}
+                  >
+                    <AgentLogo agentId={a.id} icon={a.icon} size={20} radius={5} />
+                    <span style={{ flex: 1 }}>{a.name}</span>
+                    <Show when={!a.installed}><span style={{ "font-size": "11px", color: "var(--fg-subtle)" }}>Not installed</span></Show>
+                    <Show when={chat.composer.agentId === a.id}><Icon name="check" size={14} /></Show>
+                  </MenuItem>
+                )}
+              </For>
+            </Menu>
+            <button ref={modelAnchor} type="button" class="pill composer-model" onClick={() => setModelMenu((v) => !v)} title="Model and effort" aria-label={`Model and effort: ${modelSummary() ?? (native() ? "CLI setting" : "Default")}`} aria-haspopup="menu" aria-expanded={modelMenu()}>
+              <span class="picker-label">{modelSummary() ?? (native() ? "CLI setting" : "Default")}</span><Icon name="chevronDown" size={11} />
+            </button>
+            <Menu open={modelMenu()} onClose={() => setModelMenu(false)} anchorRef={modelAnchor} align="right" width={300}>
+              <MenuLabel>Model</MenuLabel>
+              <MenuItem onSelect={() => setComposer({ model: null })}>
+                <span style={{ flex: 1 }}>{native() ? "Use CLI setting" : "Default"}</span>
+                <Show when={!chat.composer.model}><Icon name="check" size={14} /></Show>
+              </MenuItem>
+              <For each={tuning()?.models ?? []}>
+                {(m) => (
+                  <MenuItem onSelect={() => setComposer({ model: m.id })}>
+                    <span style={{ flex: 1 }}>{m.label}</span>
+                    <Show when={chat.composer.model === m.id}><Icon name="check" size={14} /></Show>
+                  </MenuItem>
+                )}
+              </For>
+              <Show when={native()}>
+                <form class="agent-model-custom" onSubmit={(e) => { e.preventDefault(); setComposer({ model: customModel().trim() || null }); }}>
+                  <input class="ui-field" aria-label="Custom model ID" placeholder="Custom model ID" value={customModel()} onInput={(e) => setCustomModel(e.currentTarget.value)} />
+                  <button type="submit" class="ui-btn ui-btn-outline">Use</button>
+                </form>
+                <Show when={!tuning()?.models.length}><p class="agent-model-hint">The CLI’s model options load when the native session connects.</p></Show>
+              </Show>
+              <Show when={tuning() && tuning()!.efforts.length > 0}>
+                <MenuDivider />
+                <MenuLabel>Effort</MenuLabel>
+                <div class="effort-row">
+                  <button type="button" class="chip" classList={{ "chip-on": !chat.composer.effort }} onClick={() => setComposer({ effort: null })}>{native() ? "CLI setting" : "Default"}</button>
+                  <For each={tuning()!.efforts}>
+                    {(e) => (
+                      <button type="button" class="chip" classList={{ "chip-on": chat.composer.effort === e.id }} onClick={() => setComposer({ effort: e.id })}>
+                        {e.label}
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </Menu>
             <Show when={submitting()}>
               <span ref={sendingStatus} class="composer-send-status" role="status">Sending…</span>
             </Show>
@@ -518,180 +691,6 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
               </Show>
             </div>
           </div>
-        </div>
-      </div>
-
-      <div class="composer-chips">
-        <div class="composer-chips-left">
-          <Show
-            when={!chat.activeId}
-            fallback={
-              <span class="pill pill-static" title={session()?.worktree ? session()!.worktree!.path : "Running in the project folder"}>
-                <Icon name={session()?.worktree ? "gitBranch" : "folder"} size={13} />
-                {session()?.worktree ? session()!.worktree!.branch.replace(/^flipflopper\//, "") : "Local"}
-              </span>
-            }
-          >
-            <button
-              type="button"
-              class="pill"
-              classList={{ "pill-on": chat.composer.worktree }}
-              disabled={!canWorktree()}
-              onClick={() => setComposer({ worktree: !chat.composer.worktree })}
-              title={canWorktree()
-                ? "Run in an isolated git worktree so the agent's edits stay off your branch until you merge"
-                : "Worktrees need a git repository"}
-            >
-              <Icon name={chat.composer.worktree ? "gitBranch" : "folder"} size={13} />
-              {chat.composer.worktree ? "Worktree" : "Local"}
-            </button>
-          </Show>
-
-          <Show
-            when={!chat.activeId && props.onOpenProjects}
-            fallback={
-              <span class="pill pill-static" title={session()?.project_path ?? undefined}>
-                <Icon name="folder" size={13} /> {projectLabel()}
-              </span>
-            }
-          >
-            <button type="button" class="pill" onClick={() => props.onOpenProjects?.()} title="Choose project">
-              <Icon name="folder" size={13} /> {projectLabel()} <Icon name="chevronDown" size={11} />
-            </button>
-          </Show>
-
-          <button
-            ref={modeAnchor}
-            type="button"
-            class="pill"
-            data-mode={chat.composer.mode}
-            classList={{ "pill-full": chat.composer.mode === "full" }}
-            disabled={permissionModeUpdating()}
-            onClick={() => setModeMenu((v) => !v)}
-            title={permissionModeUpdating() ? "Updating session permissions…" : "Session permissions (⇧Tab)"}
-          >
-            <Icon name={modeInfo().icon} size={13} />
-            {modeInfo().label}
-            <Icon name="chevronDown" size={11} />
-          </button>
-          <Menu open={modeMenu()} onClose={() => setModeMenu(false)} anchorRef={modeAnchor} width={320}>
-            <MenuLabel>Permissions</MenuLabel>
-            <For each={MODES}>
-              {(m) => (
-                <MenuItem disabled={!modeAvailable(m.id)} onSelect={() => void chooseMode(m.id)}>
-                  <Icon name={m.icon} size={16} />
-                  <span style={{ display: "flex", "flex-direction": "column", gap: "2px", flex: 1 }}>
-                    <span style={{ "font-weight": 500 }}>{m.label}</span>
-                    <span style={{ "font-size": "12px", color: "var(--fg-subtle)" }}>{!modeAvailable(m.id) ? (m.id === "manual" && !native() ? "This agent can't ask mid-turn." : "Not offered by this CLI version.") : m.hint}</span>
-                  </span>
-                  <Show when={chat.composer.mode === m.id}><Icon name="check" size={14} /></Show>
-                </MenuItem>
-              )}
-            </For>
-          </Menu>
-          <button
-            type="button"
-            class="pill yolo-switch"
-            classList={{ "yolo-switch-on": chat.composer.mode === "full" }}
-            role="switch"
-            aria-label="YOLO mode"
-            aria-checked={chat.composer.mode === "full"}
-            aria-describedby={sessionModePending() ? "session-permission-status" : undefined}
-            disabled={permissionModeUpdating()}
-            aria-busy={permissionModeUpdating()}
-            title={permissionModeUpdating() ? "Updating session permissions…" : sessionModePending()
-              ? "Session updated. This running CLI keeps its launch permissions until the next turn."
-              : "YOLO: auto-approve tools for this session. Applies live to Claude/Cursor. CLI and system policies still apply."}
-            onClick={() => setYolo(chat.composer.mode !== "full")}
-          >
-            <Icon name="zap" size={13} />
-            YOLO
-            <span class="yolo-switch-track" aria-hidden="true"><span /></span>
-          </button>
-          <Show when={sessionModePending()}><span id="session-permission-status" class="pill pill-static" role="status" title={`Current task: ${MODES.find((mode) => mode.id === chat.views[chat.activeId!]?.runtime?.permission_mode)?.label ?? "previous permissions"}. Session permissions apply next turn.`}>Next turn</span></Show>
-        </div>
-
-        <div class="composer-chips-right">
-          <Show when={contextUsage()}>
-            {(usage) => {
-              const ratio = () => Math.min(1, usage().used / Math.max(1, usage().size));
-              return (
-                <button
-                  type="button"
-                  class="context-ring"
-                  data-level={ratio() >= 0.9 ? "high" : ratio() >= 0.7 ? "mid" : "low"}
-                  disabled={!canCompact()}
-                  onClick={compactNow}
-                  title={`${fmtTokens(usage().used)} / ${fmtTokens(usage().size)} context tokens${usage().cost != null ? ` · $${usage().cost!.toFixed(2)}` : ""}${canCompact() ? " — click to compact" : ""}`}
-                  aria-label={`Context ${Math.round(ratio() * 100)}% used${canCompact() ? ". Compact" : ""}`}
-                >
-                  <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
-                    <circle cx="9" cy="9" r="7" class="context-ring-track" />
-                    <circle cx="9" cy="9" r="7" class="context-ring-fill" stroke-dasharray={`${ratio() * 43.98} 43.98`} transform="rotate(-90 9 9)" />
-                  </svg>
-                </button>
-              );
-            }}
-          </Show>
-          <button ref={agentAnchor} type="button" class="pill" onClick={() => setAgentMenu((v) => !v)} title="Agent and model">
-            <AgentLogo agentId={chat.composer.agentId} icon={currentAgent()?.icon} size={16} radius={4} />
-            {currentAgent()?.name ?? chat.composer.agentId}
-            <Show when={modelSummary()}><span class="pill-sub">{modelSummary()}</span></Show>
-            <Icon name="chevronDown" size={11} />
-          </button>
-          <Menu open={agentMenu()} onClose={() => setAgentMenu(false)} anchorRef={agentAnchor} align="right" width={300}>
-            <MenuLabel>Agent</MenuLabel>
-            <For each={chatAgents()}>
-              {(a) => (
-                <MenuItem
-                  disabled={!a.installed}
-                  onSelect={() => { setComposerAgent(a.id); }}
-                >
-                  <AgentLogo agentId={a.id} icon={a.icon} size={20} radius={5} />
-                  <span style={{ flex: 1 }}>{a.name}</span>
-                  <Show when={!a.installed}><span style={{ "font-size": "11px", color: "var(--fg-subtle)" }}>Not installed</span></Show>
-                  <Show when={chat.composer.agentId === a.id}><Icon name="check" size={14} /></Show>
-                </MenuItem>
-              )}
-            </For>
-            <Show when={native() || (tuning() && tuning()!.models.length > 0)}>
-              <MenuDivider />
-              <MenuLabel>Model</MenuLabel>
-              <MenuItem onSelect={() => setComposer({ model: null })}>
-                <span style={{ flex: 1 }}>{native() ? "Use CLI setting" : "Default"}</span>
-                <Show when={!chat.composer.model}><Icon name="check" size={14} /></Show>
-              </MenuItem>
-              <For each={tuning()!.models}>
-                {(m) => (
-                  <MenuItem onSelect={() => setComposer({ model: m.id })}>
-                    <span style={{ flex: 1 }}>{m.label}</span>
-                    <Show when={chat.composer.model === m.id}><Icon name="check" size={14} /></Show>
-                  </MenuItem>
-                )}
-              </For>
-            </Show>
-            <Show when={native()}>
-              <form class="agent-model-custom" onSubmit={(e) => { e.preventDefault(); setComposer({ model: customModel().trim() || null }); }}>
-                <input class="ui-field" aria-label="Custom model ID" placeholder="Custom model ID" value={customModel()} onInput={(e) => setCustomModel(e.currentTarget.value)} />
-                <button type="submit" class="ui-btn ui-btn-outline">Use</button>
-              </form>
-              <Show when={!tuning()?.models.length}><p class="agent-model-hint">The CLI’s model options load when the native session connects.</p></Show>
-            </Show>
-            <Show when={tuning() && tuning()!.efforts.length > 0}>
-              <MenuDivider />
-              <MenuLabel>Effort</MenuLabel>
-              <div class="effort-row">
-                <button type="button" class="chip" classList={{ "chip-on": !chat.composer.effort }} onClick={() => setComposer({ effort: null })}>{native() ? "CLI setting" : "Default"}</button>
-                <For each={tuning()!.efforts}>
-                  {(e) => (
-                    <button type="button" class="chip" classList={{ "chip-on": chat.composer.effort === e.id }} onClick={() => setComposer({ effort: e.id })}>
-                      {e.label}
-                    </button>
-                  )}
-                </For>
-              </div>
-            </Show>
-          </Menu>
         </div>
       </div>
     </div>

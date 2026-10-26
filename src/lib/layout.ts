@@ -15,8 +15,12 @@ export const ZOOM_MAX = ZOOM_STEPS[ZOOM_STEPS.length - 1];
 const [motionReady, setMotionReady] = createSignal(false);
 const [osReduced, setOsReduced] = createSignal(false);
 const [foreground, setForeground] = createSignal(true);
-const [overlayPane, setOverlayPane] = createSignal(false);
-export const paneIsOverlay = overlayPane;
+const [mainWidth, setMainWidth] = createSignal(0);
+const [rootWidth, setRootWidth] = createSignal(0);
+export const sidebarIsOverlay = () => rootWidth() < layout.sidebarWidth + CONVERSATION_MIN + PANEL_INSET * 2;
+export const renderedSidebarWidth = () => Math.min(layout.sidebarWidth, Math.max(0, rootWidth() - PANEL_INSET * 2));
+export const paneIsOverlay = () => resolveSidePane(mainWidth(), layout.sideWidth).overlay;
+export const renderedSideWidth = () => resolveSidePane(mainWidth(), layout.sideWidth).width;
 export const motionForeground = foreground;
 const motionSettlers = new Set<() => void>();
 export function registerMotionSettler(settle: () => void) {
@@ -37,8 +41,6 @@ function applyMotion() {
 /** Owned by the app, including hot reload/unmount cleanup. Never pauses chat. */
 export function watchMotionPreferences() {
   const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-  const narrow = window.matchMedia("(max-width: 1000px)");
-  const resized = () => setOverlayPane(narrow.matches);
   const reduced = () => { setOsReduced(media.matches); applyMotion(); };
   const visibility = () => {
     setForeground(!document.hidden);
@@ -46,11 +48,10 @@ export function watchMotionPreferences() {
     if (document.hidden) settleMotion();
     window.dispatchEvent(new Event(MOTION_EVENT));
   };
-  reduced(); visibility(); resized();
+  reduced(); visibility();
   media.addEventListener("change", reduced);
   document.addEventListener("visibilitychange", visibility);
-  narrow.addEventListener("change", resized);
-  return () => { media.removeEventListener("change", reduced); narrow.removeEventListener("change", resized); document.removeEventListener("visibilitychange", visibility); settleMotion(); };
+  return () => { media.removeEventListener("change", reduced); document.removeEventListener("visibilitychange", visibility); settleMotion(); };
 }
 export function setMotion(motion: MotionPref) {
   setLayout("motion", motion);
@@ -99,6 +100,32 @@ export const [layout, setLayout] = createStore<LayoutState>({ ...DEFAULTS });
 export const SIDEBAR_MIN = 220;
 export const SIDEBAR_MAX = 420;
 export const SIDE_MIN = 340;
+export const CONVERSATION_MIN = 520;
+export const PANEL_INSET = 8;
+export const PANEL_GAP = 8;
+
+/** Inputs are unzoomed layout pixels, measured from the actual flex containers. */
+export function resolveSidePane(available: number, preferred: number) {
+  const space = Math.max(0, Number.isFinite(available) ? available : 0);
+  const wanted = Math.max(SIDE_MIN, Number.isFinite(preferred) ? preferred : DEFAULTS.sideWidth);
+  const overlay = space < CONVERSATION_MIN + SIDE_MIN + PANEL_GAP;
+  return { overlay, width: Math.min(wanted, overlay ? space : space - CONVERSATION_MIN - PANEL_GAP) };
+}
+
+export function watchLayoutSizes(root: HTMLElement, main: HTMLElement) {
+  // contentRect accounts for CSS zoom and native WebView zoom without dividing twice.
+  const observer = new ResizeObserver((entries) => batch(() => {
+    for (const entry of entries) {
+      if (entry.target === root) setRootWidth(entry.contentRect.width);
+      if (entry.target === main) setMainWidth(entry.contentRect.width);
+    }
+  }));
+  setRootWidth(root.clientWidth);
+  setMainWidth(main.clientWidth);
+  observer.observe(root);
+  observer.observe(main);
+  return () => observer.disconnect();
+}
 
 function persist() {
   writePref(KEY, { ...layout });
@@ -174,6 +201,8 @@ export async function hydrateLayout() {
   const projectNames = Object.fromEntries(names && typeof names === "object" && !Array.isArray(names)
     ? Object.entries(names).filter((entry): entry is [string, string] => typeof entry[1] === "string" && !!entry[1].trim()).map(([path, name]) => [path, name.trim().slice(0, 80)]) : []);
   setLayout({ ...DEFAULTS, ...saved, zoom: clampZoom(saved.zoom), projectNames, projectOrder: paths(saved.projectOrder), hiddenProjects: paths(saved.hiddenProjects) });
+  setLayout("sidebarWidth", Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Number.isFinite(layout.sidebarWidth) ? layout.sidebarWidth : DEFAULTS.sidebarWidth)));
+  setLayout("sideWidth", Math.max(SIDE_MIN, Number.isFinite(layout.sideWidth) ? layout.sideWidth : DEFAULTS.sideWidth));
   if (!["system", "reduced", "off"].includes(layout.motion)) setLayout("motion", "system");
   applyTheme(layout.theme);
   applyZoom(layout.zoom);
@@ -182,6 +211,7 @@ export async function hydrateLayout() {
 }
 
 export function toggleSidebar() {
+  if (!layout.sidebarOpen && sidebarIsOverlay()) setLayout("sideOpen", false);
   setLayout("sidebarOpen", (v) => !v);
   persist();
 }
@@ -192,8 +222,8 @@ export function setSidebarWidth(px: number) {
 }
 
 export function setSideWidth(px: number) {
-  const max = Math.max(SIDE_MIN, Math.round(window.innerWidth * 0.7));
-  setLayout("sideWidth", Math.min(max, Math.max(SIDE_MIN, Math.round(px))));
+  if (!Number.isFinite(px)) return;
+  setLayout("sideWidth", Math.max(SIDE_MIN, Math.round(resolveSidePane(mainWidth(), px).width)));
   persist();
 }
 
@@ -205,10 +235,12 @@ export function toggleSide(tab?: SideTab) {
     if (tab) setLayout("sideTab", tab);
     setLayout("sideOpen", tab ? true : !layout.sideOpen);
   }
+  if (layout.sideOpen && sidebarIsOverlay()) setLayout("sidebarOpen", false);
   persist();
 }
 
 export function openSide(tab: SideTab) {
+  if (sidebarIsOverlay()) setLayout("sidebarOpen", false);
   setLayout({ sideOpen: true, sideTab: tab });
   persist();
 }

@@ -334,6 +334,200 @@ async function motionFixture(saved = {}) {
 }
 const settle = async () => { for (let i=0;i<8;i++) await Promise.resolve(); };
 
+test('review panes protect conversation width across sidebar sizes and zoom', async () => {
+  const f = await motionFixture({ sideWidth: 1200 });
+  try {
+    for (const windowWidth of [1440, 1000, 720]) {
+      for (const zoom of [1, 1.25, 2]) {
+        for (const sidebar of [0, 220, 272, 420]) {
+          const logicalWidth = windowWidth / zoom;
+          const dockedSidebar = logicalWidth >= sidebar + 520 + 16 ? sidebar : 0;
+          const available = logicalWidth - dockedSidebar - 16;
+          const pane = f.layout.resolveSidePane(available, f.layout.layout.sideWidth);
+          if (available >= 868) {
+            assert.equal(pane.overlay, false);
+            assert.ok(available - pane.width - 8 >= 520);
+            assert.ok(pane.width >= 340);
+          } else {
+            assert.equal(pane.overlay, true);
+            assert.ok(pane.width <= available);
+          }
+        }
+      }
+    }
+    assert.equal(f.layout.layout.sideWidth, 1200, 'render constraints do not overwrite the preference');
+    assert.equal(f.layout.resolveSidePane(1800, f.layout.layout.sideWidth).width, 1200);
+    assert.equal(f.layout.resolveSidePane(868, 480).width, 340);
+    assert.equal(f.layout.resolveSidePane(867, 480).overlay, true);
+    assert.equal(f.layout.resolveSidePane(1200, NaN).width, 480);
+  } finally { f.dispose(); }
+});
+
+test('measured layout drives overlays and resizing without overwriting restored widths', async () => {
+  const f = await motionFixture({ sideWidth: 1000, sidebarWidth: 272 });
+  const previous = globalThis.ResizeObserver;
+  const root = { clientWidth: 1440 }, main = { clientWidth: 1152 };
+  let notify, disconnected = false;
+  globalThis.ResizeObserver = class {
+    constructor(callback) { notify = callback; }
+    observe() {}
+    disconnect() { disconnected = true; }
+  };
+  try {
+    const stop = f.layout.watchLayoutSizes(root, main);
+    assert.equal(f.layout.sidebarIsOverlay(), false);
+    assert.equal(f.layout.paneIsOverlay(), false);
+    assert.equal(f.layout.renderedSideWidth(), 624);
+    notify([{ target:root, contentRect:{width:720} }, { target:main, contentRect:{width:704} }]);
+    assert.equal(f.layout.sidebarIsOverlay(), true);
+    assert.equal(f.layout.paneIsOverlay(), true);
+    assert.equal(f.layout.renderedSideWidth(), 704);
+    assert.equal(f.layout.layout.sideWidth, 1000);
+    f.layout.openSide('changes');
+    assert.equal(f.layout.layout.sidebarOpen, false, 'opening review dismisses an overlay sidebar');
+    f.layout.toggleSidebar();
+    assert.equal(f.layout.layout.sideOpen, false, 'opening navigation dismisses review on narrow windows');
+    assert.equal(f.layout.layout.sidebarOpen, true);
+    f.layout.toggleSide('preview');
+    assert.equal(f.layout.layout.sidebarOpen, false);
+    assert.equal(f.layout.layout.sideOpen, true);
+    notify([{ target:root, contentRect:{width:1800} }, { target:main, contentRect:{width:1512} }]);
+    assert.equal(f.layout.renderedSideWidth(), 984);
+    assert.equal(f.layout.layout.sideWidth, 1000);
+    notify([{ target:main, contentRect:{width:1600} }]);
+    assert.equal(f.layout.renderedSideWidth(), 1000, "preferred width returns when space permits");
+    notify([{ target:main, contentRect:{width:1512} }]);
+    f.layout.setSideWidth(1500);
+    assert.equal(f.layout.layout.sideWidth, 984, 'explicit dragging respects the conversation minimum');
+    stop(); assert.equal(disconnected, true);
+  } finally { globalThis.ResizeObserver = previous; f.dispose(); }
+});
+
+test('native frame appearance coalesces theme changes and follows system colors', async () => {
+  const f = await motionFixture();
+  f.window.__TAURI_INTERNALS__ = {};
+  let preference = 'light', color = '#E7EEF1', finishTheme;
+  const themes = [], colors = [];
+  const media = f.window.matchMedia('(prefers-color-scheme: light)');
+  globalThis.getComputedStyle = () => ({ getPropertyValue: () => color });
+  const native = await loadFrontend('../src/lib/native.ts', {
+    '@tauri-apps/plugin-os': { platform: () => 'macos' },
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      assert.equal(command, 'plugin:window|set_background_color');
+      assert.equal(args.label, 'main');
+      assert.equal(typeof args.value, 'string', 'Rust window setters require the value argument');
+      colors.push(args.value);
+    } },
+    '@tauri-apps/api/window': { getCurrentWindow: () => ({
+      label: 'main',
+      setTheme: async (value) => {
+        themes.push(value);
+        if (themes.length === 1) await new Promise((resolve) => { finishTheme = resolve; });
+      },
+    }) },
+  });
+  const watcher = native.watchNativeAppearance(() => preference);
+  try {
+    await settle();
+    preference = 'dark'; color = '#0F1417';
+    f.window.dispatchEvent(new Event('flipflopper:theme-changed'));
+    finishTheme(); await watcher.ready; await settle();
+    assert.deepEqual(themes, ['light', 'dark']);
+    assert.deepEqual(colors, ['#0F1417'], 'a stale native request must not apply the old background');
+    media.dispatchEvent(new Event('change')); await settle();
+    assert.equal(colors.length, 1, 'system changes do not override an explicit theme');
+    preference = 'system'; color = '#E7EEF1';
+    f.window.dispatchEvent(new Event('flipflopper:theme-changed')); await settle();
+    assert.equal(themes.at(-1), null);
+    color = '#0F1417'; media.dispatchEvent(new Event('change')); await settle();
+    assert.equal(colors.at(-1), '#0F1417');
+    assert.equal(themes.length, 3, 'system color events must not reapply appearance and cause feedback');
+    const count = colors.length;
+    watcher.dispose();
+    f.window.dispatchEvent(new Event('flipflopper:theme-changed'));
+    media.dispatchEvent(new Event('change')); await settle();
+    assert.equal(colors.length, count);
+  } finally { watcher.dispose(); f.dispose(); }
+});
+
+test('native appearance failures remain observable and later changes can recover', async () => {
+  const f = await motionFixture();
+  f.window.__TAURI_INTERNALS__ = {};
+  let fail = true, errors = 0, applied = 0;
+  const previousError = console.error;
+  console.error = () => {};
+  globalThis.getComputedStyle = () => ({ getPropertyValue: () => '#0F1417' });
+  const native = await loadFrontend('../src/lib/native.ts', {
+    '@tauri-apps/plugin-os': { platform: () => 'macos' },
+    '@tauri-apps/api/core': { invoke: async () => { if (fail) throw new Error('fixture failure'); applied++; } },
+    '@tauri-apps/api/window': { getCurrentWindow: () => ({
+      setTheme: async () => {},
+    }) },
+  });
+  const watcher = native.watchNativeAppearance(() => 'dark', () => { errors++; });
+  try {
+    await watcher.ready;
+    assert.equal(errors, 1);
+    fail = false;
+    f.window.dispatchEvent(new Event('flipflopper:theme-changed')); await settle();
+    assert.equal(applied, 1);
+    assert.equal(errors, 1);
+  } finally { watcher.dispose(); f.dispose(); console.error = previousError; }
+});
+
+test('integrated headers drag blank space without capturing toolbar controls', async () => {
+  const f = await motionFixture();
+  f.window.__TAURI_INTERNALS__ = {};
+  const previousElement = globalThis.Element;
+  class HeaderTarget {
+    constructor(header, interactive = false) { this.header = header; this.interactive = interactive; }
+    closest(selector) { return (selector === '[data-window-header]' ? this.header : this.interactive) ? this : null; }
+  }
+  globalThis.Element = HeaderTarget;
+  let os = 'macos', drags = 0, doubleClicks = 0, prevented = 0;
+  try {
+    const native = await loadFrontend('../src/lib/native.ts', {
+      '@tauri-apps/plugin-os': { platform: () => os },
+      '@tauri-apps/api/window': { getCurrentWindow: () => ({ startDragging: async () => { drags++; } }) },
+      './ipc': { windowTitlebarDoubleClick: async () => { doubleClicks++; } },
+    });
+    const event = (target, detail = 1, button = 0) => ({ target, detail, button, preventDefault: () => { prevented++; } });
+    const blank = new HeaderTarget(true);
+    for (const target of [new HeaderTarget(false), new HeaderTarget(true, true), null]) {
+      await native.handleWindowHeaderMouseDown(event(target));
+      await native.handleWindowHeaderDoubleClick(event(target, 2));
+    }
+    await native.handleWindowHeaderMouseDown(event(blank, 1, 2));
+    await native.handleWindowHeaderMouseDown(event(blank, 2));
+    assert.equal(drags, 0);
+    assert.equal(doubleClicks, 0);
+    await native.handleWindowHeaderMouseDown(event(blank));
+    await native.handleWindowHeaderDoubleClick(event(blank, 2));
+    assert.equal(drags, 1);
+    assert.equal(doubleClicks, 1, 'native preference decides double-click behavior');
+    assert.equal(prevented, 2);
+    os = 'windows';
+    await native.handleWindowHeaderMouseDown(event(blank));
+    await native.handleWindowHeaderDoubleClick(event(blank, 2));
+    assert.equal(drags, 1);
+    assert.equal(doubleClicks, 1);
+  } finally { globalThis.Element = previousElement; f.dispose(); }
+});
+
+test('native frame customization is macOS-only', async () => {
+  const f = await motionFixture();
+  f.window.__TAURI_INTERNALS__ = {};
+  try {
+    const native = await loadFrontend('../src/lib/native.ts', {
+      '@tauri-apps/plugin-os': { platform: () => 'windows' },
+      '@tauri-apps/api/window': { getCurrentWindow: () => { throw new Error('must retain native decorations'); } },
+    });
+    const watcher = native.watchNativeAppearance(() => 'dark');
+    await watcher.ready;
+    watcher.dispose();
+  } finally { f.dispose(); }
+});
+
 test('project names, hidden projects and manual order survive hydration without changing checkout paths', async () => {
   const fixture=await motionFixture();
   try {

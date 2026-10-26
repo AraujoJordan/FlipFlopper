@@ -1,6 +1,6 @@
-import { useValueMotion, useSelectionMotion } from "../ui";
+import { Menu, MenuItem, MenuLabel, useValueMotion, useSelectionMotion } from "../ui";
 import { Component, Show, createSignal } from "solid-js";
-import { activeSession, activeView, projectName, renameSession } from "../../lib/chat";
+import { activeSession, activeView, renameSession } from "../../lib/chat";
 import { layout, openSide, toggleSidebar, toggleSide, type SideTab } from "../../lib/layout";
 import { store } from "../../lib/store";
 import BranchIndicator from "../BranchIndicator";
@@ -17,11 +17,13 @@ const PANE_BUTTONS: { tab: SideTab; icon: IconName; label: string; keys?: string
   { tab: "explain", icon: "help", label: "Explain" },
 ];
 
-/** App toolbar below the native title bar: editable session title, project +
+/** Conversation toolbar, integrated into the title bar on macOS: editable session title,
  *  branch, and the side-pane toggles. Window actions belong to the OS. */
 const SessionHeader: Component<{ changeCount: number }> = (props) => {
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal("");
+  const [moreOpen, setMoreOpen] = createSignal(false);
+  let moreAnchor: HTMLButtonElement | undefined;
   let badge: HTMLSpanElement | undefined;
   let toggles: HTMLDivElement | undefined;
   useValueMotion(() => badge, () => props.changeCount);
@@ -37,7 +39,7 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
   };
 
   return (
-    <header class="session-header">
+    <header class="session-header" data-window-header>
       <Show when={!layout.sidebarOpen}>
         <button class="icon-btn" onClick={toggleSidebar} title="Show sidebar (⌘B)" aria-label="Show sidebar">
           <Icon name="sidebar" size={16} />
@@ -67,12 +69,6 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
             onBlur={() => finish(true)}
           />
         </Show>
-        <Show when={project()}>
-          <span class="session-header-project" title={project()!}>
-            <Icon name="folder" size={13} />
-            {projectName(project()!)}
-          </span>
-        </Show>
         <Show when={activeView()?.running}>
           <span class="session-header-live">Working…</span>
         </Show>
@@ -80,12 +76,12 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
 
       <div class="session-header-actions">
         <Show when={project()}>
-          <BranchIndicator />
+          <div class="session-header-branch"><BranchIndicator /></div>
         </Show>
         <div ref={toggles} class="pane-toggles">
-          {PANE_BUTTONS.map((b) => (
+          {PANE_BUTTONS.slice(0, 3).map((b) => (
             <button
-              class="pane-toggle"
+              class={`pane-toggle${b.tab === "changes" ? " pane-toggle-labeled" : ""}`}
               classList={{ "pane-toggle-on": layout.sideOpen && layout.sideTab === b.tab }}
               onClick={() => (layout.sideOpen && layout.sideTab === b.tab ? toggleSide() : openSide(b.tab))}
               title={b.keys ? `${b.label} (${b.keys})` : b.label}
@@ -93,11 +89,24 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
               aria-pressed={layout.sideOpen && layout.sideTab === b.tab}
             >
               <Icon name={b.icon} size={15} />
+              <Show when={b.tab === "changes"}><span>Changes</span></Show>
               <Show when={b.tab === "changes" && props.changeCount > 0}>
                 <span ref={badge} class="pane-toggle-badge">{props.changeCount}</span>
               </Show>
             </button>
           ))}
+          <button ref={moreAnchor} class="pane-toggle" aria-label="More tools" title="More tools" aria-haspopup="menu" aria-expanded={moreOpen()}
+            classList={{ "pane-toggle-on": layout.sideOpen && (layout.sideTab === "flow" || layout.sideTab === "explain") }}
+            onClick={() => setMoreOpen((v) => !v)}><Icon name="more" size={18} /></button>
+          <Menu open={moreOpen()} onClose={() => setMoreOpen(false)} anchorRef={moreAnchor} align="right" width={220}>
+            <MenuLabel>Tools</MenuLabel>
+            {PANE_BUTTONS.slice(3).map((b) => (
+              <MenuItem onSelect={() => { setMoreOpen(false); layout.sideOpen && layout.sideTab === b.tab ? toggleSide() : openSide(b.tab); }}>
+                <Icon name={b.icon} size={16} /><span style={{ flex: 1 }}>{b.label}</span>
+                <Show when={layout.sideOpen && layout.sideTab === b.tab}><Icon name="check" size={14} /></Show>
+              </MenuItem>
+            ))}
+          </Menu>
         </div>
       </div>
     </header>

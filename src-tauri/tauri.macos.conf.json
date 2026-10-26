@@ -12,8 +12,8 @@
         "minimizable": true,
         "maximizable": true,
         "closable": true,
-        "titleBarStyle": "Visible",
-        "hiddenTitle": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "visible": false,
         "transparent": false
       }

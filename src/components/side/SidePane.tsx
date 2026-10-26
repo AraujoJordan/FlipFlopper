@@ -1,7 +1,7 @@
-import { Component, Show, createMemo, createSignal, createEffect, onCleanup, lazy } from "solid-js";
-import { layout, MOTION_EVENT, paneIsOverlay, setSideWidth, SIDE_MIN, toggleSide, type SideTab } from "../../lib/layout";
+import { Component, Show, createSignal, createEffect, onCleanup, lazy } from "solid-js";
+import { layout, MOTION_EVENT, paneIsOverlay, renderedSideWidth, setSideWidth, toggleSide, type SideTab } from "../../lib/layout";
 import { useResizable } from "../../lib/useResizable";
-import { Icon } from "../shell/Icon";
+import { Icon, type IconName } from "../shell/Icon";
 import { usePresence, useValueMotion } from "../ui";
 import ChangesView from "./ChangesView";
 import PreviewView from "./PreviewView";
@@ -16,6 +16,9 @@ const TITLES: Record<SideTab, string> = {
   terminal: "Terminal",
   flow: "Flow",
   explain: "Explain",
+};
+const ICONS: Record<SideTab, IconName> = {
+  changes: "diff", preview: "globe", terminal: "terminal", flow: "flow", explain: "help",
 };
 
 /** Right-hand pane. Each tab stays mounted after its first visit, so terminals
@@ -36,16 +39,16 @@ const SidePane: Component = () => {
   const { dragging, onPointerDown, onPointerMove, onPointerUp } = useResizable({
     axis: "x",
     invert: true,
-    getSize: () => layout.sideWidth,
+    getSize: renderedSideWidth,
     setSize: setSideWidth,
   });
-  const width = createMemo(() => Math.max(SIDE_MIN, layout.sideWidth));
+  const width = renderedSideWidth;
 
   let pane: HTMLElement | undefined;
   let heading: HTMLSpanElement | undefined;
   const present = usePresence(() => layout.sideOpen, () => pane, {
     axis: "width", size: width, duration: 240, slide: paneIsOverlay,
-    anchor: () => document.querySelector<HTMLElement>(`[aria-label="${TITLES[layout.sideTab]}"]`) ?? undefined,
+    anchor: () => document.querySelector<HTMLElement>(`button[aria-label="${TITLES[layout.sideTab]}"]`) ?? document.querySelector<HTMLElement>('button[aria-label="More tools"]') ?? undefined,
   });
   useValueMotion(() => heading, () => layout.sideTab);
   useValueMotion(() => pane?.querySelector<HTMLElement>(".side-tab-on") ?? undefined, () => layout.sideTab);
@@ -53,7 +56,7 @@ const SidePane: Component = () => {
   const scrimPresent = usePresence(() => layout.sideOpen && paneIsOverlay(), () => scrim);
   createEffect(() => {
     const overlay = layout.sideOpen && paneIsOverlay();
-    const background = [...document.querySelectorAll<HTMLElement>(".center-col, .sidebar-wrap")];
+    const background = [...document.querySelectorAll<HTMLElement>(".center-col, .sidebar-wrap, .session-header")];
     background.forEach((element) => { element.inert = overlay; });
     if (overlay) queueMicrotask(() => pane?.querySelector<HTMLButtonElement>(".side-pane-head button")?.focus({ preventScroll: true }));
     onCleanup(() => background.forEach((element) => { element.inert = false; }));
@@ -61,7 +64,7 @@ const SidePane: Component = () => {
   return (
     <>
     <Show when={scrimPresent()}><div ref={scrim} class="side-scrim motion-scrim" onClick={() => toggleSide()} aria-hidden="true" /></Show>
-    <aside ref={pane} class="side-pane" hidden={!present()} style={{ width: `${width()}px` }}
+    <aside ref={pane} class="side-pane" classList={{ "side-pane-overlay": paneIsOverlay() }} hidden={!present()} style={{ width: `${width()}px` }}
       role={paneIsOverlay() ? "dialog" : undefined} aria-modal={paneIsOverlay() ? true : undefined} aria-label={TITLES[layout.sideTab]}
       onKeyDown={(event) => {
         if (!paneIsOverlay() || !layout.sideOpen || event.defaultPrevented) return;
@@ -80,8 +83,9 @@ const SidePane: Component = () => {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       />
-      <div class="side-pane-head">
-        <span ref={heading} class="side-pane-title">{TITLES[layout.sideTab]}</span>
+      <div class="side-pane-surface">
+      <div class="side-pane-head" data-window-header>
+        <span ref={heading} class="side-pane-title"><Icon name={ICONS[layout.sideTab]} size={16} />{TITLES[layout.sideTab]}</span>
         <button class="icon-btn" onClick={() => toggleSide()} title="Close pane" aria-label="Close pane">
           <Icon name="x" size={15} />
         </button>
@@ -102,6 +106,7 @@ const SidePane: Component = () => {
         <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "explain" }}>
           <Show when={seen("explain")}><ExplainView /></Show>
         </div>
+      </div>
       </div>
     </aside>
     </>
