@@ -104,28 +104,79 @@ function safeHref(url: string): string | null {
   return /^(https?:\/\/|mailto:)/i.test(url) ? url : null;
 }
 
+// Only paths with a directory component are linked. Bare filenames are too
+// easy to mistake for ordinary prose; prefix one with ./ to make it explicit.
+const FILE_START = /^(?:@?(?:\.\.?[\\/]|[\\/]|[A-Za-z]:[\\/]|[A-Za-z0-9_.-]+[\\/]))/;
+const FILE_REF = /(^|[\s([{"'`])((?:@?(?:\.\.?[\\/]|[\\/]|[A-Za-z]:[\\/]|[A-Za-z0-9_.-]+[\\/]))[^\s<>"'`()\[\]{}]+?)(?=$|[\s)\]}> ,"'`!?]|(?<!&amp);)/g;
+
+function filePath(value: string): string | null {
+  const path = value.replace(/&amp;/g, "&").replace(/\.$/, "").replace(/:\d+(?::\d+)?$/, "").replace(/^@/, "");
+  return FILE_START.test(path) && !/[\\/]$/.test(path) && !path.includes("://") ? path : null;
+}
+
+const fileOpenModifier = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac") ? "Cmd" : "Ctrl";
+
+function fileLink(label: string, path: string): string {
+  return `<a href="#" data-file-path="${escapeHtml(path)}" title="${fileOpenModifier}-click to open in default app">${label}</a>`;
+}
+
+function linkWebUrls(text: string, links: string[]): string {
+  return text.replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?])/g, (_m, before: string, url: string) => {
+    links.push(`<a href="${escapeHtml(url.replace(/&amp;/g, "&"))}" data-md-link>${url}</a>`);
+    return `${before}\u0001${links.length - 1}\u0001`;
+  });
+}
+
+/** Link paths in already-escaped text. Generated links are held as tokens so
+ * later Markdown formatting cannot change their attributes or labels. */
+function linkFileReferences(text: string, links: string[]): string {
+  return text.replace(FILE_REF, (match, before: string, candidate: string) => {
+    const label = candidate.replace(/\.+$/, "");
+    const path = filePath(label);
+    if (!path) return match;
+    links.push(fileLink(label, path));
+    return `${before}\u0001${links.length - 1}\u0001${candidate.slice(label.length)}`;
+  });
+}
+
+/** Preserve plain-text whitespace while linking file references and web URLs. */
+export function renderPlainTextWithFileRefs(text: string): string {
+  const links: string[] = [];
+  return linkFileReferences(linkWebUrls(escapeHtml(text), links), links)
+    .replace(/\u0001(\d+)\u0001/g, (_m, i: string) => links[Number(i)]);
+}
+
 /** Inline spans. Code spans are lifted out first so their contents are never
  *  interpreted as emphasis or links. */
 function renderInline(text: string): string {
   const codes: string[] = [];
   let out = text.replace(/`([^`\n]+)`/g, (_m, code: string) => {
-    codes.push(`<code>${escapeHtml(code)}</code>`);
+    const path = filePath(escapeHtml(code));
+    const label = `<code>${escapeHtml(code)}</code>`;
+    codes.push(path ? fileLink(label, path) : label);
     return `\u0000${codes.length - 1}\u0000`;
   });
+  const links: string[] = [];
   out = escapeHtml(out)
     .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, label: string, url: string) => {
-      const href = safeHref(url.replace(/&amp;/g, "&"));
-      return href ? `<a href="${escapeHtml(href)}" data-md-link>${label}</a>` : m;
-    })
-    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?])/g, (_m, pre: string, url: string) =>
-      `${pre}<a href="${url}" data-md-link>${url}</a>`)
+      const decoded = url.replace(/&amp;/g, "&");
+      const href = safeHref(decoded);
+      const path = href ? null : filePath(url);
+      if (!href && !path) return m;
+      links.push(href ? `<a href="${escapeHtml(href)}" data-md-link>${label}</a>` : fileLink(label, path!));
+      return `\u0001${links.length - 1}\u0001`;
+    });
+  out = linkWebUrls(out, links);
+  out = linkFileReferences(out, links)
     .replace(/\*\*\*([^*\n]+)\*\*\*/g, "<strong><em>$1</em></strong>")
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
     .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
     .replace(/(^|[^_\w])_([^_\n]+)_(?![_\w])/g, "$1<em>$2</em>")
     .replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
-  return out.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => codes[Number(i)]);
+  return out
+    .replace(/\u0001(\d+)\u0001/g, (_m, i: string) => links[Number(i)])
+    .replace(/\u0000(\d+)\u0000/g, (_m, i: string) => codes[Number(i)]);
 }
 
 const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;

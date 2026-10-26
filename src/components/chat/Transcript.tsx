@@ -1,7 +1,9 @@
 import { Component, For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { activeView, chat, pendingInputCount, dropQueued, isRunning, sendQueuedNow, onLivePresentation, onClearMotion } from "../../lib/chat";
 import { resolvedMotion } from "../../lib/layout";
-import { animateElement, reveal, cancelMotion, useListMotion } from "../ui";
+import { openConversationFile } from "../../lib/attachments";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { animateElement, reveal, cancelMotion, useListMotion, toast } from "../ui";
 import { Icon } from "../shell/Icon";
 import { AssistantBubble, Divider, UserBubble } from "./MessageItem";
 
@@ -19,6 +21,9 @@ const Transcript: Component = () => {
   let scroller: HTMLDivElement | undefined;
   let content: HTMLDivElement | undefined;
   const [stuck, setStuck] = createSignal(true);
+  const [fileModHeld, setFileModHeld] = createSignal(false);
+  const isMac = navigator.platform.toLowerCase().includes("mac");
+  const hasFileMod = (event: MouseEvent) => isMac ? event.metaKey : event.ctrlKey;
   const [limit, setLimit] = createSignal(PAGE);
   const queueKeys = new WeakMap<object, string>();
   let queueKey = 0;
@@ -27,6 +32,16 @@ const Transcript: Component = () => {
   const seen = new Set<string>();
   let disposed = false;
   onMount(() => {
+    const syncModifier = (event: KeyboardEvent) => setFileModHeld(isMac ? event.metaKey : event.ctrlKey);
+    const clearModifier = () => setFileModHeld(false);
+    window.addEventListener("keydown", syncModifier);
+    window.addEventListener("keyup", syncModifier);
+    window.addEventListener("blur", clearModifier);
+    onCleanup(() => {
+      window.removeEventListener("keydown", syncModifier);
+      window.removeEventListener("keyup", syncModifier);
+      window.removeEventListener("blur", clearModifier);
+    });
     const off = onLivePresentation((sessionId, hints) => {
       queueMicrotask(() => {
         if (disposed || document.hidden || chat.activeId !== sessionId || !content) return;
@@ -125,9 +140,32 @@ const Transcript: Component = () => {
     });
   };
 
+  const onLinkClick = (event: MouseEvent) => {
+    if (!(event.target instanceof Element)) return;
+    const link = event.target.closest<HTMLAnchorElement>("a[data-file-path]");
+    if (link && scroller?.contains(link)) {
+      event.preventDefault();
+      if (!hasFileMod(event) && event.detail !== 0) return;
+      const path = link.dataset.filePath;
+      if (!path) return;
+      void (async () => {
+        try {
+          await openConversationFile(path);
+        } catch (error) {
+          toast(`Couldn't open ${path}: ${String(error)}`, "error");
+        }
+      })();
+      return;
+    }
+    const webLink = event.target.closest<HTMLAnchorElement>("a[data-md-link]");
+    if (!webLink || !scroller?.contains(webLink)) return;
+    event.preventDefault();
+    void openUrl(webLink.href).catch((error) => toast(`Couldn't open link: ${String(error)}`, "error"));
+  };
+
   return (
     <div class="transcript-wrap">
-      <div class="transcript" ref={scroller} onScroll={onScroll} role="log" aria-label="Conversation" aria-live="off">
+      <div class="transcript" classList={{ "file-mod-held": fileModHeld() }} ref={scroller} onScroll={onScroll} onClick={onLinkClick} onMouseMove={(event) => setFileModHeld(hasFileMod(event))} role="log" aria-label="Conversation" aria-live="off">
         <div class="transcript-inner" ref={content}>
           <Show when={hidden() > 0}>
             <button type="button" class="load-earlier" onClick={loadEarlier}>

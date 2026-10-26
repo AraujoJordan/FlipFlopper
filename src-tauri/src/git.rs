@@ -769,6 +769,20 @@ pub fn checkout_previous(project_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchInfo {
+    /// Local branch name (e.g. `feature/login`, even for a remote-only ref `origin/feature/login`).
+    pub name: String,
+    /// Full remote tracking ref if this branch only exists on a remote (e.g. `Some("origin/feature/login")`).
+    pub remote_ref: Option<String>,
+    /// True if this branch is not yet checked out locally.
+    pub is_remote: bool,
+    /// Configured upstream (for local branches) or remote ref.
+    pub upstream: Option<String>,
+    /// Human-readable relative commit timestamp (e.g. `2 hours ago`).
+    pub last_commit_time: String,
+}
+
 /// Get the recent local branches, sorted by committerdate (most recent first).
 pub fn get_recent_branches(project_path: &str, limit: usize) -> Result<Vec<String>, String> {
     let limit_str = limit.to_string();
@@ -790,11 +804,177 @@ pub fn get_recent_branches(project_path: &str, limit: usize) -> Result<Vec<Strin
     Ok(branches)
 }
 
-/// Switch to an existing branch, committing any pending work first so nothing
-/// is carried onto the target branch or lost.
+/// List local and remote branches sorted by most recent commit (`-committerdate`).
+/// Remote branches that already exist locally are deduplicated into the local entry.
+pub fn list_branches(project_path: &str, limit: usize) -> Result<Vec<BranchInfo>, String> {
+    use std::collections::HashSet;
+
+    let fmt = "%(refname)\x1f%(refname:short)\x1f%(upstream:short)\x1f%(committerdate:relative)";
+    let out = git(
+        project_path,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            &format!("--format={fmt}"),
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    )?;
+
+    let mut local_names = HashSet::new();
+    let mut raw_rows = Vec::new();
+
+    for line in out.lines().filter(|l| !l.trim().is_empty()) {
+        let parts: Vec<&str> = line.splitn(4, '\x1f').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let full_ref = parts[0].trim();
+        let upstream = parts[2].trim();
+        let rel_time = parts[3].trim();
+
+        if let Some(local_name) = full_ref.strip_prefix("refs/heads/") {
+            if !local_name.is_empty() {
+                local_names.insert(local_name.to_string());
+                raw_rows.push((
+                    false,
+                    local_name.to_string(),
+                    None,
+                    if upstream.is_empty() {
+                        None
+                    } else {
+                        Some(upstream.to_string())
+                    },
+                    rel_time.to_string(),
+                ));
+            }
+        } else if let Some(remote_rest) = full_ref.strip_prefix("refs/remotes/") {
+            if let Some((_remote, branch_name)) = remote_rest.split_once('/') {
+                if branch_name.is_empty() || branch_name == "HEAD" {
+                    continue;
+                }
+                raw_rows.push((
+                    true,
+                    branch_name.to_string(),
+                    Some(remote_rest.to_string()),
+                    Some(remote_rest.to_string()),
+                    rel_time.to_string(),
+                ));
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let mut results = Vec::new();
+
+    for (is_remote, name, remote_ref, upstream, last_commit_time) in raw_rows {
+        if is_remote && local_names.contains(&name) {
+            continue;
+        }
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        results.push(BranchInfo {
+            name,
+            remote_ref,
+            is_remote,
+            upstream,
+            last_commit_time,
+        });
+        if limit > 0 && results.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(results)
+}
+
+/// Switch to an existing local or remote branch, committing any pending work
+/// first so nothing is carried onto the target branch or lost. If the branch
+/// only exists on a remote, creates a local tracking branch automatically.
 pub fn switch_branch(project_path: &str, branch_name: &str) -> Result<(), String> {
+    let branch_name = branch_name.trim();
+    if branch_name.is_empty() {
+        return Err("Branch name cannot be empty.".to_string());
+    }
     commit_before_switch(project_path)?;
+
+    let local_ref = format!("refs/heads/{branch_name}");
+    let has_local = git_output(project_path, &["show-ref", "--verify", "--quiet", &local_ref])
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if has_local {
+        git(project_path, &["switch", branch_name])?;
+        return Ok(());
+    }
+
+    let origin_ref = format!("refs/remotes/origin/{branch_name}");
+    let has_origin = git_output(project_path, &["show-ref", "--verify", "--quiet", &origin_ref])
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if has_origin {
+        git(
+            project_path,
+            &["switch", "-c", branch_name, "--track", &format!("origin/{branch_name}")],
+        )?;
+        return Ok(());
+    }
+
     git(project_path, &["switch", branch_name])?;
     Ok(())
 }
+
+/// Apply a unified diff patch to the index (`cached = true`) or working tree
+/// (`cached = false`), optionally in reverse (`reverse = true` to unstage or
+/// discard). Uses `--unidiff-zero` and `--recount` so partial-line and
+/// single-hunk patches apply cleanly.
+pub fn apply_patch(
+    project_path: &str,
+    patch: &str,
+    cached: bool,
+    reverse: bool,
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut args = vec!["apply", "--unidiff-zero", "--recount", "--whitespace=nowarn"];
+    if cached {
+        args.push("--cached");
+    }
+    if reverse {
+        args.push("--reverse");
+    }
+    args.push("-");
+
+    let mut child = Command::new("git")
+        .args(&args)
+        .current_dir(project_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git error: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut bytes = patch.as_bytes().to_vec();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        stdin
+            .write_all(&bytes)
+            .map_err(|e| format!("git apply stdin error: {e}"))?;
+    }
+
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("git apply error: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 

@@ -4,6 +4,7 @@ import add from "@material-symbols/svg-400/rounded/add.svg?raw";
 import alternate_email from "@material-symbols/svg-400/rounded/alternate_email.svg?raw";
 import archive from "@material-symbols/svg-400/rounded/archive.svg?raw";
 import arrow_downward from "@material-symbols/svg-400/rounded/arrow_downward.svg?raw";
+import arrow_back from "@material-symbols/svg-400/rounded/arrow_back.svg?raw";
 import arrow_forward from "@material-symbols/svg-400/rounded/arrow_forward.svg?raw";
 import arrow_upward from "@material-symbols/svg-400/rounded/arrow_upward.svg?raw";
 import audio_file from "@material-symbols/svg-400/rounded/audio_file.svg?raw";
@@ -19,6 +20,7 @@ import compare from "@material-symbols/svg-400/rounded/compare.svg?raw";
 import content_copy from "@material-symbols/svg-400/rounded/content_copy.svg?raw";
 import content_paste from "@material-symbols/svg-400/rounded/content_paste.svg?raw";
 import create_new_folder from "@material-symbols/svg-400/rounded/create_new_folder.svg?raw";
+import crop_square from "@material-symbols/svg-400/rounded/crop_square.svg?raw";
 import css from "@material-symbols/svg-400/rounded/css.svg?raw";
 import data_object from "@material-symbols/svg-400/rounded/data_object.svg?raw";
 import deleteIcon from "@material-symbols/svg-400/rounded/delete.svg?raw";
@@ -28,10 +30,12 @@ import download from "@material-symbols/svg-400/rounded/download.svg?raw";
 import draft from "@material-symbols/svg-400/rounded/draft.svg?raw";
 import drag_indicator from "@material-symbols/svg-400/rounded/drag_indicator.svg?raw";
 import edit from "@material-symbols/svg-400/rounded/edit.svg?raw";
+import fiber_manual_record from "@material-symbols/svg-400/rounded/fiber_manual_record.svg?raw";
 import fit_screen from "@material-symbols/svg-400/rounded/fit_screen.svg?raw";
 import folder from "@material-symbols/svg-400/rounded/folder.svg?raw";
 import format_list_bulleted from "@material-symbols/svg-400/rounded/format_list_bulleted.svg?raw";
 import help from "@material-symbols/svg-400/rounded/help.svg?raw";
+import home from "@material-symbols/svg-400/rounded/home.svg?raw";
 import history from "@material-symbols/svg-400/rounded/history.svg?raw";
 import html from "@material-symbols/svg-400/rounded/html.svg?raw";
 import image from "@material-symbols/svg-400/rounded/image.svg?raw";
@@ -41,12 +45,15 @@ import language from "@material-symbols/svg-400/rounded/language.svg?raw";
 import layers from "@material-symbols/svg-400/rounded/layers.svg?raw";
 import lock from "@material-symbols/svg-400/rounded/lock.svg?raw";
 import merge from "@material-symbols/svg-400/rounded/merge.svg?raw";
+import mobile from "@material-symbols/svg-400/rounded/mobile.svg?raw";
 import more_horiz from "@material-symbols/svg-400/rounded/more_horiz.svg?raw";
 import open_in_new from "@material-symbols/svg-400/rounded/open_in_new.svg?raw";
 import package_2 from "@material-symbols/svg-400/rounded/package_2.svg?raw";
+import photo_camera from "@material-symbols/svg-400/rounded/photo_camera.svg?raw";
 import picture_as_pdf from "@material-symbols/svg-400/rounded/picture_as_pdf.svg?raw";
 import play_arrow from "@material-symbols/svg-400/rounded/play_arrow.svg?raw";
 import refresh from "@material-symbols/svg-400/rounded/refresh.svg?raw";
+import rotate_right from "@material-symbols/svg-400/rounded/rotate_right.svg?raw";
 import remove from "@material-symbols/svg-400/rounded/remove.svg?raw";
 import schema from "@material-symbols/svg-400/rounded/schema.svg?raw";
 import search from "@material-symbols/svg-400/rounded/search.svg?raw";
@@ -129,6 +136,13 @@ const SYMBOLS = {
   html: html,
   css: css,
   javascript: javascript,
+  arrowLeft: arrow_back,
+  home: home,
+  square: crop_square,
+  record: fiber_manual_record,
+  device: mobile,
+  camera: photo_camera,
+  rotate: rotate_right,
 } as const;
 
 export type IconName = keyof typeof SYMBOLS;

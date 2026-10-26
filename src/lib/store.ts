@@ -1,5 +1,5 @@
 import { createStore } from "solid-js/store";
-import type { AgentInfo, ProjectInfo } from "./ipc";
+import type { AgentInfo, ProjectInfo, RunTarget } from "./ipc";
 import { getCurrentBranch, ptyKill } from "./ipc";
 import { openSide } from "./layout";
 import { disposeCachedTerminal } from "./terminalCache";
@@ -35,6 +35,16 @@ export interface ReviewState {
   mode?: "staged" | "unstaged";
 }
 
+export interface ReviewCommentDraft {
+  id: string;
+  filePath: string;
+  lineRangeLabel: string;
+  fenceLang: string;
+  snippet: string;
+  instruction: string;
+  endFlatIndex: number;
+}
+
 export interface AppStore {
   currentProject: ProjectInfo | null;
   recentProjects: ProjectInfo[];
@@ -45,6 +55,8 @@ export interface AppStore {
   activeSessionWorktree: WorktreeInfoRef | undefined;
   review: ReviewState | null;
   runSessionId: string | null;
+  /** Run targets of the open project, shared by RunButton and the Preview tab. */
+  runTargets: RunTarget[];
   validationSessionId: string | null;
   /** bumped after agent turns/commits so git-status consumers refetch */
   gitStatusVersion: number;
@@ -56,12 +68,19 @@ export interface AppStore {
    *  ready-made instruction. The composer appends/focuses it as editable text
    *  and clears this. */
   pendingPromptSeed: { text: string; projectPath?: string } | null;
+  /** Keyed by `${root}::${revScope}::${path}` → diff/status signature or `"*"`. */
+  viewedFiles: Record<string, string>;
+  /** Queued inline review comments across files/lines before batch submission. */
+  reviewComments: ReviewCommentDraft[];
   /** True from launch until the persisted workspace has been restored or
    *  determined absent; drives skeleton states. */
   restoringWorkspace: boolean;
   terminals: TerminalTab[];
   activeTerminalId: string | null;
 }
+
+const VIEWED_FILES_KEY = "flipflopper:viewed-files";
+const viewedFilesCache = readLegacyJson<Record<string, string>>(VIEWED_FILES_KEY, {});
 
 const initial: AppStore = {
   currentProject: null,
@@ -71,12 +90,15 @@ const initial: AppStore = {
   activeSessionWorktree: undefined,
   review: null,
   runSessionId: null,
+  runTargets: [],
   validationSessionId: null,
   gitStatusVersion: 0,
   currentBranch: "",
   gitPanelTab: "changes",
   historyFilterPath: null,
   pendingPromptSeed: null,
+  viewedFiles: { ...viewedFilesCache },
+  reviewComments: [],
   restoringWorkspace: true,
   terminals: [],
   activeTerminalId: null,
@@ -136,17 +158,24 @@ export function writeAndroidDevice(projectPath: string, serial: string) {
 /** Load durable copies of the caches above (they are seeded synchronously from
  *  legacy localStorage so the first paint doesn't wait on the pref store). */
 export async function hydrateStorePreferences() {
-  const [runTargets, validationTargets, androidDevices] = await Promise.all([
+  const [runTargets, validationTargets, androidDevices, viewedFiles] = await Promise.all([
     readPref(RUN_TARGET_KEY, runTargetsCache, () => runTargetsCache),
     readPref(VALIDATION_TARGET_KEY, validationTargetsCache, () => validationTargetsCache),
     readPref(ANDROID_DEVICE_KEY, androidDevicesCache, () => androidDevicesCache),
+    readPref(VIEWED_FILES_KEY, viewedFilesCache, () => viewedFilesCache),
   ]);
   Object.assign(runTargetsCache, runTargets);
   Object.assign(validationTargetsCache, validationTargets);
   Object.assign(androidDevicesCache, androidDevices);
+  Object.assign(viewedFilesCache, viewedFiles);
+  setStore("viewedFiles", { ...viewedFilesCache });
 }
 
 // ── Terminal helpers ─────────────────────────────────────────────────────────
+
+export function setRunTargets(targets: RunTarget[]) {
+  setStore("runTargets", targets);
+}
 
 export function addTerminal(tab: TerminalTab) {
   setStore("terminals", (t) => [...t, tab]);
@@ -202,10 +231,114 @@ export function closeReview() {
   setStore("review", null);
 }
 
+const MAX_VIEWED_ENTRIES = 600;
+
+function viewedKey(path: string, rev?: string): string | null {
+  const root = effectiveRoot();
+  if (!root) return null;
+  return `${root}::${rev ?? "worktree"}::${path}`;
+}
+
+export function fileDiffSignature(file: {
+  status: string;
+  additions: number;
+  deletions: number;
+  hunks: { header: string; lines: { kind: string; content: string }[] }[];
+}): string {
+  let hash = 2166136261;
+  const feed = (s: string) => {
+    for (let i = 0; i < s.length; i++) {
+      hash ^= s.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  };
+  feed(`${file.status}:${file.additions}:${file.deletions}`);
+  for (const h of file.hunks) {
+    feed(h.header);
+    for (const l of h.lines) {
+      feed(`${l.kind[0]}:${l.content}\n`);
+    }
+  }
+  return (hash >>> 0).toString(36);
+}
+
+export function isFileViewed(path: string, rev?: string, diffSig?: string): boolean {
+  const key = viewedKey(path, rev);
+  if (!key) return false;
+  const saved = store.viewedFiles[key];
+  if (!saved) return false;
+  if (!diffSig || saved === "*") return true;
+  return saved === diffSig;
+}
+
+export function setFileViewed(path: string, viewed: boolean, rev?: string, diffSig?: string) {
+  const key = viewedKey(path, rev);
+  if (!key) return;
+  if (viewed) {
+    const val = diffSig ?? "*";
+    viewedFilesCache[key] = val;
+    const keys = Object.keys(viewedFilesCache);
+    if (keys.length > MAX_VIEWED_ENTRIES) {
+      for (const oldKey of keys.slice(0, keys.length - MAX_VIEWED_ENTRIES)) {
+        delete viewedFilesCache[oldKey];
+      }
+    }
+    setStore("viewedFiles", key, val);
+  } else {
+    delete viewedFilesCache[key];
+    setStore("viewedFiles", key, undefined!);
+  }
+  writePref(VIEWED_FILES_KEY, viewedFilesCache);
+}
+
+export function toggleFileViewed(path: string, rev?: string, diffSig?: string): boolean {
+  const next = !isFileViewed(path, rev, diffSig);
+  setFileViewed(path, next, rev, diffSig);
+  return next;
+}
+
+export function addReviewComment(draft: Omit<ReviewCommentDraft, "id">): ReviewCommentDraft {
+  const item: ReviewCommentDraft = {
+    ...draft,
+    id: `rc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+  };
+  setStore("reviewComments", (list) => [...list, item]);
+  return item;
+}
+
+export function removeReviewComment(id: string) {
+  setStore("reviewComments", (list) => list.filter((c) => c.id !== id));
+}
+
+export function clearReviewComments() {
+  setStore("reviewComments", []);
+}
+
+export function formatReviewBatchPrompt(comments = store.reviewComments): string {
+  if (comments.length === 0) return "";
+  if (comments.length === 1) {
+    const c = comments[0];
+    return `In \`@${c.filePath}\`${c.lineRangeLabel ? ` (${c.lineRangeLabel})` : ""}:\n\`\`\`${c.fenceLang}\n${c.snippet}\n\`\`\`\n${c.instruction}`;
+  }
+  const sections = comments.map(
+    (c, idx) =>
+      `### ${idx + 1}. \`@${c.filePath}\`${c.lineRangeLabel ? ` (${c.lineRangeLabel})` : ""}\n\`\`\`${c.fenceLang}\n${c.snippet}\n\`\`\`\n${c.instruction}`,
+  );
+  return `Please address the following ${comments.length} code review comments:\n\n${sections.join("\n\n")}`;
+}
+
 // ── Git panel state ──────────────────────────────────────────────────────────
 
 export function setGitPanelTab(tab: "changes" | "history") {
   setStore("gitPanelTab", tab);
+}
+
+export function setHistoryFilter(path: string | null) {
+  setStore("historyFilterPath", path);
+  if (path) {
+    setStore("gitPanelTab", "history");
+    setStore("review", null);
+  }
 }
 
 export function clearHistoryFilter() {

@@ -5,7 +5,7 @@ import {
   cancelTurn, retryLastTurn, setComposerAgent, chat,
   pendingInputCount, type InteractionBlock, type AssistantMessage, type Block, type CompactionBlock, type DividerMessage, type NoticeBlock, type SubagentBlock, type ThinkingBlock, type ToolBlock, type UserMessage,
 } from "../../lib/chat";
-import { store, setPendingPromptSeed } from "../../lib/store";
+import { openReview, store, setPendingPromptSeed } from "../../lib/store";
 import { chatCancelSubagent } from "../../lib/ipc";
 import { writeClipboardText } from "../../lib/native";
 import { runAction } from "../../lib/shortcuts";
@@ -15,6 +15,7 @@ import { openSide } from "../../lib/layout";
 import { Menu, MenuItem, MenuLabel, Spinner, Disclosure, useValueMotion, toast } from "../ui";
 import { Icon } from "../shell/Icon";
 import Markdown from "./Markdown";
+import { renderPlainTextWithFileRefs } from "../../lib/markdownLite";
 import ToolCallRow from "./ToolCallRow";
 import AttachmentChip from "./AttachmentChip";
 import AgentInteraction from "./AgentInteraction";
@@ -58,7 +59,7 @@ export const UserBubble: Component<{ message: UserMessage }> = (props) => (
           <For each={props.message.attachments}>{(a) => <AttachmentChip attachment={a} />}</For>
         </div>
       </Show>
-      <Show when={props.message.text}><div class="msg-user-body">{props.message.text}</div></Show>
+      <Show when={props.message.text}><div class="msg-user-body" innerHTML={renderPlainTextWithFileRefs(props.message.text)} /></Show>
     </div>
     <div class="msg-actions">
       <ActionButton icon="copy" label="Copy" onClick={() => writeClipboardText(props.message.text, "message")} />
@@ -352,17 +353,19 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
       </Show>
 
       <Show when={!running() && props.message.changedFiles.length > 0}>
-        <button type="button" class="turn-changes" onClick={() => openSide("changes")}>
-          <Icon name="diff" size={14} />
-          <span>
-            Review changes · {props.message.changedFiles.length} file{props.message.changedFiles.length === 1 ? "" : "s"}
-          </span>
+        <div class="turn-changes">
+          <button type="button" class="turn-changes-main" onClick={() => openSide("changes")}>
+            <Icon name="diff" size={14} />
+            <span>Review changes · {props.message.changedFiles.length} file{props.message.changedFiles.length === 1 ? "" : "s"}</span>
+          </button>
           <span class="turn-changes-files">
-            {props.message.changedFiles.slice(0, 3).map((f) => f.path.split("/").pop()).join(", ")}
-            {props.message.changedFiles.length > 3 ? ` +${props.message.changedFiles.length - 3}` : ""}
+            <For each={props.message.changedFiles.slice(0, 3)}>
+              {(file) => <button type="button" class="turn-changes-file" title={`Review current diff for ${file.path}`} onClick={() => openReview(undefined, file.path.split(/[\\/]/).pop() || file.path, file.path)}>{file.path}</button>}
+            </For>
+            <Show when={props.message.changedFiles.length > 3}><span class="turn-changes-more">+{props.message.changedFiles.length - 3}</span></Show>
           </span>
-          <Icon name="chevronRight" size={16} />
-        </button>
+          <button type="button" class="turn-changes-all" onClick={() => openSide("changes")} title="Open all changes" aria-label="Open all changes"><Icon name="chevronRight" size={16} /></button>
+        </div>
       </Show>
 
       <Show when={!running()}>

@@ -76,7 +76,16 @@ Currently implemented:
   Local/Worktree toggle.
 - Side pane with Changes (git status/sync/history over the existing git
   backend, diffs via `DiffPane`), Preview (Run targets + iframe of the
-  captured dev-server URL), Terminal (shell PTYs, validation targets, resume
+  captured dev-server URL; Android projects show the live device/emulator
+  instead: `android_mirror.rs` runs the installed scrcpy's `scrcpy-server` over
+  adb and relays H.264 to `AndroidPreview`, which decodes with WebCodecs and
+  sends scrcpy control messages. Touch/keys, screenshot and in-app video
+  recording (saved as attachments). Without scrcpy or `VideoDecoder` it falls
+  back to `adb screencap` snapshots; AVDs can be booted headless from the pane.
+  iOS projects show the booted Simulator the same way (`ios_mirror.rs` +
+  `IosPreview`, macOS only): `xcrun simctl` gives screenshots, native video
+  recording and headless boot; optional Meta `idb` adds the live H.264 stream
+  and tap/swipe/text input, otherwise the pane is view-only snapshots), Terminal (shell PTYs, validation targets, resume
   in the agent's TUI) and Flow tabs.
 - Multi-agent orchestrator flow canvas (`lib/orchestrator.ts`): every session
   in the open project is a live node (`live-<sessionId>`); queued steps start
@@ -216,6 +225,8 @@ src/
   lib/layout.ts              sidebar/side-pane open state, widths, theme pref,
                              sidebar grouping/filter
   lib/importer.ts            scan/import CLI sessions state
+  lib/androidMirror.ts       shared H.264 pipeline, scrcpy control encoders, recording
+  lib/iosMirror.ts           iOS Simulator mirror (idb stream/input, simctl snapshots)
   lib/attachments.ts         pending attachments (pick/drop/paste)
   lib/palette.ts             command palette open state
   lib/install.ts             install agents via the tool catalog
@@ -241,7 +252,7 @@ src/
                              Transcript, MessageItem, ToolCallRow, InlineDiff,
                              Markdown, Composer, EmptyState, AttachmentChip
     side/                    SidePane (CSS-toggled tabs), ChangesView,
-                             PreviewView, TerminalView, FlowView, ExplainView
+                             PreviewView, AndroidPreview, IosPreview, TerminalView, FlowView, ExplainView
     flow/                    FlowCanvas, FlowNodeCard, FlowEdges, AddStepMenu
     git/                     SyncHeader, ChangesTab, HistoryTab, dialogs
                              (squash-push, conflict fix, worktree merge/discard)
@@ -261,6 +272,9 @@ src-tauri/src/
                              index + JSONL transcripts + digest), adapters/ (one
                              parser + invocation per agent), fixtures/
   pty.rs                     portable-pty shell sessions
+  android_mirror.rs          scrcpy-server launch/relay + snapshot input for the
+                             Android Preview (pure adb plumbing)
+  ios_mirror.rs              simctl + optional idb stream/input for the iOS Preview
   agents.rs                  static agent registry, PATH/version detection,
                              headless one-shot helper
   project.rs                 read-only inspection, opt-in local agent setup, recents, skills,

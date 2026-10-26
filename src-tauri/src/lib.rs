@@ -1,7 +1,9 @@
 mod agents;
+mod android_mirror;
 mod chat;
 mod env;
 mod git;
+mod ios_mirror;
 mod project;
 mod pty;
 mod review;
@@ -800,6 +802,14 @@ async fn get_recent_branches(project_path: String, limit: usize) -> Result<Vec<S
 }
 
 #[tauri::command]
+async fn git_list_branches(
+    project_path: String,
+    limit: usize,
+) -> Result<Vec<git::BranchInfo>, String> {
+    run_blocking(move || git::list_branches(&project_path, limit)).await?
+}
+
+#[tauri::command]
 async fn git_switch_branch(project_path: String, branch_name: String) -> Result<(), String> {
     run_blocking(move || git::switch_branch(&project_path, &branch_name)).await?
 }
@@ -840,6 +850,16 @@ async fn git_discard(
     untracked: Vec<String>,
 ) -> Result<(), String> {
     run_blocking(move || git::discard_paths(&project_path, &tracked, &untracked)).await?
+}
+
+#[tauri::command]
+async fn git_apply_patch(
+    project_path: String,
+    patch: String,
+    cached: bool,
+    reverse: bool,
+) -> Result<(), String> {
+    run_blocking(move || git::apply_patch(&project_path, &patch, cached, reverse)).await?
 }
 
 #[tauri::command]
@@ -1126,6 +1146,52 @@ async fn validate_project(
 }
 
 #[tauri::command]
+async fn android_mirror_start(
+    state: State<'_, std::sync::Arc<android_mirror::MirrorManager>>,
+    project_path: String,
+    serial: String,
+    max_size: Option<u32>,
+    on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<android_mirror::MirrorInfo, String> {
+    let manager = state.inner().clone();
+    run_blocking(move || {
+        manager.start(&project_path, &serial, max_size.unwrap_or(1280).clamp(320, 4096), on_frame)
+    })
+    .await?
+}
+
+#[tauri::command]
+fn android_mirror_control(
+    state: State<'_, std::sync::Arc<android_mirror::MirrorManager>>,
+    serial: String,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    state.control(&serial, &bytes)
+}
+
+#[tauri::command]
+async fn android_mirror_stop(
+    state: State<'_, std::sync::Arc<android_mirror::MirrorManager>>,
+    serial: String,
+) -> Result<(), String> {
+    let manager = state.inner().clone();
+    run_blocking(move || {
+        manager.stop(&serial);
+    })
+    .await
+}
+
+#[tauri::command]
+async fn android_screencap(serial: String) -> Result<tauri::ipc::Response, String> {
+    run_blocking(move || android_mirror::screencap(&serial).map(tauri::ipc::Response::new)).await?
+}
+
+#[tauri::command]
+async fn android_input(serial: String, kind: String, args: Vec<String>) -> Result<(), String> {
+    run_blocking(move || android_mirror::input(&serial, &kind, &args)).await?
+}
+
+#[tauri::command]
 async fn start_android_scrcpy(
     app: tauri::AppHandle,
     project_path: String,
@@ -1166,6 +1232,7 @@ async fn boot_android_emulator(
     avd: String,
     cold: Option<bool>,
     wipe: Option<bool>,
+    headless: Option<bool>,
 ) -> Result<String, String> {
     let spawn_app = app.clone();
     let (session_id, rx) = run_blocking(move || {
@@ -1174,6 +1241,7 @@ async fn boot_android_emulator(
             &avd,
             cold.unwrap_or(false),
             wipe.unwrap_or(false),
+            headless.unwrap_or(false),
         )?;
         let manager = spawn_app.state::<PtyManager>();
         pty::spawn_shell_command(&manager, &command, &project_path)
@@ -1222,6 +1290,52 @@ async fn send_android_deeplink(
     .await??;
     park_bridge(app, session_id.clone(), rx, UrlAction::Ignore);
     Ok(session_id)
+}
+
+#[tauri::command]
+async fn ios_boot_simulator(udid: String) -> Result<(), String> {
+    run_blocking(move || ios_mirror::boot_simulator(&udid)).await?
+}
+
+#[tauri::command]
+async fn ios_mirror_start(
+    state: State<'_, ios_mirror::IosMirrorState>,
+    udid: String,
+    on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<ios_mirror::IosMirrorInfo, String> {
+    let manager = state.inner().clone();
+    run_blocking(move || manager.start(&udid, on_frame)).await?
+}
+
+#[tauri::command]
+async fn ios_mirror_stop(state: State<'_, ios_mirror::IosMirrorState>, udid: String) -> Result<(), String> {
+    let manager = state.inner().clone();
+    run_blocking(move || manager.stop(&udid)).await
+}
+
+#[tauri::command]
+async fn ios_screenshot(udid: String) -> Result<tauri::ipc::Response, String> {
+    run_blocking(move || ios_mirror::screenshot(&udid).map(tauri::ipc::Response::new)).await?
+}
+
+#[tauri::command]
+async fn ios_input(udid: String, kind: String, args: Vec<String>) -> Result<(), String> {
+    run_blocking(move || ios_mirror::input(&udid, &kind, &args)).await?
+}
+
+#[tauri::command]
+async fn ios_record_start(state: State<'_, ios_mirror::IosMirrorState>, udid: String) -> Result<(), String> {
+    let manager = state.inner().clone();
+    run_blocking(move || manager.record_start(&udid)).await?
+}
+
+#[tauri::command]
+async fn ios_record_stop(
+    state: State<'_, ios_mirror::IosMirrorState>,
+    udid: String,
+) -> Result<chat::store::Attachment, String> {
+    let manager = state.inner().clone();
+    run_blocking(move || manager.record_stop(&udid)).await?
 }
 
 #[tauri::command]
@@ -1823,6 +1937,8 @@ pub fn run() {
                 .build(),
         )
         .manage(PtyManager::new())
+        .manage(std::sync::Arc::new(android_mirror::MirrorManager::default()))
+        .manage(ios_mirror::IosMirrorState::default())
         .manage(std::sync::Arc::new(chat::ChatManager::default()))
         .manage(SessionUrls::default())
         .manage(PendingBridges::default())
@@ -1851,6 +1967,8 @@ pub fn run() {
                 // every live PTY and running chat turn so no orphans survive.
                 let app = window.app_handle();
                 app.state::<std::sync::Arc<chat::ChatManager>>().cancel_all();
+                app.state::<std::sync::Arc<android_mirror::MirrorManager>>().stop_all();
+                app.state::<ios_mirror::IosMirrorState>().stop_all();
                 let pty = app.state::<PtyManager>();
                 let killed = pty::kill_all_sessions(&pty);
                 if !killed.is_empty() {
@@ -1895,6 +2013,7 @@ pub fn run() {
             ensure_work_branch,
             get_current_branch,
             get_recent_branches,
+            git_list_branches,
             git_switch_branch,
             get_git_log,
             git_rollback,
@@ -1902,6 +2021,7 @@ pub fn run() {
             git_stage,
             git_unstage,
             git_discard,
+            git_apply_patch,
             git_commit,
             git_stash_push,
             git_stash_pop,
@@ -1932,11 +2052,23 @@ pub fn run() {
             detect_validation_targets,
             validate_project,
             start_android_scrcpy,
+            android_mirror_start,
+            android_mirror_control,
+            android_mirror_stop,
+            android_screencap,
+            android_input,
             start_android_logcat,
             boot_android_emulator,
             run_android_device_action,
             send_android_deeplink,
             open_ios_simulator,
+            ios_boot_simulator,
+            ios_mirror_start,
+            ios_mirror_stop,
+            ios_screenshot,
+            ios_input,
+            ios_record_start,
+            ios_record_stop,
             get_session_url,
             chat_create_session,
             chat_list_sessions,

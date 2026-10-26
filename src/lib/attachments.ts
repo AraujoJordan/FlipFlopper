@@ -1,5 +1,7 @@
 import { createSignal } from "solid-js";
-import { pickFiles, savePastedAttachment, type Attachment } from "./ipc";
+import { isAbsolute, join } from "@tauri-apps/api/path";
+import { openAttachment, pickFiles, savePastedAttachment, type Attachment } from "./ipc";
+import { effectiveRoot } from "./store";
 import { toast } from "../components/ui";
 
 // Files waiting to be sent with the next message: picked, dropped on the
@@ -45,6 +47,14 @@ export function removeAttachment(path: string) {
 }
 
 export const clearAttachments = () => setAttachments([]);
+
+/** Open a path mentioned in a conversation from that session's checkout. */
+export async function openConversationFile(path: string): Promise<void> {
+  const absolute = await isAbsolute(path);
+  const root = effectiveRoot();
+  if (!absolute && !root) throw new Error("No project is open for this relative path.");
+  await openAttachment(absolute ? path : await join(root!, path));
+}
 
 function toBase64(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {

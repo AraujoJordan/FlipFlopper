@@ -49,6 +49,12 @@ pub struct AndroidEnvironment {
     pub adb_path: Option<String>,
     pub emulator_path: Option<String>,
     pub scrcpy_path: Option<String>,
+    /// Version of the installed scrcpy; the mirror server must match it.
+    #[serde(default)]
+    pub scrcpy_version: Option<String>,
+    /// Path of the `scrcpy-server` that ships with the installed scrcpy.
+    #[serde(default)]
+    pub scrcpy_server_path: Option<String>,
     pub devices: Vec<AndroidDevice>,
     pub avds: Vec<String>,
     pub selected_device: Option<String>,
@@ -67,6 +73,9 @@ pub struct IosDevice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IosEnvironment {
     pub xcrun_path: Option<String>,
+    /// Meta's `idb`, which adds the live stream and input to the Preview tab.
+    #[serde(default)]
+    pub idb_path: Option<String>,
     pub physical_devices: Vec<IosDevice>,
     pub simulators: Vec<IosDevice>,
     pub selected_device: Option<String>,
@@ -1131,6 +1140,14 @@ pub fn detect_android_environment(project_path: &str) -> Result<AndroidEnvironme
     let adb = find_android_tool("adb", "platform-tools/adb");
     let emulator = find_android_tool("emulator", "emulator/emulator");
     let scrcpy = resolve_executable("scrcpy");
+    let (scrcpy_version, scrcpy_server_path) = match scrcpy.as_deref() {
+        Some(path) => (
+            crate::android_mirror::scrcpy_version(path),
+            crate::android_mirror::scrcpy_server_path(path)
+                .map(|p| p.to_string_lossy().to_string()),
+        ),
+        None => (None, None),
+    };
     let devices = adb.as_deref().map(list_android_devices).unwrap_or_default();
     let avds = emulator
         .as_deref()
@@ -1169,6 +1186,8 @@ pub fn detect_android_environment(project_path: &str) -> Result<AndroidEnvironme
         adb_path: adb.map(|path| path.to_string_lossy().to_string()),
         emulator_path: emulator.map(|path| path.to_string_lossy().to_string()),
         scrcpy_path: scrcpy.map(|path| path.to_string_lossy().to_string()),
+        scrcpy_version,
+        scrcpy_server_path,
         devices,
         avds,
         selected_device,
@@ -1240,6 +1259,7 @@ pub fn resolve_android_boot_avd_command(
     avd: &str,
     cold: bool,
     wipe: bool,
+    headless: bool,
 ) -> Result<String, String> {
     let env = detect_android_environment(project_path)?;
     let emulator = env.emulator_path.ok_or_else(|| {
@@ -1249,11 +1269,21 @@ pub fn resolve_android_boot_avd_command(
     if avd.is_empty() {
         return Err("No AVD selected.".to_string());
     }
-    Ok(build_boot_avd_command(&emulator, avd, cold, wipe))
+    Ok(build_boot_avd_command(&emulator, avd, cold, wipe, headless))
 }
 
-fn build_boot_avd_command(emulator: &str, avd: &str, cold: bool, wipe: bool) -> String {
+fn build_boot_avd_command(
+    emulator: &str,
+    avd: &str,
+    cold: bool,
+    wipe: bool,
+    headless: bool,
+) -> String {
     let mut command = format!("{} -avd {}", shell_quote(emulator), shell_quote(avd));
+    if headless {
+        // No emulator window: the Preview tab mirrors the screen instead.
+        command.push_str(" -no-window -no-audio");
+    }
     if wipe {
         command.push_str(" -wipe-data");
     }
@@ -1390,6 +1420,7 @@ pub fn detect_ios_environment(project_path: &str) -> Result<IosEnvironment, Stri
         issues.push("iOS simulator runs are only available on macOS.".to_string());
         return Ok(IosEnvironment {
             xcrun_path: None,
+            idb_path: None,
             physical_devices: Vec::new(),
             simulators: Vec::new(),
             selected_device: None,
@@ -1422,6 +1453,7 @@ pub fn detect_ios_environment(project_path: &str) -> Result<IosEnvironment, Stri
 
     Ok(IosEnvironment {
         xcrun_path: xcrun.map(|path| path.to_string_lossy().to_string()),
+        idb_path: crate::ios_mirror::idb_path().map(|path| path.to_string_lossy().to_string()),
         physical_devices,
         simulators,
         selected_device,
@@ -3559,7 +3591,7 @@ fn list_android_avds(emulator: &Path) -> Vec<String> {
         .collect()
 }
 
-fn find_android_tool(binary: &str, sdk_rel: &str) -> Option<PathBuf> {
+pub(crate) fn find_android_tool(binary: &str, sdk_rel: &str) -> Option<PathBuf> {
     if let Some(path) = resolve_executable(binary) {
         return Some(path);
     }
@@ -4017,11 +4049,11 @@ compose.desktop { application { mainClass = "com.example.MainKt" } }
     #[test]
     fn boot_avd_command_applies_cold_and_wipe_flags() {
         assert_eq!(
-            build_boot_avd_command("/opt/emulator", "Pixel_7", false, false),
+            build_boot_avd_command("/opt/emulator", "Pixel_7", false, false, false),
             "'/opt/emulator' -avd 'Pixel_7'"
         );
         assert_eq!(
-            build_boot_avd_command("/opt/emulator", "Pixel_7", true, true),
+            build_boot_avd_command("/opt/emulator", "Pixel_7", true, true, false),
             "'/opt/emulator' -avd 'Pixel_7' -wipe-data -no-snapshot-load"
         );
     }

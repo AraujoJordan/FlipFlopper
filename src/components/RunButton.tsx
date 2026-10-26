@@ -24,6 +24,7 @@ import {
   readAndroidDevices,
   readRunTargets,
   setRunSessionId,
+  setRunTargets,
   store,
   writeAndroidDevice,
   writeRunTarget,
@@ -55,7 +56,8 @@ const isIosTarget = (target: RunTarget) =>
   target.needs_emulator === "ios" || target.kind === "ios";
 
 const RunButton: Component = () => {
-  const [targets, setTargets] = createSignal<RunTarget[]>([]);
+  const targets = () => store.runTargets;
+  const setTargets = setRunTargets;
   const [androidEnv, setAndroidEnv] = createSignal<AndroidEnvironment | null>(null);
   const [androidEnvLoading, setAndroidEnvLoading] = createSignal(false);
   const [startingScrcpy, setStartingScrcpy] = createSignal(false);

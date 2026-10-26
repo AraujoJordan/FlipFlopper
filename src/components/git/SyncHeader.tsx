@@ -6,6 +6,7 @@ import { Button, Spinner, toast, useValueMotion } from "../ui";
 import { openConflictDialog } from "./ConflictFixDialog";
 import { openSquashPushDialog } from "./SquashPushDialog";
 import { isProtectedBranch } from "../../lib/constants";
+import BranchIndicator from "../BranchIndicator";
 
 type BusyOp = "fetch" | "pull" | "push" | null;
 
@@ -142,16 +143,7 @@ const SyncHeader: Component<{ sync: () => SyncStatus | null | undefined }> = (pr
           </div>
         }
       >
-        <span
-          title="Current branch"
-          style={{
-            "font-family": "var(--font-mono)", "font-size": "11px",
-            color: "var(--fg-default)", "font-weight": "600",
-            padding: "0", background: "transparent", border: "0", cursor: "pointer",
-          }}
-        >
-          {s()?.branch || "no branch"}
-        </span>
+        <BranchIndicator variant="sync" />
         <Show
           when={upstream()}
           fallback={

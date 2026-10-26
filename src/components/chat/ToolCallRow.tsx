@@ -4,6 +4,7 @@ import type { ToolKind } from "../../lib/ipc";
 import { Icon, type IconName } from "../shell/Icon";
 import { Spinner, Disclosure, useValueMotion } from "../ui";
 import InlineDiff, { DiffStat, diffFromInput } from "./InlineDiff";
+import { renderPlainTextWithFileRefs } from "../../lib/markdownLite";
 
 const KIND_ICON: Record<ToolKind, IconName> = {
   read: "file",
@@ -115,13 +116,13 @@ const ToolCallRow: Component<{ block: ToolBlock }> = (props) => {
           </Show>
           <Show when={!todos() && diff()}>{(d) => <InlineDiff diff={d()} />}</Show>
           <Show when={!todos() && !diff() && command()}>
-            <pre class="tool-pre"><span class="tool-prompt">$ </span>{command()}</pre>
+            <pre class="tool-pre"><span class="tool-prompt">$ </span><span innerHTML={renderPlainTextWithFileRefs(command())} /></pre>
           </Show>
           <Show when={!todos() && !diff() && !command() && props.block.input != null}>
-            <pre class="tool-pre">{inputText(props.block.input)}</pre>
+            <pre class="tool-pre" innerHTML={renderPlainTextWithFileRefs(inputText(props.block.input))} />
           </Show>
           <Show when={props.block.output}>
-            <pre class="tool-pre tool-pre-output">{props.block.output}</pre>
+            <pre class="tool-pre tool-pre-output" innerHTML={renderPlainTextWithFileRefs(props.block.output!)} />
           </Show>
       </Disclosure>
     </div>

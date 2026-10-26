@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ── Types (mirror Rust structs) ──────────────────────────────────────────────
@@ -94,6 +94,14 @@ export interface CommitEntry {
   date_iso: string;
 }
 
+export interface BranchInfo {
+  name: string;
+  remote_ref: string | null;
+  is_remote: boolean;
+  upstream: string | null;
+  last_commit_time: string;
+}
+
 export interface ToolInfo {
   id: string;
   name: string;
@@ -124,6 +132,8 @@ export interface AndroidEnvironment {
   adb_path: string | null;
   emulator_path: string | null;
   scrcpy_path: string | null;
+  scrcpy_version: string | null;
+  scrcpy_server_path: string | null;
   devices: AndroidDevice[];
   avds: string[];
   selected_device: string | null;
@@ -140,6 +150,7 @@ export interface IosDevice {
 
 export interface IosEnvironment {
   xcrun_path: string | null;
+  idb_path: string | null;
   physical_devices: IosDevice[];
   simulators: IosDevice[];
   selected_device: string | null;
@@ -263,6 +274,9 @@ export const getCurrentBranch = (projectPath: string): Promise<string> =>
 export const getRecentBranches = (projectPath: string, limit: number): Promise<string[]> =>
   invoke("get_recent_branches", { projectPath, limit });
 
+export const gitListBranches = (projectPath: string, limit = 250): Promise<BranchInfo[]> =>
+  invoke("git_list_branches", { projectPath, limit });
+
 export const gitSwitchBranch = (projectPath: string, branchName: string): Promise<void> =>
   invoke("git_switch_branch", { projectPath, branchName });
 
@@ -284,6 +298,14 @@ export const gitUnstage = (projectPath: string, paths: string[]): Promise<void> 
 
 export const gitDiscard = (projectPath: string, tracked: string[], untracked: string[]): Promise<void> =>
   invoke("git_discard", { projectPath, tracked, untracked });
+
+export const gitApplyPatch = (
+  projectPath: string,
+  patch: string,
+  cached: boolean,
+  reverse: boolean,
+): Promise<void> =>
+  invoke("git_apply_patch", { projectPath, patch, cached, reverse });
 
 export const gitCommit = (
   projectPath: string,
@@ -430,14 +452,58 @@ export const startAndroidLogcat = (projectPath: string, serial?: string): Promis
 export const bootAndroidEmulator = (
   projectPath: string,
   avd: string,
-  opts?: { cold?: boolean; wipe?: boolean },
+  opts?: { cold?: boolean; wipe?: boolean; headless?: boolean },
 ): Promise<string> =>
   invoke("boot_android_emulator", {
     projectPath,
     avd,
     cold: opts?.cold ?? null,
     wipe: opts?.wipe ?? null,
+    headless: opts?.headless ?? null,
   });
+
+// ── Android device mirror (Preview tab) ──────────────────────────────────────
+
+export interface MirrorInfo {
+  device_name: string;
+  width: number;
+  height: number;
+}
+
+/** Start mirroring `serial` through the installed scrcpy's server. Every
+ *  packet arrives as `[flags u8][pts u64 LE][annex-b bytes]`
+ *  (flags: 1 config, 2 key frame, 0x80 stream closed). */
+export const androidMirrorStart = (
+  projectPath: string,
+  serial: string,
+  onPacket: (packet: ArrayBuffer) => void,
+  maxSize?: number,
+): Promise<MirrorInfo> => {
+  const channel = new Channel<ArrayBuffer>();
+  channel.onmessage = onPacket;
+  return invoke("android_mirror_start", {
+    projectPath,
+    serial,
+    maxSize: maxSize ?? null,
+    onFrame: channel,
+  });
+};
+
+export const androidMirrorControl = (serial: string, bytes: Uint8Array): Promise<void> =>
+  invoke("android_mirror_control", { serial, bytes: Array.from(bytes) });
+
+export const androidMirrorStop = (serial: string): Promise<void> =>
+  invoke("android_mirror_stop", { serial });
+
+/** PNG bytes of the current screen (slow snapshot fallback). */
+export const androidScreencap = (serial: string): Promise<ArrayBuffer> =>
+  invoke("android_screencap", { serial });
+
+export const androidInput = (
+  serial: string,
+  kind: "tap" | "swipe" | "key" | "text",
+  args: (string | number)[],
+): Promise<void> => invoke("android_input", { serial, kind, args: args.map(String) });
 
 export type AndroidDeviceAction =
   | "force-stop"
@@ -460,6 +526,40 @@ export const sendAndroidDeeplink = (
   serial?: string,
 ): Promise<string> =>
   invoke("send_android_deeplink", { projectPath, uri, serial: serial ?? null });
+
+// ── iOS Simulator mirror (Preview tab) ───────────────────────────────────────
+
+export interface IosMirrorInfo {
+  width_points: number;
+  height_points: number;
+}
+
+/** Boot a simulator without opening Simulator.app; resolves once it is usable. */
+export const iosBootSimulator = (udid: string): Promise<void> =>
+  invoke("ios_boot_simulator", { udid });
+
+/** Live H.264 stream through idb (same packet format as the Android mirror). */
+export const iosMirrorStart = (udid: string, onPacket: (packet: ArrayBuffer) => void): Promise<IosMirrorInfo> => {
+  const channel = new Channel<ArrayBuffer>();
+  channel.onmessage = onPacket;
+  return invoke("ios_mirror_start", { udid, onFrame: channel });
+};
+
+export const iosMirrorStop = (udid: string): Promise<void> => invoke("ios_mirror_stop", { udid });
+
+/** PNG bytes of the simulator screen (`simctl io screenshot`). */
+export const iosScreenshot = (udid: string): Promise<ArrayBuffer> => invoke("ios_screenshot", { udid });
+
+export const iosInput = (
+  udid: string,
+  kind: "tap" | "swipe" | "text" | "key" | "button",
+  args: (string | number)[],
+): Promise<void> => invoke("ios_input", { udid, kind, args: args.map(String) });
+
+export const iosRecordStart = (udid: string): Promise<void> => invoke("ios_record_start", { udid });
+
+/** Stops `simctl io recordVideo` and returns the finished mp4 as an attachment. */
+export const iosRecordStop = (udid: string): Promise<Attachment> => invoke("ios_record_stop", { udid });
 
 export const openIosSimulator = (projectPath: string, udid?: string): Promise<string> =>
   invoke("open_ios_simulator", { projectPath, udid: udid ?? null });

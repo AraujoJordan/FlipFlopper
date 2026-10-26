@@ -1,12 +1,26 @@
 import { resolvedMotion } from "../lib/layout";
 import {
-  Component, createEffect, createResource, createSignal, For, Show, createMemo,
+  Component, createEffect, createResource, createSignal, For, Show, createMemo, onCleanup,
 } from "solid-js";
 import { escapeHtml, highlightCode } from "../lib/markdownLite";
-import { store, closeReview, openReview, effectiveRoot } from "../lib/store";
-import { getReviewDiff, type FileDiff, type DiffLine } from "../lib/ipc";
+import {
+  store, closeReview, openReview, effectiveRoot, bumpGitStatus,
+  fileDiffSignature, isFileViewed, setFileViewed, setPendingPromptSeed, setHistoryFilter,
+  addReviewComment, removeReviewComment, clearReviewComments, formatReviewBatchPrompt,
+  type ReviewCommentDraft,
+} from "../lib/store";
+import { submitPrompt, isRunning, chat } from "../lib/chat";
+import {
+  getReviewDiff, gitApplyPatch, gitStage, gitUnstage, gitDiscard,
+  triggerHaptic, type FileDiff, type DiffLine,
+} from "../lib/ipc";
+import { gitStatus } from "../lib/gitStatus";
 import { getFileIcon } from "../lib/fileIcons";
-import { Button, Spinner, useValueMotion, Disclosure } from "./ui";
+import { writeClipboardText } from "../lib/native";
+import {
+  Button, Spinner, useValueMotion, Disclosure,
+  ContextMenu, MenuItem, MenuDivider, MenuLabel, confirmDialog, toast,
+} from "./ui";
 import { Icon } from "./shell/Icon";
 
 // ── Layout toggle ────────────────────────────────────────────────────────────
@@ -58,60 +72,470 @@ function langForPath(p: string | null | undefined): string | null {
   return EXT_TO_LANG[ext] ?? null;
 }
 
+function basename(p: string): string {
+  return p.split("/").pop() || p;
+}
+
+// ── Indexed line model for selection, inline comments & patch ops ─────────────
+export interface IndexedDiffLine {
+  flatIndex: number;
+  hunkIndex: number;
+  hunkHeader: string;
+  oldStart: number;
+  newStart: number;
+  line: DiffLine;
+}
+
+export interface IndexedHunk {
+  hunkIndex: number;
+  header: string;
+  oldStart: number;
+  newStart: number;
+  lines: IndexedDiffLine[];
+}
+
+function indexFileHunks(file: FileDiff): { hunks: IndexedHunk[]; flat: IndexedDiffLine[] } {
+  const flat: IndexedDiffLine[] = [];
+  const hunks: IndexedHunk[] = file.hunks.map((h, hunkIndex) => {
+    const lines = h.lines.map((line) => {
+      const item: IndexedDiffLine = {
+        flatIndex: flat.length,
+        hunkIndex,
+        hunkHeader: h.header,
+        oldStart: h.old_start,
+        newStart: h.new_start,
+        line,
+      };
+      flat.push(item);
+      return item;
+    });
+    return { hunkIndex, header: h.header, oldStart: h.old_start, newStart: h.new_start, lines };
+  });
+  return { hunks, flat };
+}
+
+interface LineSelection {
+  filePath: string;
+  indices: number[];
+  anchorIndex: number;
+}
+
+function formatLineRange(lines: IndexedDiffLine[]): string {
+  if (lines.length === 0) return "";
+  const nums = lines
+    .map((l) => l.line.new_lineno ?? l.line.old_lineno)
+    .filter((n): n is number => n !== null);
+  if (nums.length === 0) return `${lines.length} ${lines.length === 1 ? "line" : "lines"}`;
+  const min = Math.min(...nums);
+  const max = Math.max(...nums);
+  return min === max ? `L${min}` : `L${min}–L${max}`;
+}
+
+function formatColonRange(lines: IndexedDiffLine[]): string {
+  if (lines.length === 0) return "";
+  const nums = lines
+    .map((l) => l.line.new_lineno ?? l.line.old_lineno)
+    .filter((n): n is number => n !== null);
+  if (nums.length === 0) return "1";
+  const min = Math.min(...nums);
+  const max = Math.max(...nums);
+  return min === max ? `${min}` : `${min}-${max}`;
+}
+
+function formatSnippetDetails(filePath: string, lines: IndexedDiffLine[]) {
+  const range = formatLineRange(lines);
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+  const hasBothKinds =
+    lines.some((l) => l.line.kind === "add") && lines.some((l) => l.line.kind === "del");
+  const fenceLang = hasBothKinds ? "diff" : ext;
+  const snippet = lines
+    .map((l) => {
+      if (hasBothKinds) {
+        const sigil = l.line.kind === "add" ? "+" : l.line.kind === "del" ? "-" : " ";
+        return `${sigil}${l.line.content}`;
+      }
+      return l.line.content;
+    })
+    .join("\n");
+  return { range, fenceLang, snippet };
+}
+
+function buildSelectionPrompt(
+  filePath: string,
+  lines: IndexedDiffLine[],
+  instruction: string,
+): string {
+  const { range, fenceLang, snippet } = formatSnippetDetails(filePath, lines);
+  const header = `In \`@${filePath}\`${range ? ` (${range})` : ""}:`;
+  const trimmedInstruction = instruction.trim();
+  return `${header}\n\`\`\`${fenceLang}\n${snippet}\n\`\`\`${trimmedInstruction ? `\n${trimmedInstruction}` : ""}`;
+}
+
+/** Construct a unified-diff patch for `git apply` covering either an entire
+ *  hunk (`selectedIndices = null`) or a subset of selected lines within one or
+ *  more hunks.
+ *  - `direction = "forward"`: used when staging (`git apply --cached`)
+ *  - `direction = "reverse"`: used when unstaging or discarding (`git apply --reverse`) */
+function buildPatchForFile(
+  file: FileDiff,
+  hunks: IndexedHunk[],
+  selectedIndices: Set<number> | null,
+  direction: "forward" | "reverse",
+): string | null {
+  const oldPath = file.old_path ?? file.new_path;
+  const newPath = file.new_path ?? file.old_path;
+  if (!oldPath || !newPath) return null;
+
+  const patchHunks: string[] = [];
+  for (const hunk of hunks) {
+    const hasSelectedChange = hunk.lines.some(
+      (l) =>
+        (l.line.kind === "add" || l.line.kind === "del") &&
+        (selectedIndices === null || selectedIndices.has(l.flatIndex)),
+    );
+    if (!hasSelectedChange) continue;
+
+    const body: string[] = [];
+    let oldCount = 0;
+    let newCount = 0;
+
+    for (const item of hunk.lines) {
+      const isSelected = selectedIndices === null || selectedIndices.has(item.flatIndex);
+      const { kind, content } = item.line;
+      if (kind === "context") {
+        body.push(` ${content}`);
+        oldCount++;
+        newCount++;
+      } else if (direction === "forward") {
+        // Forward patch onto base/index:
+        // - Unselected deletions stay in base as context (" ")
+        // - Unselected additions do not exist in base yet (omit)
+        if (kind === "del") {
+          if (isSelected) {
+            body.push(`-${content}`);
+            oldCount++;
+          } else {
+            body.push(` ${content}`);
+            oldCount++;
+            newCount++;
+          }
+        } else if (kind === "add" && isSelected) {
+          body.push(`+${content}`);
+          newCount++;
+        }
+      } else {
+        // Patch that `git apply --reverse` will invert from worktree/index:
+        // - Unselected additions exist in target and must stay (" " context)
+        // - Unselected deletions are already absent in target (omit)
+        if (kind === "add") {
+          if (isSelected) {
+            body.push(`+${content}`);
+            newCount++;
+          } else {
+            body.push(` ${content}`);
+            oldCount++;
+            newCount++;
+          }
+        } else if (kind === "del" && isSelected) {
+          body.push(`-${content}`);
+          oldCount++;
+        }
+      }
+    }
+
+    patchHunks.push(
+      `@@ -${hunk.oldStart},${oldCount} +${hunk.newStart},${newCount} @@\n${body.join("\n")}`,
+    );
+  }
+
+  if (patchHunks.length === 0) return null;
+  return `--- a/${oldPath}\n+++ b/${newPath}\n${patchHunks.join("\n")}\n`;
+}
+
 // ── Shared styles ─────────────────────────────────────────────────────────────
 const MONO: string = "var(--font-mono)";
 const LINENO_STYLE = {
   display: "inline-block",
-  "min-width": "44px",
+  "min-width": "42px",
   "text-align": "right",
-  "padding-right": "12px",
+  "padding-right": "10px",
   "padding-left": "6px",
   color: "var(--fg-faint)",
   "user-select": "none" as const,
   "flex-shrink": "0",
 } as const;
 
+interface RowInteractionProps {
+  filePath: string;
+  indexed: IndexedDiffLine;
+  selected: boolean;
+  onSelectLine: (filePath: string, flatIndex: number, e: MouseEvent) => void;
+  onStartDragSelect: (filePath: string, flatIndex: number, e: PointerEvent) => void;
+  onEnterDragSelect: (filePath: string, flatIndex: number) => void;
+  onOpenAskForLine: (filePath: string, flatIndex: number, e: MouseEvent) => void;
+  onContextMenuLine: (filePath: string, indexed: IndexedDiffLine, e: MouseEvent) => void;
+}
+
+// ── Saved Inline Review Comment Card ──────────────────────────────────────────
+const SavedCommentCard: Component<{
+  comment: ReviewCommentDraft;
+  onEdit: (comment: ReviewCommentDraft) => void;
+  onRemove: (id: string) => void;
+}> = (props) => (
+  <div class="diff-saved-comment overlay-pop-in" onclick={(e) => e.stopPropagation()}>
+    <div class="diff-saved-comment-head">
+      <Icon name="message" size={12} style={{ color: "var(--accent)" }} />
+      <span class="diff-saved-comment-meta">
+        Queued review comment · <strong>{props.comment.lineRangeLabel}</strong>
+      </span>
+      <div style={{ "margin-left": "auto", display: "flex", gap: "4px" }}>
+        <button
+          type="button"
+          class="diff-quick-chip hover-tint"
+          onClick={() => props.onEdit(props.comment)}
+        >
+          <Icon name="pencil" size={11} /> Edit
+        </button>
+        <button
+          type="button"
+          class="icon-btn-danger press"
+          title="Remove comment"
+          onClick={() => props.onRemove(props.comment.id)}
+          style={{ width: "22px", height: "22px", "min-width": "22px" }}
+        >
+          <Icon name="trash" size={11} />
+        </button>
+      </div>
+    </div>
+    <div class="diff-saved-comment-body">{props.comment.instruction}</div>
+  </div>
+);
+
+// ── Inline Ask Changes / Comment Box (rendered directly below selected lines) ──
+const InlineAskBox: Component<{
+  filePath: string;
+  lines: IndexedDiffLine[];
+  askText: string;
+  setAskText: (v: string) => void;
+  sending: boolean;
+  onSendNow: (custom?: string) => void;
+  onQueueComment: () => void;
+  onSeedComposer: () => void;
+  onCopy: () => void;
+  onOpenContextMenu: (e: MouseEvent) => void;
+  onClear: () => void;
+  inputRef: (el: HTMLTextAreaElement) => void;
+}> = (props) => {
+  const rangeLabel = () => formatLineRange(props.lines);
+  const count = () => props.lines.length;
+
+  return (
+    <div class="diff-inline-ask overlay-pop-in" onclick={(e) => e.stopPropagation()}>
+      <div class="diff-selection-bar-head">
+        <span class="diff-selection-badge" title={props.filePath}>
+          <Icon name="code" size={13} style={{ color: "var(--accent)" }} />
+          <strong>{basename(props.filePath)}</strong>
+          <span>{rangeLabel()}</span>
+          <span class="diff-selection-count">
+            {count()} {count() === 1 ? "line" : "lines"}
+          </span>
+        </span>
+
+        <div class="diff-selection-quick">
+          <button
+            type="button"
+            class="diff-quick-chip hover-tint"
+            title="Ask the agent to explain the selected lines"
+            onClick={() => props.onSendNow("Explain what these selected lines do and how they fit into the surrounding code.")}
+          >
+            <Icon name="help" size={11} /> Explain
+          </button>
+          <button
+            type="button"
+            class="diff-quick-chip hover-tint"
+            title="Ask the agent to review the selected lines for bugs or edge cases"
+            onClick={() => props.onSendNow("Review these selected lines for potential bugs, regressions, or unhandled edge cases.")}
+          >
+            <Icon name="shield" size={11} /> Find bugs
+          </button>
+          <button
+            type="button"
+            class="diff-quick-chip hover-tint"
+            title="Ask the agent to refactor and simplify the selected lines"
+            onClick={() => props.onSendNow("Refactor and simplify these selected lines while preserving behavior.")}
+          >
+            <Icon name="sparkle" size={11} /> Refactor
+          </button>
+          <button
+            type="button"
+            class="diff-quick-chip hover-tint"
+            title="Copy selected code"
+            onClick={props.onCopy}
+          >
+            <Icon name="copy" size={11} /> Copy
+          </button>
+          <button
+            type="button"
+            class="icon-btn press"
+            title="More actions for selected lines"
+            aria-label="More actions for selected lines"
+            onClick={props.onOpenContextMenu}
+            style={{ width: "24px", height: "24px", "min-width": "24px" }}
+          >
+            <Icon name="more" size={14} />
+          </button>
+          <button
+            type="button"
+            class="icon-btn press"
+            title="Clear line selection (Esc)"
+            aria-label="Clear line selection"
+            onClick={props.onClear}
+            style={{ width: "24px", height: "24px", "min-width": "24px" }}
+          >
+            <Icon name="x" size={13} />
+          </button>
+        </div>
+      </div>
+
+      <div class="diff-selection-input-row">
+        <textarea
+          ref={props.inputRef}
+          class="ui-field diff-ask-input"
+          rows={2}
+          value={props.askText}
+          placeholder={`Ask changes for ${basename(props.filePath)} (${rangeLabel()})… (Enter to ask now, ⇧⌘Enter to queue in review)`}
+          onInput={(e) => props.setAskText(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.isComposing) return;
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+              e.preventDefault();
+              props.onQueueComment();
+            } else if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              props.onSendNow();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              props.onClear();
+            }
+          }}
+        />
+      </div>
+
+      <div class="diff-inline-ask-foot">
+        <span class="diff-inline-ask-hint">
+          Tip: Shift+click or drag gutter to select a range · Right-click for git & copy actions
+        </span>
+        <div style={{ display: "flex", "align-items": "center", gap: "6px", "margin-left": "auto" }}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={props.onSeedComposer}
+            title="Insert selected lines and note into the main chat composer"
+          >
+            <Icon name="at" size={12} />
+            To composer
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!props.askText.trim()}
+            onClick={props.onQueueComment}
+            title="Queue this comment in a multi-line review batch (⇧⌘Enter)"
+          >
+            <Icon name="plus" size={12} />
+            Add to review
+          </Button>
+          <Button
+            variant="solid"
+            size="sm"
+            disabled={props.sending || !props.askText.trim()}
+            onClick={() => props.onSendNow()}
+            title="Send change request to the agent immediately (Enter)"
+          >
+            <Show when={props.sending} fallback={<Icon name="arrowUp" size={12} />}>
+              <Spinner size={11} />
+            </Show>
+            Ask changes
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ── Unified row ───────────────────────────────────────────────────────────────
-const UnifiedRow: Component<{
-  line: DiffLine;
+const UnifiedRow: Component<RowInteractionProps & {
   lang: string | null;
   lineCount: number;
 }> = (props) => {
+  const line = () => props.indexed.line;
   const bg = () =>
-    props.line.kind === "add" ? ADD_BG :
-    props.line.kind === "del" ? DEL_BG :
+    line().kind === "add" ? ADD_BG :
+    line().kind === "del" ? DEL_BG :
     CTX_BG;
   const sign = () =>
-    props.line.kind === "add" ? "+" :
-    props.line.kind === "del" ? "-" :
+    line().kind === "add" ? "+" :
+    line().kind === "del" ? "-" :
     " ";
   const signColor = () =>
-    props.line.kind === "add" ? ADD_SIGN :
-    props.line.kind === "del" ? DEL_SIGN :
+    line().kind === "add" ? ADD_SIGN :
+    line().kind === "del" ? DEL_SIGN :
     "transparent";
 
   const html = () =>
     props.lineCount <= MAX_HIGHLIGHT_LINES
-      ? highlightCode(props.line.content, props.lang)
-      : escapeHtml(props.line.content);
+      ? highlightCode(line().content, props.lang)
+      : escapeHtml(line().content);
 
   return (
     <div
       class="diff-row"
+      classList={{ "diff-row-selected": props.selected }}
+      data-diff-file-path={props.filePath}
+      data-diff-flat-index={props.indexed.flatIndex}
+      onPointerEnter={() => props.onEnterDragSelect(props.filePath, props.indexed.flatIndex)}
+      onClick={(e) => {
+        if ((e.target as HTMLElement).closest(".diff-row-ask-btn")) return;
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) return;
+        props.onSelectLine(props.filePath, props.indexed.flatIndex, e);
+      }}
+      onContextMenu={(e) => props.onContextMenuLine(props.filePath, props.indexed, e)}
       style={{
         display: "flex", "align-items": "flex-start",
         background: bg(),
         "min-height": "20px",
         "line-height": "20px",
+        cursor: "pointer",
       }}
     >
-      {/* old line number */}
-      <span style={LINENO_STYLE}>
-        {props.line.old_lineno ?? ""}
-      </span>
-      {/* new line number */}
-      <span style={LINENO_STYLE}>
-        {props.line.new_lineno ?? ""}
+      {/* Gutter (line numbers + ask button) */}
+      <span
+        class="diff-gutter"
+        onPointerDown={(e) => props.onStartDragSelect(props.filePath, props.indexed.flatIndex, e)}
+        style={{ display: "inline-flex", "align-items": "center", "flex-shrink": "0", "user-select": "none" }}
+      >
+        <button
+          type="button"
+          class="diff-row-ask-btn"
+          title="Ask changes on this line (Shift+click for range)"
+          aria-label="Ask changes on this line"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onOpenAskForLine(props.filePath, props.indexed.flatIndex, e);
+          }}
+        >
+          <Icon name="plus" size={11} />
+        </button>
+        {/* old line number */}
+        <span style={LINENO_STYLE}>
+          {line().old_lineno ?? ""}
+        </span>
+        {/* new line number */}
+        <span style={LINENO_STYLE}>
+          {line().new_lineno ?? ""}
+        </span>
       </span>
       {/* sign */}
       <span style={{
@@ -131,26 +555,25 @@ const UnifiedRow: Component<{
 
 // ── Split row ─────────────────────────────────────────────────────────────────
 interface SplitPair {
-  left: DiffLine | null;
-  right: DiffLine | null;
+  left: IndexedDiffLine | null;
+  right: IndexedDiffLine | null;
 }
 
-function buildSplitPairs(lines: DiffLine[]): SplitPair[] {
+function buildSplitPairs(lines: IndexedDiffLine[]): SplitPair[] {
   const pairs: SplitPair[] = [];
   let i = 0;
   while (i < lines.length) {
-    const line = lines[i];
-    if (line.kind === "context") {
-      pairs.push({ left: line, right: line });
+    const item = lines[i];
+    if (item.line.kind === "context") {
+      pairs.push({ left: item, right: item });
       i++;
-    } else if (line.kind === "del") {
-      // Collect consecutive del/add runs and zip them
-      const dels: DiffLine[] = [];
-      const adds: DiffLine[] = [];
-      while (i < lines.length && lines[i].kind === "del") {
+    } else if (item.line.kind === "del") {
+      const dels: IndexedDiffLine[] = [];
+      const adds: IndexedDiffLine[] = [];
+      while (i < lines.length && lines[i].line.kind === "del") {
         dels.push(lines[i++]);
       }
-      while (i < lines.length && lines[i].kind === "add") {
+      while (i < lines.length && lines[i].line.kind === "add") {
         adds.push(lines[i++]);
       }
       const maxLen = Math.max(dels.length, adds.length);
@@ -158,8 +581,7 @@ function buildSplitPairs(lines: DiffLine[]): SplitPair[] {
         pairs.push({ left: dels[j] ?? null, right: adds[j] ?? null });
       }
     } else {
-      // add with no preceding del
-      pairs.push({ left: null, right: line });
+      pairs.push({ left: null, right: item });
       i++;
     }
   }
@@ -167,40 +589,90 @@ function buildSplitPairs(lines: DiffLine[]): SplitPair[] {
 }
 
 const SplitCell: Component<{
-  line: DiffLine | null;
+  filePath: string;
+  indexed: IndexedDiffLine | null;
+  selected: boolean;
   lang: string | null;
   lineCount: number;
   side: "left" | "right";
+  onSelectLine: (filePath: string, flatIndex: number, e: MouseEvent) => void;
+  onStartDragSelect: (filePath: string, flatIndex: number, e: PointerEvent) => void;
+  onEnterDragSelect: (filePath: string, flatIndex: number) => void;
+  onOpenAskForLine: (filePath: string, flatIndex: number, e: MouseEvent) => void;
+  onContextMenuLine: (filePath: string, indexed: IndexedDiffLine, e: MouseEvent) => void;
 }> = (props) => {
+  const line = () => props.indexed?.line ?? null;
   const bg = () =>
-    !props.line ? CTX_BG :
-    props.line.kind === "add" ? ADD_BG :
-    props.line.kind === "del" ? DEL_BG :
+    !line() ? CTX_BG :
+    line()!.kind === "add" ? ADD_BG :
+    line()!.kind === "del" ? DEL_BG :
     CTX_BG;
 
   const lineno = () =>
-    !props.line ? "" :
-    props.side === "left" ? (props.line.old_lineno ?? "") :
-    (props.line.new_lineno ?? "");
+    !line() ? "" :
+    props.side === "left" ? (line()!.old_lineno ?? "") :
+    (line()!.new_lineno ?? "");
 
   const html = () => {
-    if (!props.line) return "";
-    if (props.lineCount > MAX_HIGHLIGHT_LINES) return escapeHtml(props.line.content);
-    return highlightCode(props.line.content, props.lang);
+    if (!line()) return "";
+    if (props.lineCount > MAX_HIGHLIGHT_LINES) return escapeHtml(line()!.content);
+    return highlightCode(line()!.content, props.lang);
   };
 
   return (
     <div
-      class={props.line ? "diff-row" : ""}
+      class={props.indexed ? "diff-row" : ""}
+      classList={{ "diff-row-selected": props.selected }}
+      data-diff-file-path={props.indexed ? props.filePath : undefined}
+      data-diff-flat-index={props.indexed?.flatIndex}
+      onPointerEnter={() => {
+        if (props.indexed) props.onEnterDragSelect(props.filePath, props.indexed.flatIndex);
+      }}
+      onClick={(e) => {
+        if (!props.indexed) return;
+        if ((e.target as HTMLElement).closest(".diff-row-ask-btn")) return;
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) return;
+        props.onSelectLine(props.filePath, props.indexed.flatIndex, e);
+      }}
+      onContextMenu={(e) => {
+        if (props.indexed) props.onContextMenuLine(props.filePath, props.indexed, e);
+      }}
       style={{
         flex: "1", "min-width": "0",
         display: "flex", "align-items": "flex-start",
         background: bg(),
         "border-right": props.side === "left" ? "1px solid var(--border-muted)" : "none",
         "min-height": "20px", "line-height": "20px",
+        cursor: props.indexed ? "pointer" : "default",
       }}
     >
-      <span style={LINENO_STYLE}>{lineno()}</span>
+      <span
+        class="diff-gutter"
+        onPointerDown={(e) => {
+          if (props.indexed) props.onStartDragSelect(props.filePath, props.indexed.flatIndex, e);
+        }}
+        style={{ display: "inline-flex", "align-items": "center", "flex-shrink": "0", "user-select": "none" }}
+      >
+        <Show when={props.indexed}>
+          {(idx) => (
+            <button
+              type="button"
+              class="diff-row-ask-btn"
+              title="Ask changes on this line (Shift+click for range)"
+              aria-label="Ask changes on this line"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onOpenAskForLine(props.filePath, idx().flatIndex, e);
+              }}
+            >
+              <Icon name="plus" size={11} />
+            </button>
+          )}
+        </Show>
+        <span style={LINENO_STYLE}>{lineno()}</span>
+      </span>
       <span
         style={{ "white-space": "pre-wrap", "word-break": "break-all", flex: "1", "min-width": "0" }}
         innerHTML={html()}
@@ -210,23 +682,61 @@ const SplitCell: Component<{
 };
 
 // ── File block ────────────────────────────────────────────────────────────────
-const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: number; index: number }> = (props) => {
-  const [collapsed, setCollapsed] = createSignal(false);
+const FileBlock: Component<{
+  file: FileDiff;
+  mode: LayoutMode;
+  totalLines: number;
+  index: number;
+  selectedIndices: Set<number>;
+  maxSelectedFlatIndex: number | null;
+  fileComments: ReviewCommentDraft[];
+  canPatchWorktree: boolean;
+  isStaged: boolean;
+  hasUnstaged: boolean;
+  onStageFile: (filePath: string) => void;
+  onUnstageFile: (filePath: string) => void;
+  onDiscardFile: (filePath: string) => void;
+  onSelectLine: (filePath: string, flatIndex: number, e: MouseEvent) => void;
+  onStartDragSelect: (filePath: string, flatIndex: number, e: PointerEvent) => void;
+  onEnterDragSelect: (filePath: string, flatIndex: number) => void;
+  onOpenAskForLine: (filePath: string, flatIndex: number, e: MouseEvent) => void;
+  onContextMenuLine: (filePath: string, indexed: IndexedDiffLine, e: MouseEvent) => void;
+  onSelectHunk: (filePath: string, hunkIndex: number, focusAsk?: boolean) => void;
+  onPatchHunk: (file: FileDiff, hunk: IndexedHunk, action: "stage" | "unstage" | "discard") => void;
+  onEditComment: (comment: ReviewCommentDraft) => void;
+  onRemoveComment: (id: string) => void;
+  renderInlineAsk: () => any;
+}> = (props) => {
+  const displayPath = () => props.file.new_path ?? props.file.old_path ?? "(unknown)";
+  const diffSig = createMemo(() => fileDiffSignature(props.file));
+  const viewed = createMemo(() => isFileViewed(displayPath(), store.review?.rev, diffSig()));
+  const [collapsed, setCollapsed] = createSignal(viewed());
+
+  createEffect(() => {
+    setCollapsed(viewed());
+  });
+
   const lang = createMemo(() => langForPath(props.file.new_path ?? props.file.old_path));
   const st = () => STATUS_COLORS[props.file.status] ?? STATUS_COLORS.modified;
-  const displayPath = () => props.file.new_path ?? props.file.old_path ?? "(unknown)";
+  const indexed = createMemo(() => indexFileHunks(props.file));
+
+  function toggleViewed(next: boolean) {
+    setFileViewed(displayPath(), next, store.review?.rev, diffSig());
+    setCollapsed(next);
+    void triggerHaptic("generic");
+  }
+
+  const commentsAtIndex = (flatIndex: number) =>
+    props.fileComments.filter((c) => c.endFlatIndex === flatIndex);
 
   return (
     <div
       data-diff-file={props.index}
       style={{
-        border: "1px solid var(--border-muted)",
+        border: viewed() ? "1px solid color-mix(in srgb, var(--status-add) 32%, var(--border-muted))" : "1px solid var(--border-muted)",
         "border-radius": "8px",
         overflow: "hidden",
         "margin-bottom": "16px",
-        // Skip layout/paint for blocks scrolled out of view — big diffs stay
-        // smooth. The intrinsic size is a rough average block height so the
-        // scrollbar doesn't jump wildly.
         "content-visibility": "auto",
         "contain-intrinsic-size": "auto 480px",
       }}
@@ -237,7 +747,7 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         style={{
           display: "flex", "align-items": "center", gap: "10px",
           padding: "8px 14px",
-          background: "var(--surface-2)",
+          background: viewed() ? "color-mix(in srgb, var(--status-add) 5%, var(--surface-2))" : "var(--surface-2)",
           "border-bottom": collapsed() ? "none" : "1px solid var(--border-muted)",
           cursor: "pointer",
           "user-select": "none",
@@ -270,11 +780,18 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         {/* Path */}
         <span style={{
           "font-family": MONO, "font-size": "12px",
-          color: "var(--fg-body)", flex: "1", "min-width": "0",
+          color: viewed() ? "var(--fg-subtle)" : "var(--fg-body)", flex: "1", "min-width": "0",
           overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
         }}>
           {displayPath()}
         </span>
+
+        <Show when={props.fileComments.length > 0}>
+          <span class="diff-selection-count" title="Queued review comments in this file">
+            <Icon name="message" size={10} style={{ "vertical-align": "-1px", "margin-right": "3px" }} />
+            {props.fileComments.length}
+          </span>
+        </Show>
 
         {/* Stats */}
         <Show when={!props.file.is_binary}>
@@ -288,6 +805,77 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         <Show when={props.file.is_binary}>
           <span style={{ "font-family": MONO, "font-size": "11px", color: "var(--fg-faint)" }}>binary</span>
         </Show>
+
+        {/* Per-file Git Stage / Unstage / Discard actions */}
+        <Show when={props.canPatchWorktree}>
+          <div
+            onclick={(e) => e.stopPropagation()}
+            style={{ display: "inline-flex", "align-items": "center", gap: "4px", "flex-shrink": "0" }}
+          >
+            <Show when={props.isStaged && !props.hasUnstaged}>
+              <span class="git-staged-badge" title="All changes in this file are staged">
+                Staged
+              </span>
+            </Show>
+            <Show when={props.isStaged && props.hasUnstaged}>
+              <span class="git-staged-badge git-staged-badge-partial" title="File has both staged and unstaged changes">
+                Partial
+              </span>
+            </Show>
+            <Show when={props.hasUnstaged}>
+              <button
+                type="button"
+                class="git-stage-btn git-stage-btn-add press"
+                onclick={() => props.onStageFile(displayPath())}
+                title={`Stage ${basename(displayPath())}`}
+              >
+                <Icon name="plus" size={11} />
+                <span>Stage</span>
+              </button>
+            </Show>
+            <Show when={props.isStaged}>
+              <button
+                type="button"
+                class="git-stage-btn git-stage-btn-remove press"
+                onclick={() => props.onUnstageFile(displayPath())}
+                title={`Unstage ${basename(displayPath())}`}
+              >
+                <Icon name="remove" size={11} />
+                <span>Unstage</span>
+              </button>
+            </Show>
+            <Show when={props.hasUnstaged}>
+              <button
+                type="button"
+                class="icon-btn-danger press"
+                onclick={() => props.onDiscardFile(displayPath())}
+                title={`Discard unstaged changes to ${basename(displayPath())}`}
+                aria-label={`Discard changes to ${basename(displayPath())}`}
+                style={{
+                  display: "inline-flex", "align-items": "center", "justify-content": "center",
+                  width: "22px", height: "22px", "border-radius": "var(--radius-sm)", color: "var(--fg-subtle)",
+                }}
+              >
+                <Icon name="trash" size={11} />
+              </button>
+            </Show>
+          </div>
+        </Show>
+
+        {/* GitHub-style Viewed checkbox */}
+        <label
+          class="diff-viewed-toggle"
+          classList={{ "diff-viewed-toggle-on": viewed() }}
+          onclick={(e) => e.stopPropagation()}
+          title={viewed() ? "Mark file as not viewed" : "Mark file as viewed"}
+        >
+          <input
+            type="checkbox"
+            checked={viewed()}
+            onChange={(e) => toggleViewed(e.currentTarget.checked)}
+          />
+          <span>Viewed</span>
+        </label>
       </div>
 
       {/* Diff body */}
@@ -304,54 +892,163 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
         </Show>
         <Show when={!props.file.is_binary && props.file.hunks.length > 0}>
           <div style={{ overflow: "visible", "font-family": MONO, "font-size": "12px" }}>
-            <For each={props.file.hunks}>
+            <For each={indexed().hunks}>
               {(hunk) => (
                 <>
-                  {/* Hunk header */}
+                  {/* Hunk header with interactive actions */}
                   <div
                     data-diff-hunk
-                    style={{
-                      padding: "4px 12px",
-                      background: "var(--surface-2)",
-                      color: "var(--fg-faint)",
-                      "font-family": MONO, "font-size": "11px",
-                      "border-top": "1px solid var(--border-muted)",
-                      "border-bottom": "1px solid var(--border-muted)",
-                    }}
+                    class="diff-hunk-head"
                   >
-                    {hunk.header}
+                    <span class="diff-hunk-title">{hunk.header}</span>
+                    <div class="diff-hunk-actions">
+                      <button
+                        type="button"
+                        class="diff-hunk-btn hover-tint"
+                        title="Select all lines in this hunk"
+                        onClick={() => props.onSelectHunk(displayPath(), hunk.hunkIndex, false)}
+                      >
+                        Select hunk
+                      </button>
+                      <button
+                        type="button"
+                        class="diff-hunk-btn hover-tint"
+                        title="Ask changes for this hunk"
+                        onClick={() => props.onSelectHunk(displayPath(), hunk.hunkIndex, true)}
+                      >
+                        <Icon name="message" size={11} /> Ask
+                      </button>
+                      <Show when={props.canPatchWorktree && props.file.status === "modified"}>
+                        <Show
+                          when={store.review?.mode === "staged"}
+                          fallback={
+                            <>
+                              <button
+                                type="button"
+                                class="diff-hunk-btn hover-tint"
+                                title="Stage this hunk"
+                                onClick={() => props.onPatchHunk(props.file, hunk, "stage")}
+                              >
+                                <Icon name="plus" size={11} /> Stage hunk
+                              </button>
+                              <button
+                                type="button"
+                                class="diff-hunk-btn diff-hunk-btn-danger"
+                                title="Discard changes in this hunk"
+                                onClick={() => props.onPatchHunk(props.file, hunk, "discard")}
+                              >
+                                <Icon name="trash" size={11} /> Discard
+                              </button>
+                            </>
+                          }
+                        >
+                          <button
+                            type="button"
+                            class="diff-hunk-btn hover-tint"
+                            title="Unstage this hunk"
+                            onClick={() => props.onPatchHunk(props.file, hunk, "unstage")}
+                          >
+                            <Icon name="remove" size={11} /> Unstage hunk
+                          </button>
+                        </Show>
+                      </Show>
+                    </div>
                   </div>
 
                   {/* Lines */}
                   <Show when={props.mode === "unified"}>
                     <For each={hunk.lines}>
-                      {(line) => (
-                        <UnifiedRow
-                          line={line}
-                          lang={lang()}
-                          lineCount={props.totalLines}
-                        />
+                      {(item) => (
+                        <>
+                          <UnifiedRow
+                            filePath={displayPath()}
+                            indexed={item}
+                            selected={props.selectedIndices.has(item.flatIndex)}
+                            lang={lang()}
+                            lineCount={props.totalLines}
+                            onSelectLine={props.onSelectLine}
+                            onStartDragSelect={props.onStartDragSelect}
+                            onEnterDragSelect={props.onEnterDragSelect}
+                            onOpenAskForLine={props.onOpenAskForLine}
+                            onContextMenuLine={props.onContextMenuLine}
+                          />
+                          <For each={commentsAtIndex(item.flatIndex)}>
+                            {(c) => (
+                              <SavedCommentCard
+                                comment={c}
+                                onEdit={props.onEditComment}
+                                onRemove={props.onRemoveComment}
+                              />
+                            )}
+                          </For>
+                          <Show when={props.maxSelectedFlatIndex === item.flatIndex}>
+                            {props.renderInlineAsk()}
+                          </Show>
+                        </>
                       )}
                     </For>
                   </Show>
                   <Show when={props.mode === "split"}>
                     <For each={buildSplitPairs(hunk.lines)}>
-                      {(pair) => (
-                        <div style={{ display: "flex" }}>
-                          <SplitCell
-                            line={pair.left}
-                            lang={lang()}
-                            lineCount={props.totalLines}
-                            side="left"
-                          />
-                          <SplitCell
-                            line={pair.right}
-                            lang={lang()}
-                            lineCount={props.totalLines}
-                            side="right"
-                          />
-                        </div>
-                      )}
+                      {(pair) => {
+                        const rowHasMaxSelected = () =>
+                          props.maxSelectedFlatIndex !== null &&
+                          (pair.left?.flatIndex === props.maxSelectedFlatIndex ||
+                            pair.right?.flatIndex === props.maxSelectedFlatIndex);
+                        const rowComments = () => {
+                          const leftIdx = pair.left?.flatIndex;
+                          const rightIdx = pair.right?.flatIndex;
+                          return props.fileComments.filter(
+                            (c) =>
+                              (leftIdx !== undefined && c.endFlatIndex === leftIdx) ||
+                              (rightIdx !== undefined && rightIdx !== leftIdx && c.endFlatIndex === rightIdx),
+                          );
+                        };
+                        return (
+                          <>
+                            <div style={{ display: "flex" }}>
+                              <SplitCell
+                                filePath={displayPath()}
+                                indexed={pair.left}
+                                selected={pair.left ? props.selectedIndices.has(pair.left.flatIndex) : false}
+                                lang={lang()}
+                                lineCount={props.totalLines}
+                                side="left"
+                                onSelectLine={props.onSelectLine}
+                                onStartDragSelect={props.onStartDragSelect}
+                                onEnterDragSelect={props.onEnterDragSelect}
+                                onOpenAskForLine={props.onOpenAskForLine}
+                                onContextMenuLine={props.onContextMenuLine}
+                              />
+                              <SplitCell
+                                filePath={displayPath()}
+                                indexed={pair.right}
+                                selected={pair.right ? props.selectedIndices.has(pair.right.flatIndex) : false}
+                                lang={lang()}
+                                lineCount={props.totalLines}
+                                side="right"
+                                onSelectLine={props.onSelectLine}
+                                onStartDragSelect={props.onStartDragSelect}
+                                onEnterDragSelect={props.onEnterDragSelect}
+                                onOpenAskForLine={props.onOpenAskForLine}
+                                onContextMenuLine={props.onContextMenuLine}
+                              />
+                            </div>
+                            <For each={rowComments()}>
+                              {(c) => (
+                                <SavedCommentCard
+                                  comment={c}
+                                  onEdit={props.onEditComment}
+                                  onRemove={props.onRemoveComment}
+                                />
+                              )}
+                            </For>
+                            <Show when={rowHasMaxSelected()}>
+                              {props.renderInlineAsk()}
+                            </Show>
+                          </>
+                        );
+                      }}
                     </For>
                   </Show>
                 </>
@@ -367,15 +1064,58 @@ const FileBlock: Component<{ file: FileDiff; mode: LayoutMode; totalLines: numbe
 // ── Top-level pane ────────────────────────────────────────────────────────────
 const DiffPane: Component = () => {
   const [mode, setMode] = createSignal<LayoutMode>("unified");
+  const [unviewedOnly, setUnviewedOnly] = createSignal(false);
+  const [selection, setSelection] = createSignal<LineSelection | null>(null);
+  const [askText, setAskText] = createSignal("");
+  const [sendingAsk, setSendingAsk] = createSignal(false);
+  const [submittingBatch, setSubmittingBatch] = createSignal(false);
+  const [contextMenu, setContextMenu] = createSignal<{
+    x: number;
+    y: number;
+    filePath: string;
+    indexed: IndexedDiffLine;
+  } | null>(null);
+  const [dragState, setDragState] = createSignal<{
+    filePath: string;
+    startIndex: number;
+  } | null>(null);
+
+  let askInputRef: HTMLTextAreaElement | undefined;
 
   const [diffs, { refetch }] = createResource(
-    () => store.review,
-    (r) => {
+    () => ({
+      review: store.review,
+      gitVer: store.gitStatusVersion,
+    }),
+    ({ review: r }) => {
       const project = store.currentProject;
       if (!project || !r) return Promise.resolve([]);
       return getReviewDiff(effectiveRoot()!, r.rev, r.path, r.mode);
     }
   );
+
+  const canPatchWorktree = () => !store.review?.rev;
+
+  // Clear line selection when switching reviewed target
+  createEffect(() => {
+    void store.review?.path;
+    void store.review?.rev;
+    void store.review?.mode;
+    setSelection(null);
+    setContextMenu(null);
+  });
+
+  // End pointer drag selection on global pointerup
+  createEffect(() => {
+    if (!dragState()) return;
+    const stop = () => setDragState(null);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+    onCleanup(() => {
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+    });
+  });
 
   const totalLines = createMemo(() =>
     (diffs() ?? []).reduce(
@@ -385,18 +1125,530 @@ const DiffPane: Component = () => {
   );
   const highlightingDisabled = () => totalLines() > MAX_HIGHLIGHT_LINES;
 
-  // Chunked mount: big diffs highlight every line synchronously at mount, so
-  // rendering all file blocks at once stalls the main thread right after the
-  // spinner clears. Mount a few blocks, then grow the slice during idle time.
+  const viewedCount = createMemo(() => {
+    const list = diffs() ?? [];
+    return list.filter((f) => {
+      const p = f.new_path ?? f.old_path ?? "(unknown)";
+      return isFileViewed(p, store.review?.rev, fileDiffSignature(f));
+    }).length;
+  });
+
+  const filteredDiffs = createMemo(() => {
+    const list = diffs() ?? [];
+    if (!unviewedOnly()) return list;
+    return list.filter((f) => {
+      const p = f.new_path ?? f.old_path ?? "(unknown)";
+      return !isFileViewed(p, store.review?.rev, fileDiffSignature(f));
+    });
+  });
+
+  const indexedByFile = createMemo(() => {
+    const map = new Map<string, { file: FileDiff; hunks: IndexedHunk[]; flat: IndexedDiffLine[] }>();
+    for (const f of diffs() ?? []) {
+      const p = f.new_path ?? f.old_path ?? "(unknown)";
+      map.set(p, { file: f, ...indexFileHunks(f) });
+    }
+    return map;
+  });
+
+  const selectedLines = createMemo<IndexedDiffLine[]>(() => {
+    const sel = selection();
+    if (!sel || sel.indices.length === 0) return [];
+    const entry = indexedByFile().get(sel.filePath);
+    if (!entry) return [];
+    const sorted = [...new Set(sel.indices)].sort((a, b) => a - b);
+    return sorted.map((i) => entry.flat[i]).filter((x): x is IndexedDiffLine => !!x);
+  });
+
+  const selectedIndexSetForFile = (filePath: string): Set<number> => {
+    const sel = selection();
+    if (!sel || sel.filePath !== filePath) return new Set();
+    return new Set(sel.indices);
+  };
+
+  const maxSelectedIndexForFile = (filePath: string): number | null => {
+    const sel = selection();
+    if (!sel || sel.filePath !== filePath || sel.indices.length === 0) return null;
+    return Math.max(...sel.indices);
+  };
+
+  function selectLine(filePath: string, flatIndex: number, e: MouseEvent) {
+    const cur = selection();
+    if (e.shiftKey && cur && cur.filePath === filePath) {
+      const start = Math.min(cur.anchorIndex, flatIndex);
+      const end = Math.max(cur.anchorIndex, flatIndex);
+      const range: number[] = [];
+      for (let i = start; i <= end; i++) range.push(i);
+      const nextIndices = e.metaKey || e.ctrlKey ? [...new Set([...cur.indices, ...range])] : range;
+      setSelection({ filePath, indices: nextIndices, anchorIndex: cur.anchorIndex });
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && cur && cur.filePath === filePath) {
+      const exists = cur.indices.includes(flatIndex);
+      const nextIndices = exists
+        ? cur.indices.filter((i) => i !== flatIndex)
+        : [...cur.indices, flatIndex];
+      if (nextIndices.length === 0) setSelection(null);
+      else setSelection({ filePath, indices: nextIndices, anchorIndex: flatIndex });
+      return;
+    }
+    if (cur && cur.filePath === filePath && cur.indices.length === 1 && cur.indices[0] === flatIndex) {
+      setSelection(null);
+      return;
+    }
+    setSelection({ filePath, indices: [flatIndex], anchorIndex: flatIndex });
+  }
+
+  function startDragSelect(filePath: string, flatIndex: number, e: PointerEvent) {
+    if (e.button !== 0) return;
+    if (e.shiftKey || e.metaKey || e.ctrlKey) return;
+    e.preventDefault();
+    setDragState({ filePath, startIndex: flatIndex });
+    setSelection({ filePath, indices: [flatIndex], anchorIndex: flatIndex });
+  }
+
+  function enterDragSelect(filePath: string, flatIndex: number) {
+    const drag = dragState();
+    if (!drag || drag.filePath !== filePath) return;
+    const start = Math.min(drag.startIndex, flatIndex);
+    const end = Math.max(drag.startIndex, flatIndex);
+    const range: number[] = [];
+    for (let i = start; i <= end; i++) range.push(i);
+    setSelection({ filePath, indices: range, anchorIndex: drag.startIndex });
+  }
+
+  function openAskForLine(filePath: string, flatIndex: number, e: MouseEvent) {
+    const cur = selection();
+    if (e.shiftKey && cur && cur.filePath === filePath) {
+      selectLine(filePath, flatIndex, e);
+    } else if (!cur || cur.filePath !== filePath || !cur.indices.includes(flatIndex)) {
+      setSelection({ filePath, indices: [flatIndex], anchorIndex: flatIndex });
+    }
+    queueMicrotask(() => askInputRef?.focus());
+  }
+
+  function handleContextMenuLine(filePath: string, indexed: IndexedDiffLine, e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const nativeSel = window.getSelection();
+    if (nativeSel && !nativeSel.isCollapsed && bodyRef) {
+      const range = nativeSel.rangeCount > 0 ? nativeSel.getRangeAt(0) : null;
+      if (range) {
+        const rows = Array.from(
+          bodyRef.querySelectorAll<HTMLElement>(`.diff-row[data-diff-file-path="${CSS.escape(filePath)}"]`)
+        );
+        const hitIndices = rows
+          .filter((r) => range.intersectsNode(r))
+          .map((r) => Number(r.dataset.diffFlatIndex))
+          .filter((n) => !Number.isNaN(n));
+        if (hitIndices.length > 1) {
+          setSelection({
+            filePath,
+            indices: [...new Set(hitIndices)],
+            anchorIndex: hitIndices[0],
+          });
+          setContextMenu({ x: e.clientX, y: e.clientY, filePath, indexed });
+          return;
+        }
+      }
+    }
+
+    const cur = selection();
+    if (!cur || cur.filePath !== filePath || !cur.indices.includes(indexed.flatIndex)) {
+      setSelection({
+        filePath,
+        indices: [indexed.flatIndex],
+        anchorIndex: indexed.flatIndex,
+      });
+    }
+    setContextMenu({ x: e.clientX, y: e.clientY, filePath, indexed });
+  }
+
+  async function submitAskChanges(modeAction: "send" | "seed", customInstruction?: string) {
+    const sel = selection();
+    const lines = selectedLines();
+    if (!sel || lines.length === 0) return;
+    const instruction = customInstruction ?? askText().trim();
+    if (modeAction === "send" && !instruction) {
+      askInputRef?.focus();
+      toast("Describe the changes you want for the selected lines", "info");
+      return;
+    }
+    const prompt = buildSelectionPrompt(
+      sel.filePath,
+      lines,
+      instruction || "Please update these lines as needed.",
+    );
+    if (modeAction === "seed") {
+      setPendingPromptSeed({ text: prompt });
+      setAskText("");
+      toast("Added selected lines to composer", "success");
+      return;
+    }
+    setSendingAsk(true);
+    try {
+      const wasRunning = chat.activeId ? isRunning(chat.activeId) : false;
+      const ok = await submitPrompt(prompt);
+      if (ok) {
+        setAskText("");
+        setSelection(null);
+        if (!wasRunning) {
+          toast(`Sent change request for ${basename(sel.filePath)}`, "success");
+        }
+      }
+    } finally {
+      setSendingAsk(false);
+    }
+  }
+
+  function queueReviewComment() {
+    const sel = selection();
+    const lines = selectedLines();
+    const instruction = askText().trim();
+    if (!sel || lines.length === 0) return;
+    if (!instruction) {
+      askInputRef?.focus();
+      toast("Write a comment before adding to the review batch", "info");
+      return;
+    }
+    const { range, fenceLang, snippet } = formatSnippetDetails(sel.filePath, lines);
+    const endFlatIndex = Math.max(...lines.map((l) => l.flatIndex));
+    addReviewComment({
+      filePath: sel.filePath,
+      lineRangeLabel: range,
+      fenceLang,
+      snippet,
+      instruction,
+      endFlatIndex,
+    });
+    setAskText("");
+    setSelection(null);
+    void triggerHaptic("generic");
+    toast(`Queued comment on ${basename(sel.filePath)} (${range})`, "success");
+  }
+
+  function editQueuedComment(comment: ReviewCommentDraft) {
+    removeReviewComment(comment.id);
+    setSelection({
+      filePath: comment.filePath,
+      indices: [comment.endFlatIndex],
+      anchorIndex: comment.endFlatIndex,
+    });
+    setAskText(comment.instruction);
+    queueMicrotask(() => askInputRef?.focus());
+  }
+
+  async function submitBatchReview(modeAction: "send" | "seed") {
+    const prompt = formatReviewBatchPrompt();
+    if (!prompt) return;
+    if (modeAction === "seed") {
+      setPendingPromptSeed({ text: prompt });
+      clearReviewComments();
+      toast("Added all review comments to composer", "success");
+      return;
+    }
+    setSubmittingBatch(true);
+    try {
+      const count = store.reviewComments.length;
+      const ok = await submitPrompt(prompt);
+      if (ok) {
+        clearReviewComments();
+        toast(`Submitted ${count} review ${count === 1 ? "comment" : "comments"}`, "success");
+      }
+    } finally {
+      setSubmittingBatch(false);
+    }
+  }
+
+  async function applyGitPatchAction(
+    file: FileDiff,
+    hunks: IndexedHunk[],
+    selectedSet: Set<number> | null,
+    action: "stage" | "unstage" | "discard",
+  ) {
+    const root = effectiveRoot();
+    if (!root) return;
+    const filePath = file.new_path ?? file.old_path ?? "file";
+    if (action === "discard") {
+      const scopeLabel = selectedSet ? `${selectedSet.size} selected line(s)` : "this hunk";
+      const ok = await confirmDialog(
+        `Discard changes in ${scopeLabel} of ${basename(filePath)}? This cannot be undone.`,
+        { confirmLabel: "Discard", danger: true },
+      );
+      if (!ok) return;
+    }
+
+    const direction = action === "stage" ? "forward" : "reverse";
+    const cached = action === "stage" || action === "unstage";
+    const reverse = action === "unstage" || action === "discard";
+    const patch = buildPatchForFile(file, hunks, selectedSet, direction);
+    if (!patch) {
+      toast("Select at least one added or deleted line", "info");
+      return;
+    }
+
+    try {
+      await gitApplyPatch(root, patch, cached, reverse);
+      void triggerHaptic("alignment");
+      toast(
+        action === "stage"
+          ? "Staged changes"
+          : action === "unstage"
+            ? "Unstaged changes"
+            : "Discarded changes",
+        "success",
+      );
+      setSelection(null);
+      bumpGitStatus();
+      void refetch();
+    } catch (err) {
+      toast(`Git apply failed: ${String(err)}`, "error");
+    }
+  }
+
+  const statusEntryForPath = (filePath: string) =>
+    (gitStatus() ?? []).find((e) => e.path === filePath) ?? null;
+
+  const isPathStaged = (filePath: string): boolean => {
+    const e = statusEntryForPath(filePath);
+    if (!e) return store.review?.mode === "staged";
+    return e.index_status !== " " && e.index_status !== "?";
+  };
+
+  const hasPathUnstaged = (filePath: string): boolean => {
+    const e = statusEntryForPath(filePath);
+    if (!e) return store.review?.mode !== "staged";
+    return e.worktree_status !== " ";
+  };
+
+  const isPathUntracked = (filePath: string): boolean => {
+    const e = statusEntryForPath(filePath);
+    return !!e && e.index_status === "?" && e.worktree_status === "?";
+  };
+
+  const unstagedWorkingCount = createMemo(() =>
+    (gitStatus() ?? []).filter((e) => e.worktree_status !== " ").length
+  );
+
+  const stagedWorkingCount = createMemo(() =>
+    (gitStatus() ?? []).filter((e) => e.index_status !== " " && e.index_status !== "?").length
+  );
+
+  async function stageWholeFile(filePath: string) {
+    const root = effectiveRoot();
+    if (!root) return;
+    void triggerHaptic("generic");
+    try {
+      await gitStage(root, [filePath]);
+      toast(`Staged ${basename(filePath)}`, "success");
+      if (store.review?.path === filePath && !store.review?.rev) {
+        openReview(undefined, store.review?.title ?? basename(filePath), filePath, "staged");
+      }
+      bumpGitStatus();
+      void refetch();
+    } catch (err) {
+      toast(`Stage failed: ${String(err)}`, "error");
+    }
+  }
+
+  async function unstageWholeFile(filePath: string) {
+    const root = effectiveRoot();
+    if (!root) return;
+    void triggerHaptic("generic");
+    try {
+      await gitUnstage(root, [filePath]);
+      toast(`Unstaged ${basename(filePath)}`, "success");
+      if (store.review?.path === filePath && !store.review?.rev) {
+        openReview(undefined, store.review?.title ?? basename(filePath), filePath, "unstaged");
+      }
+      bumpGitStatus();
+      void refetch();
+    } catch (err) {
+      toast(`Unstage failed: ${String(err)}`, "error");
+    }
+  }
+
+  async function discardWholeFile(filePath: string) {
+    const root = effectiveRoot();
+    if (!root) return;
+    const name = basename(filePath);
+    const untracked = isPathUntracked(filePath);
+    const ok = await confirmDialog(
+      untracked
+        ? `Delete untracked file ${name}?`
+        : `Discard unstaged changes to ${name}? This cannot be undone.`,
+      { confirmLabel: untracked ? "Delete" : "Discard", danger: true },
+    );
+    if (!ok) return;
+    void triggerHaptic("levelChange");
+    try {
+      await gitDiscard(
+        root,
+        untracked ? [] : [filePath],
+        untracked ? [filePath] : [],
+      );
+      toast(`Discarded changes to ${name}`, "success");
+      bumpGitStatus();
+      void refetch();
+    } catch (err) {
+      toast(`Discard failed: ${String(err)}`, "error");
+    }
+  }
+
+  async function stageAllWorking() {
+    const root = effectiveRoot();
+    const paths = (gitStatus() ?? []).filter((e) => e.worktree_status !== " ").map((e) => e.path);
+    if (!root || paths.length === 0) return;
+    void triggerHaptic("generic");
+    try {
+      await gitStage(root, paths);
+      toast(`Staged ${paths.length} ${paths.length === 1 ? "file" : "files"}`, "success");
+      bumpGitStatus();
+      void refetch();
+    } catch (err) {
+      toast(`Stage all failed: ${String(err)}`, "error");
+    }
+  }
+
+  async function unstageAllWorking() {
+    const root = effectiveRoot();
+    const paths = (gitStatus() ?? [])
+      .filter((e) => e.index_status !== " " && e.index_status !== "?")
+      .map((e) => e.path);
+    if (!root || paths.length === 0) return;
+    void triggerHaptic("generic");
+    try {
+      await gitUnstage(root, paths);
+      toast(`Unstaged ${paths.length} ${paths.length === 1 ? "file" : "files"}`, "success");
+      bumpGitStatus();
+      void refetch();
+    } catch (err) {
+      toast(`Unstage all failed: ${String(err)}`, "error");
+    }
+  }
+
+  async function copySelectedCode(filterKind?: "add" | "del") {
+    let lines = selectedLines();
+    if (filterKind === "add") {
+      lines = lines.filter((l) => l.line.kind !== "del");
+    } else if (filterKind === "del") {
+      lines = lines.filter((l) => l.line.kind !== "add");
+    }
+    if (lines.length === 0) {
+      toast("No matching lines in selection", "info");
+      return;
+    }
+    const text = lines.map((l) => l.line.content).join("\n");
+    try {
+      await writeClipboardText(text);
+      toast(`Copied ${lines.length} ${lines.length === 1 ? "line" : "lines"}`, "success");
+    } catch {
+      toast("Could not copy code", "error");
+    }
+  }
+
+  async function copySelectedMarkdown() {
+    const sel = selection();
+    const lines = selectedLines();
+    if (!sel || lines.length === 0) return;
+    const { range, fenceLang, snippet } = formatSnippetDetails(sel.filePath, lines);
+    const md = `\`${sel.filePath}${range ? `:${range}` : ""}\`\n\`\`\`${fenceLang}\n${snippet}\n\`\`\``;
+    try {
+      await writeClipboardText(md);
+      toast("Copied Markdown code block", "success");
+    } catch {
+      toast("Could not copy Markdown", "error");
+    }
+  }
+
+  async function copySelectedDiff() {
+    const sel = selection();
+    const lines = selectedLines();
+    if (!sel || lines.length === 0) return;
+    const hunkHeader = lines[0].hunkHeader;
+    const body = lines
+      .map((l) => {
+        const sigil = l.line.kind === "add" ? "+" : l.line.kind === "del" ? "-" : " ";
+        return `${sigil}${l.line.content}`;
+      })
+      .join("\n");
+    const patch = `--- a/${sel.filePath}\n+++ b/${sel.filePath}\n${hunkHeader}\n${body}`;
+    try {
+      await writeClipboardText(patch);
+      toast("Copied diff patch", "success");
+    } catch {
+      toast("Could not copy diff patch", "error");
+    }
+  }
+
+  async function copyFileLineRef() {
+    const sel = selection();
+    const lines = selectedLines();
+    if (!sel || lines.length === 0) return;
+    const ref = `${sel.filePath}:${formatColonRange(lines)}`;
+    try {
+      await writeClipboardText(ref);
+      toast(`Copied ${ref}`, "success");
+    } catch {
+      toast("Could not copy reference", "error");
+    }
+  }
+
+  async function copyFilePath(filePath: string) {
+    try {
+      await writeClipboardText(filePath);
+      toast("Copied file path", "success");
+    } catch {
+      toast("Could not copy file path", "error");
+    }
+  }
+
+  function selectEntireHunk(filePath: string, hunkIndex: number, focusAsk = false, filterKind?: "add" | "del") {
+    const entry = indexedByFile().get(filePath);
+    const hunk = entry?.hunks[hunkIndex];
+    if (!hunk || hunk.lines.length === 0) return;
+    const indices = hunk.lines
+      .filter((l) => !filterKind || l.line.kind === filterKind)
+      .map((l) => l.flatIndex);
+    if (indices.length === 0) {
+      toast(`No ${filterKind === "add" ? "added" : "deleted"} lines in this hunk`, "info");
+      return;
+    }
+    setSelection({ filePath, indices, anchorIndex: indices[0] });
+    if (focusAsk) queueMicrotask(() => askInputRef?.focus());
+  }
+
+  function selectChangedLinesInFile(filePath: string) {
+    const entry = indexedByFile().get(filePath);
+    if (!entry) return;
+    const indices = entry.flat
+      .filter((l) => l.line.kind === "add" || l.line.kind === "del")
+      .map((l) => l.flatIndex);
+    if (indices.length === 0) {
+      toast("No added or deleted lines in this file", "info");
+      return;
+    }
+    setSelection({ filePath, indices, anchorIndex: indices[0] });
+  }
+
+  function markAllViewed(viewed: boolean) {
+    for (const f of diffs() ?? []) {
+      const p = f.new_path ?? f.old_path ?? "(unknown)";
+      setFileViewed(p, viewed, store.review?.rev, fileDiffSignature(f));
+    }
+    void triggerHaptic("generic");
+  }
+
   const FILE_CHUNK = 4;
   const [visibleFiles, setVisibleFiles] = createSignal(FILE_CHUNK);
   const idle =
     window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 50));
   createEffect(() => {
-    const files = diffs() ?? [];
+    const files = filteredDiffs();
     setVisibleFiles(Math.min(FILE_CHUNK, files.length));
     const grow = () => {
-      if ((diffs() ?? []) !== files) return; // a newer diff superseded this one
+      if (filteredDiffs() !== files) return;
       setVisibleFiles((n) => {
         const next = Math.min(n + FILE_CHUNK, files.length);
         if (next < files.length) idle(grow);
@@ -411,9 +1663,6 @@ const DiffPane: Component = () => {
   useValueMotion(() => bodyRef, mode);
   useValueMotion(() => bodyRef, () => store.review?.path ?? store.review?.rev);
 
-  /** Scroll-space offset of `el` within `bodyRef`, computed via
-   *  getBoundingClientRect deltas rather than offsetTop so it's correct
-   *  regardless of intermediate elements' positioning context. */
   function relativeTop(el: HTMLElement): number {
     if (!bodyRef) return 0;
     return el.getBoundingClientRect().top - bodyRef.getBoundingClientRect().top + bodyRef.scrollTop;
@@ -443,17 +1692,39 @@ const DiffPane: Component = () => {
     bodyRef.scrollTo({ top: relativeTop(el), behavior: resolvedMotion() === "full" ? "smooth" : "auto" });
   }
 
-  /** Next/prev-file (`]`/`[`) and next/prev-hunk (`j`/`k`) review navigation.
-   *  Scoped to the diff body itself (via its own onKeyDown, not a global
-   *  shortcuts.ts binding) so it only fires while the pane has focus and
-   *  never steals these keys from inputs elsewhere in the app. */
   function handleBodyKeyDown(e: KeyboardEvent) {
+    if ((e.target as HTMLElement)?.matches("input, textarea")) return;
+    if (e.key === "Escape" && selection()) {
+      e.preventDefault();
+      setSelection(null);
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c" && selection()) {
+      const nativeSel = window.getSelection();
+      if (!nativeSel || nativeSel.isCollapsed) {
+        e.preventDefault();
+        void copySelectedCode();
+        return;
+      }
+    }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     switch (e.key) {
       case "j": e.preventDefault(); navigate("[data-diff-hunk]", 1); break;
       case "k": e.preventDefault(); navigate("[data-diff-hunk]", -1); break;
       case "]": e.preventDefault(); navigate("[data-diff-file]", 1); break;
       case "[": e.preventDefault(); navigate("[data-diff-file]", -1); break;
+      case "s": {
+        if (!canPatchWorktree()) return;
+        const targetPath = selection()?.filePath ?? store.review?.path ?? (diffs()?.[0]?.new_path ?? diffs()?.[0]?.old_path);
+        if (!targetPath) return;
+        e.preventDefault();
+        if (hasPathUnstaged(targetPath)) {
+          void stageWholeFile(targetPath);
+        } else {
+          void unstageWholeFile(targetPath);
+        }
+        break;
+      }
       default: return;
     }
   }
@@ -496,6 +1767,7 @@ const DiffPane: Component = () => {
       display: "flex", "flex-direction": "column",
       background: "var(--surface-2)",
       "min-height": 0,
+      position: "relative",
     }}>
       {/* ── Header ── */}
       <div style={headerStyle}>
@@ -556,6 +1828,47 @@ const DiffPane: Component = () => {
         </Show>
       </div>
 
+      {/* ── Queued Multi-Comment Review Batch Banner ── */}
+      <Show when={store.reviewComments.length > 0}>
+        <div class="diff-batch-banner">
+          <Icon name="message" size={13} style={{ color: "var(--accent)" }} />
+          <span class="diff-batch-banner-text">
+            <strong>{store.reviewComments.length}</strong> review{" "}
+            {store.reviewComments.length === 1 ? "comment" : "comments"} queued
+          </span>
+          <div style={{ "margin-left": "auto", display: "flex", "align-items": "center", gap: "6px" }}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={clearReviewComments}
+              title="Discard queued review comments"
+            >
+              Clear
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void submitBatchReview("seed")}
+              title="Insert all queued review comments into the chat composer"
+            >
+              <Icon name="at" size={11} /> To composer
+            </Button>
+            <Button
+              variant="solid"
+              size="sm"
+              disabled={submittingBatch()}
+              onClick={() => void submitBatchReview("send")}
+              title="Submit all queued review comments to the agent in one turn"
+            >
+              <Show when={submittingBatch()} fallback={<Icon name="arrowUp" size={11} />}>
+                <Spinner size={11} />
+              </Show>
+              Submit review ({store.reviewComments.length})
+            </Button>
+          </div>
+        </div>
+      </Show>
+
       <Show
         when={store.review}
         fallback={
@@ -584,10 +1897,11 @@ const DiffPane: Component = () => {
               "border-right": "1px solid var(--border-muted)",
               background: "var(--surface-1)", padding: "8px 0",
             }}>
-              <For each={diffs() ?? []}>
+              <For each={filteredDiffs()}>
                 {(file, index) => {
                   const st = STATUS_COLORS[file.status] ?? STATUS_COLORS.modified;
                   const path = file.new_path ?? file.old_path ?? "(unknown)";
+                  const isViewed = () => isFileViewed(path, store.review?.rev, fileDiffSignature(file));
                   return (
                     <button
                       class="hover-tint"
@@ -606,11 +1920,36 @@ const DiffPane: Component = () => {
                       </span>
                       <Icon name={getFileIcon(path)} size={12} />
                       <span style={{
-                        "font-family": MONO, "font-size": "11px", color: "var(--fg-body)",
+                        "font-family": MONO, "font-size": "11px",
+                        color: isViewed() ? "var(--fg-faint)" : "var(--fg-body)",
                         overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap",
+                        flex: "1",
                       }}>
                         {path.split("/").pop()}
                       </span>
+                      <Show when={isViewed()}>
+                        <Icon name="check" size={12} style={{ color: "var(--status-add)", "flex-shrink": "0" }} />
+                      </Show>
+                      <Show when={canPatchWorktree()}>
+                        <span
+                          role="button"
+                          tabindex={0}
+                          class="git-stage-btn press"
+                          classList={{
+                            "git-stage-btn-add": hasPathUnstaged(path),
+                            "git-stage-btn-remove": !hasPathUnstaged(path) && isPathStaged(path),
+                          }}
+                          title={hasPathUnstaged(path) ? `Stage ${basename(path)}` : `Unstage ${basename(path)}`}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            if (hasPathUnstaged(path)) void stageWholeFile(path);
+                            else void unstageWholeFile(path);
+                          }}
+                          style={{ padding: "1px 5px" }}
+                        >
+                          <Icon name={hasPathUnstaged(path) ? "plus" : "remove"} size={10} />
+                        </span>
+                      </Show>
                     </button>
                   );
                 }}
@@ -622,7 +1961,11 @@ const DiffPane: Component = () => {
             ref={bodyRef}
             tabindex={0}
             onKeyDown={handleBodyKeyDown}
-            onclick={() => bodyRef?.focus()}
+            onclick={(e) => {
+              if (!(e.target as HTMLElement).closest("input, textarea, button, label")) {
+                bodyRef?.focus({ preventScroll: true });
+              }
+            }}
             style={{ flex: "1", overflow: "auto", padding: "16px 20px", "min-height": 0 }}
           >
 
@@ -658,8 +2001,8 @@ const DiffPane: Component = () => {
           <Show when={!diffs.loading && !diffs.error && (diffs()?.length ?? 0) > 0}>
             {/* Summary bar */}
             <div style={{
-              display: "flex", "align-items": "center", gap: "14px",
-              "margin-bottom": "16px",
+              display: "flex", "align-items": "center", "flex-wrap": "wrap", gap: "10px",
+              "margin-bottom": "12px",
               "font-family": MONO, "font-size": "11.5px", color: "var(--fg-subtle)",
             }}>
               <span>{diffs()!.length} {diffs()!.length === 1 ? "file" : "files"} changed</span>
@@ -669,6 +2012,73 @@ const DiffPane: Component = () => {
               <span style={{ color: DEL_SIGN }}>
                 −{diffs()!.reduce((s, f) => s + f.deletions, 0)}
               </span>
+
+              {/* Viewed progress & filter */}
+              <div style={{
+                display: "inline-flex", "align-items": "center", gap: "8px",
+                "margin-left": "auto",
+              }}>
+                <span style={{ "font-size": "11px", color: "var(--fg-muted)" }}>
+                  {viewedCount()} / {diffs()!.length} viewed
+                </span>
+                <div style={{
+                  width: "56px", height: "6px", "border-radius": "999px",
+                  background: "var(--surface-4)", overflow: "hidden",
+                }}>
+                  <div style={{
+                    height: "100%",
+                    width: `${Math.round((viewedCount() / Math.max(1, diffs()!.length)) * 100)}%`,
+                    background: "var(--status-add)",
+                    transition: "width var(--dur-base) var(--ease-standard)",
+                  }} />
+                </div>
+
+                <Show when={canPatchWorktree() && diffs()!.length > 1}>
+                  <Show when={unstagedWorkingCount() > 0}>
+                    <button
+                      type="button"
+                      class="git-stage-btn git-stage-btn-add press"
+                      onClick={() => void stageAllWorking()}
+                      title="Stage all unstaged files"
+                    >
+                      <Icon name="plus" size={11} />
+                      <span>Stage all ({unstagedWorkingCount()})</span>
+                    </button>
+                  </Show>
+                  <Show when={stagedWorkingCount() > 0}>
+                    <button
+                      type="button"
+                      class="git-stage-btn git-stage-btn-remove press"
+                      onClick={() => void unstageAllWorking()}
+                      title="Unstage all staged files"
+                    >
+                      <Icon name="remove" size={11} />
+                      <span>Unstage all ({stagedWorkingCount()})</span>
+                    </button>
+                  </Show>
+                </Show>
+
+                <Show when={diffs()!.length > 1}>
+                  <button
+                    type="button"
+                    class="diff-quick-chip hover-tint"
+                    classList={{ "diff-quick-chip-on": unviewedOnly() }}
+                    onClick={() => setUnviewedOnly((v) => !v)}
+                    title="Show only unviewed files"
+                  >
+                    Unviewed only
+                  </button>
+                  <button
+                    type="button"
+                    class="diff-quick-chip hover-tint"
+                    onClick={() => markAllViewed(viewedCount() < diffs()!.length)}
+                    title={viewedCount() < diffs()!.length ? "Mark all files as viewed" : "Mark all files as unviewed"}
+                  >
+                    {viewedCount() < diffs()!.length ? "Mark all viewed" : "Reset viewed"}
+                  </button>
+                </Show>
+              </div>
+
               <Show when={highlightingDisabled()}>
                 <span style={{
                   color: "var(--status-mod)", border: "1px solid var(--status-mod)44",
@@ -679,13 +2089,96 @@ const DiffPane: Component = () => {
               </Show>
             </div>
 
+            {/* Selection hint when nothing is selected */}
+            <Show when={!selection()}>
+              <div style={{
+                "font-size": "11.5px", color: "var(--fg-faint)",
+                "margin-bottom": "12px", display: "flex", "align-items": "center", gap: "6px",
+              }}>
+                <Icon name="message" size={12} />
+                <span>Click or drag lines (or Shift+click) to ask for changes inline, or right-click for git & copy actions.</span>
+              </div>
+            </Show>
+
+            <Show when={unviewedOnly() && filteredDiffs().length === 0}>
+              <div style={{
+                padding: "36px 16px", "text-align": "center",
+                border: "1px dashed var(--border-default)", "border-radius": "var(--radius-lg)",
+                color: "var(--fg-subtle)", "font-size": "12.5px",
+              }}>
+                All {diffs()!.length} files have been marked as viewed.
+                <div style={{ "margin-top": "10px" }}>
+                  <Button size="sm" onClick={() => setUnviewedOnly(false)}>
+                    Show all files
+                  </Button>
+                </div>
+              </div>
+            </Show>
+
             {/* File blocks (mounted in idle-time chunks) */}
-            <For each={diffs()!.slice(0, visibleFiles())}>
-              {(file, index) => (
-                <FileBlock file={file} mode={mode()} totalLines={totalLines()} index={index()} />
-              )}
+            <For each={filteredDiffs().slice(0, visibleFiles())}>
+              {(file, index) => {
+                const filePath = () => file.new_path ?? file.old_path ?? "(unknown)";
+                const fileComments = createMemo(() =>
+                  store.reviewComments.filter((c) => c.filePath === filePath())
+                );
+                return (
+                  <FileBlock
+                    file={file}
+                    mode={mode()}
+                    totalLines={totalLines()}
+                    index={index()}
+                    selectedIndices={selectedIndexSetForFile(filePath())}
+                    maxSelectedFlatIndex={maxSelectedIndexForFile(filePath())}
+                    fileComments={fileComments()}
+                    canPatchWorktree={canPatchWorktree()}
+                    isStaged={isPathStaged(filePath())}
+                    hasUnstaged={hasPathUnstaged(filePath())}
+                    onStageFile={(p) => void stageWholeFile(p)}
+                    onUnstageFile={(p) => void unstageWholeFile(p)}
+                    onDiscardFile={(p) => void discardWholeFile(p)}
+                    onSelectLine={selectLine}
+                    onStartDragSelect={startDragSelect}
+                    onEnterDragSelect={enterDragSelect}
+                    onOpenAskForLine={openAskForLine}
+                    onContextMenuLine={handleContextMenuLine}
+                    onSelectHunk={(p, hIdx, focusAsk) => selectEntireHunk(p, hIdx, focusAsk)}
+                    onPatchHunk={(f, hunk, action) => void applyGitPatchAction(f, [hunk], null, action)}
+                    onEditComment={editQueuedComment}
+                    onRemoveComment={removeReviewComment}
+                    renderInlineAsk={() => (
+                      <Show when={selection()?.filePath === filePath() && selectedLines().length > 0}>
+                        <InlineAskBox
+                          filePath={filePath()}
+                          lines={selectedLines()}
+                          askText={askText()}
+                          setAskText={setAskText}
+                          sending={sendingAsk()}
+                          onSendNow={(custom) => void submitAskChanges("send", custom)}
+                          onQueueComment={queueReviewComment}
+                          onSeedComposer={() => void submitAskChanges("seed")}
+                          onCopy={() => void copySelectedCode()}
+                          onOpenContextMenu={(e) => {
+                            const first = selectedLines()[0];
+                            if (!first) return;
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setContextMenu({
+                              x: rect.left,
+                              y: rect.bottom + 6,
+                              filePath: filePath(),
+                              indexed: first,
+                            });
+                          }}
+                          onClear={() => setSelection(null)}
+                          inputRef={(el) => { askInputRef = el; }}
+                        />
+                      </Show>
+                    )}
+                  />
+                );
+              }}
             </For>
-            <Show when={visibleFiles() < diffs()!.length}>
+            <Show when={visibleFiles() < filteredDiffs().length}>
               <div style={{ padding: "12px 0", display: "flex", "justify-content": "center" }}>
                 <Spinner size={14} />
               </div>
@@ -693,6 +2186,347 @@ const DiffPane: Component = () => {
           </Show>
           </div>
         </div>
+
+        {/* ── Right-click Context Menu for Selected Line(s) ── */}
+        <ContextMenu
+          open={!!contextMenu()}
+          onClose={() => setContextMenu(null)}
+          x={contextMenu()?.x ?? 0}
+          y={contextMenu()?.y ?? 0}
+          width={268}
+        >
+          <Show when={contextMenu()}>
+            {(ctx) => {
+              const lines = () => selectedLines();
+              const count = () => lines().length;
+              const rangeLabel = () => formatLineRange(lines());
+              const entry = () => indexedByFile().get(ctx().filePath);
+              const fileDiff = () => entry()?.file;
+              const hasChangesInSelection = () =>
+                lines().some((l) => l.line.kind === "add" || l.line.kind === "del");
+              const fileViewed = () =>
+                fileDiff()
+                  ? isFileViewed(ctx().filePath, store.review?.rev, fileDiffSignature(fileDiff()!))
+                  : isFileViewed(ctx().filePath, store.review?.rev);
+
+              return (
+                <>
+                  <MenuLabel>
+                    {basename(ctx().filePath)} · {rangeLabel()} ({count()} {count() === 1 ? "line" : "lines"})
+                  </MenuLabel>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      queueMicrotask(() => askInputRef?.focus());
+                    }}
+                  >
+                    <Icon name="message" size={15} />
+                    <span style={{ flex: 1 }}>Ask changes inline…</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      if (askText().trim()) {
+                        queueReviewComment();
+                      } else {
+                        queueMicrotask(() => askInputRef?.focus());
+                        toast("Type your review comment below and click 'Add to review'", "info");
+                      }
+                    }}
+                  >
+                    <Icon name="plus" size={15} />
+                    <span style={{ flex: 1 }}>Add comment to review batch…</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void submitAskChanges("seed");
+                    }}
+                  >
+                    <Icon name="at" size={15} />
+                    <span style={{ flex: 1 }}>Insert selection in composer</span>
+                  </MenuItem>
+
+                  <MenuDivider />
+                  <MenuLabel>Quick Agent Actions</MenuLabel>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void submitAskChanges(
+                        "send",
+                        "Explain what these selected lines do and how they fit into the surrounding code.",
+                      );
+                    }}
+                  >
+                    <Icon name="help" size={15} />
+                    <span style={{ flex: 1 }}>Explain selected lines</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void submitAskChanges(
+                        "send",
+                        "Review these selected lines for potential bugs, regressions, or unhandled edge cases.",
+                      );
+                    }}
+                  >
+                    <Icon name="shield" size={15} />
+                    <span style={{ flex: 1 }}>Find bugs & edge cases</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void submitAskChanges(
+                        "send",
+                        "Refactor and simplify these selected lines while preserving behavior.",
+                      );
+                    }}
+                  >
+                    <Icon name="sparkle" size={15} />
+                    <span style={{ flex: 1 }}>Refactor / simplify selection</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void submitAskChanges(
+                        "send",
+                        "Write or update unit tests covering these selected lines and their edge cases.",
+                      );
+                    }}
+                  >
+                    <Icon name="fileCheck" size={15} />
+                    <span style={{ flex: 1 }}>Write tests for selection</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void submitAskChanges(
+                        "send",
+                        "Optimize the performance and memory usage of these selected lines without breaking behavior.",
+                      );
+                    }}
+                  >
+                    <Icon name="zap" size={15} />
+                    <span style={{ flex: 1 }}>Optimize performance</span>
+                  </MenuItem>
+
+                  <Show when={canPatchWorktree()}>
+                    <MenuDivider />
+                    <MenuLabel>Git Actions</MenuLabel>
+                    <Show when={fileDiff()?.status === "modified" && hasChangesInSelection()}>
+                      <Show
+                        when={store.review?.mode === "staged"}
+                        fallback={
+                          <>
+                            <MenuItem
+                              onSelect={() => {
+                                const e = entry();
+                                const sel = selectedIndexSetForFile(ctx().filePath);
+                                setContextMenu(null);
+                                if (e) void applyGitPatchAction(e.file, e.hunks, sel, "stage");
+                              }}
+                            >
+                              <Icon name="plus" size={15} />
+                              <span style={{ flex: 1 }}>Stage selected lines</span>
+                            </MenuItem>
+                            <MenuItem
+                              onSelect={() => {
+                                const e = entry();
+                                const sel = selectedIndexSetForFile(ctx().filePath);
+                                setContextMenu(null);
+                                if (e) void applyGitPatchAction(e.file, e.hunks, sel, "discard");
+                              }}
+                            >
+                              <Icon name="trash" size={15} />
+                              <span style={{ flex: 1 }}>Discard / revert selected lines…</span>
+                            </MenuItem>
+                          </>
+                        }
+                      >
+                        <MenuItem
+                          onSelect={() => {
+                            const e = entry();
+                            const sel = selectedIndexSetForFile(ctx().filePath);
+                            setContextMenu(null);
+                            if (e) void applyGitPatchAction(e.file, e.hunks, sel, "unstage");
+                          }}
+                        >
+                          <Icon name="remove" size={15} />
+                          <span style={{ flex: 1 }}>Unstage selected lines</span>
+                        </MenuItem>
+                      </Show>
+                    </Show>
+                    <Show when={hasPathUnstaged(ctx().filePath)}>
+                      <MenuItem
+                        onSelect={() => {
+                          const p = ctx().filePath;
+                          setContextMenu(null);
+                          void stageWholeFile(p);
+                        }}
+                      >
+                        <Icon name="plus" size={15} />
+                        <span style={{ flex: 1 }}>Stage entire file ({basename(ctx().filePath)})</span>
+                      </MenuItem>
+                    </Show>
+                    <Show when={isPathStaged(ctx().filePath)}>
+                      <MenuItem
+                        onSelect={() => {
+                          const p = ctx().filePath;
+                          setContextMenu(null);
+                          void unstageWholeFile(p);
+                        }}
+                      >
+                        <Icon name="remove" size={15} />
+                        <span style={{ flex: 1 }}>Unstage entire file ({basename(ctx().filePath)})</span>
+                      </MenuItem>
+                    </Show>
+                  </Show>
+
+                  <MenuDivider />
+                  <MenuLabel>Copy</MenuLabel>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void copySelectedCode();
+                    }}
+                  >
+                    <Icon name="copy" size={15} />
+                    <span style={{ flex: 1 }}>Copy selected code</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void copySelectedCode("add");
+                    }}
+                  >
+                    <Icon name="copy" size={15} />
+                    <span style={{ flex: 1 }}>Copy new / added lines only</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void copySelectedCode("del");
+                    }}
+                  >
+                    <Icon name="copy" size={15} />
+                    <span style={{ flex: 1 }}>Copy old / deleted lines only</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void copySelectedMarkdown();
+                    }}
+                  >
+                    <Icon name="document" size={15} />
+                    <span style={{ flex: 1 }}>Copy as Markdown block</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void copySelectedDiff();
+                    }}
+                  >
+                    <Icon name="diff" size={15} />
+                    <span style={{ flex: 1 }}>Copy as diff patch</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      void copyFileLineRef();
+                    }}
+                  >
+                    <Icon name="code" size={15} />
+                    <span style={{ flex: 1 }}>Copy file:line reference</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      const p = ctx().filePath;
+                      setContextMenu(null);
+                      void copyFilePath(p);
+                    }}
+                  >
+                    <Icon name="file" size={15} />
+                    <span style={{ flex: 1 }}>Copy relative file path</span>
+                  </MenuItem>
+
+                  <MenuDivider />
+                  <MenuLabel>Selection & File</MenuLabel>
+                  <MenuItem
+                    onSelect={() => {
+                      const { filePath, indexed: idx } = ctx();
+                      setContextMenu(null);
+                      selectEntireHunk(filePath, idx.hunkIndex);
+                    }}
+                  >
+                    <Icon name="layers" size={15} />
+                    <span style={{ flex: 1 }}>Select entire hunk</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      const { filePath, indexed: idx } = ctx();
+                      setContextMenu(null);
+                      selectEntireHunk(filePath, idx.hunkIndex, false, "add");
+                    }}
+                  >
+                    <Icon name="plus" size={15} />
+                    <span style={{ flex: 1 }}>Select additions (+) in hunk</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      const { filePath, indexed: idx } = ctx();
+                      setContextMenu(null);
+                      selectEntireHunk(filePath, idx.hunkIndex, false, "del");
+                    }}
+                  >
+                    <Icon name="remove" size={15} />
+                    <span style={{ flex: 1 }}>Select deletions (−) in hunk</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      const { filePath } = ctx();
+                      setContextMenu(null);
+                      selectChangedLinesInFile(filePath);
+                    }}
+                  >
+                    <Icon name="list" size={15} />
+                    <span style={{ flex: 1 }}>Select all changed lines in file</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      const { filePath } = ctx();
+                      const fd = fileDiff();
+                      const next = !fileViewed();
+                      setContextMenu(null);
+                      setFileViewed(filePath, next, store.review?.rev, fd ? fileDiffSignature(fd) : undefined);
+                    }}
+                  >
+                    <Icon name={fileViewed() ? "eye" : "check"} size={15} />
+                    <span style={{ flex: 1 }}>{fileViewed() ? "Mark file as unviewed" : "Mark file as viewed"}</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      const { filePath } = ctx();
+                      setContextMenu(null);
+                      setHistoryFilter(filePath);
+                    }}
+                  >
+                    <Icon name="history" size={15} />
+                    <span style={{ flex: 1 }}>View file commit history</span>
+                  </MenuItem>
+                  <MenuItem
+                    onSelect={() => {
+                      setContextMenu(null);
+                      setSelection(null);
+                    }}
+                  >
+                    <Icon name="x" size={15} />
+                    <span style={{ flex: 1 }}>Clear selection</span>
+                  </MenuItem>
+                </>
+              );
+            }}
+          </Show>
+        </ContextMenu>
       </Show>
     </div>
   );

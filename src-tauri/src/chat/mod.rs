@@ -687,7 +687,7 @@ pub fn recover_interrupted_sessions() {
     }
 }
 
-fn kill_tree(pid: u32) {
+pub(crate) fn kill_tree(pid: u32) {
     #[cfg(unix)]
     {
         // Negative pid → the whole process group created at spawn.

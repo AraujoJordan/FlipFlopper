@@ -31,6 +31,42 @@ async function loadChat(overrides = {}) {
   await module.evaluate();
   return module.namespace;
 }
+
+async function loadMarkdown() {
+  const source = ts.transpileModule(readFileSync(new URL("../src/lib/markdownLite.ts", import.meta.url), "utf8"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+  }).outputText;
+  const hljs = { registerLanguage() {}, registerAliases() {}, getLanguage() { return false; } };
+  const module = new SourceTextModule(source);
+  await module.link((specifier) => new SyntheticModule(["default"], function () {
+    this.setExport("default", specifier === "highlight.js/lib/core" ? hljs : () => {});
+  }));
+  await module.evaluate();
+  return module.namespace;
+}
+
+test("conversation file references link every file type without linking loose filenames or URLs", async () => {
+  const { renderPlainTextWithFileRefs: render } = await loadMarkdown();
+  const html = render('/tmp/note.txt, images/photo.png videos/clip.mp4 ./README.md @src/App.tsx:42. App.tsx https://example.com/a.png');
+  assert.match(html, /data-file-path="\/tmp\/note\.txt"[^>]*>\/tmp\/note\.txt<\/a>,/);
+  assert.match(html, /data-file-path="images\/photo\.png"/);
+  assert.match(html, /data-file-path="videos\/clip\.mp4"/);
+  assert.match(html, /data-file-path="\.\/README\.md"/);
+  assert.match(html, /data-file-path="src\/App\.tsx"[^>]*>@src\/App\.tsx:42<\/a>\./);
+  assert.match(html, / App\.tsx <a href="https:\/\/example\.com\/a\.png" data-md-link>https:\/\/example\.com\/a\.png<\/a>$/);
+  assert.match(render('C:\\media\\clip.mp4'), /data-file-path="C:\\media\\clip\.mp4"[^>]*>C:\\media\\clip\.mp4<\/a>/);
+  assert.match(render('<img src=x> /tmp/a&b.txt'), /&lt;img src=x&gt; <a [^>]*data-file-path="\/tmp\/a&amp;b\.txt"[^>]*>\/tmp\/a&amp;b\.txt<\/a>/);
+  assert.equal(render('https://example.com/?a=1&b=2'), '<a href="https://example.com/?a=1&amp;b=2" data-md-link>https://example.com/?a=1&amp;b=2</a>');
+});
+
+test("Markdown links file paths in prose and inline code but leaves fenced code unchanged", async () => {
+  const { renderMarkdownLite: render } = await loadMarkdown();
+  assert.match(render('`videos/clip.mp4`'), /data-file-path="videos\/clip\.mp4"[^>]*><code>videos\/clip\.mp4<\/code><\/a>/);
+  assert.match(render('[open image](images/photo.png)'), /data-file-path="images\/photo\.png"[^>]*>open image<\/a>/);
+  assert.match(render('https://example.com/a.png'), /data-md-link/);
+  assert.doesNotMatch(render('```txt\n/tmp/a.txt\n```'), /data-file-path/);
+});
+
 const event = (event, ts = 1) => ({ kind: "event", event, ts });
 const request = { id: "approval", turn_id: "turn", kind: "permission", title: "Run command", payload: { options: [{ optionId: "once", name: "Allow once", kind: "allow_once" }] } };
 const runtime = () => ({ connected: true, active_turn_id: "turn", agent_id: "claude", native_session_id: "native", config_options: [], modes: [], commands: [], pending: [structuredClone(request)] });
