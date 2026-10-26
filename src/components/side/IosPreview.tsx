@@ -2,6 +2,7 @@ import { Component, For, Show, createEffect, createMemo, createSignal, on, onCle
 import {
   detectIosEnvironment,
   iosBootSimulator,
+  iosListSimulators,
   iosRecordStart,
   iosRecordStop,
   openIosSimulator,
@@ -9,16 +10,18 @@ import {
   type Attachment,
   type IosEnvironment,
 } from "../../lib/ipc";
-import { blobToBase64, canvasToBlob } from "../../lib/androidMirror";
+import { blobToBase64, canvasToBlob, createAutoReconnect } from "../../lib/androidMirror";
 import { IOS_KEY, createIosMirror } from "../../lib/iosMirror";
 import { addAttachments } from "../../lib/attachments";
 import { layout } from "../../lib/layout";
-import { addTerminal, effectiveRoot } from "../../lib/store";
+import { addTerminal, effectiveRoot, readIosSimulators, writeIosSimulator } from "../../lib/store";
 import { Icon } from "../shell/Icon";
 import { Spinner, toast } from "../ui";
 
 const POLL_MS = 4000;
 const SHOWN_SIMULATORS = 6;
+/** Every Nth poll re-reads the full environment (idb install, issues). */
+const FULL_REFRESH_EVERY = 12;
 const IDB_HINT = "brew install facebook/fb/idb-companion && pip3 install fb-idb";
 
 /** Live iOS Simulator inside the Preview tab. Screenshots and video work with
@@ -50,24 +53,43 @@ const IosPreview: Component = () => {
     } catch { /* keep the last good environment */ }
   }
 
+  // `simctl list` only: the full probe also runs `xctrace`, which takes seconds.
+  async function refreshSimulators() {
+    try {
+      const simulators = await iosListSimulators();
+      setEnv((prev) => (prev ? { ...prev, simulators } : prev));
+    } catch { /* keep the last list */ }
+  }
+
   onMount(() => {
     void refreshEnv();
     let timer: ReturnType<typeof setTimeout>;
+    let polls = 0;
     const tick = async () => {
-      if (visible() && !booting()) await refreshEnv();
+      if (visible() && !booting()) {
+        if (!env() || ++polls % FULL_REFRESH_EVERY === 0) await refreshEnv();
+        else await refreshSimulators();
+      }
       timer = setTimeout(tick, live() ? POLL_MS * 4 : POLL_MS);
     };
     timer = setTimeout(tick, POLL_MS);
     onCleanup(() => clearTimeout(timer));
   });
 
-  // Keep the selection on a booted simulator (preferring the current one).
+  // Keep the selection on a booted simulator: the current one, else the one
+  // Run uses for this project (shared pref), else the preferred, else any.
   createEffect(() => {
     const list = booted();
     const current = udid();
     if (current && list.some((s) => s.udid === current)) return;
+    const saved = readIosSimulators()[projectPath()];
     const preferred = env()?.selected_simulator;
-    setUdid(list.find((s) => s.udid === preferred)?.udid ?? list[0]?.udid ?? null);
+    setUdid(
+      list.find((s) => s.udid === saved)?.udid
+        ?? list.find((s) => s.udid === preferred)?.udid
+        ?? list[0]?.udid
+        ?? null,
+    );
   });
 
   function connect() {
@@ -75,7 +97,15 @@ const IosPreview: Component = () => {
     if (target) void mirror.start({ udid: target, allowStream: hasIdb() });
   }
   // Memoized so a poll that changes nothing does not restart the mirror.
-  createEffect(on([udid, hasIdb], () => { if (udid()) connect(); else void mirror.stop(); }));
+  createEffect(on([udid, hasIdb], () => {
+    reconnect.reset();
+    if (udid()) connect(); else void mirror.stop();
+  }));
+  const reconnect = createAutoReconnect({
+    status: mirror.status,
+    deviceOnline: () => booted().some((s) => s.udid === udid()),
+    reconnect: connect,
+  });
   createEffect(() => mirror.setPaused(!visible()));
 
   onCleanup(() => {
@@ -183,13 +213,26 @@ const IosPreview: Component = () => {
 
   // ── simulators ─────────────────────────────────────────────────────────────
 
+  // Run reads the same pref, so Preview and Run always target one simulator.
+  function chooseSimulator(value: string) {
+    setUdid(value);
+    if (value) writeIosSimulator(projectPath(), value);
+  }
+
+  const onPaste = (event: ClipboardEvent) => {
+    const pasted = event.clipboardData?.getData("text");
+    if (!canTouch() || !pasted) return;
+    event.preventDefault();
+    mirror.text(pasted);
+  };
+
   async function bootHere(target: string, name: string) {
     if (booting()) return;
     setBooting(name);
     try {
       await iosBootSimulator(target);
       await refreshEnv();
-      setUdid(target);
+      chooseSimulator(target);
     } catch (e) {
       toast(`Boot simulator failed: ${String(e)}`, "error");
     } finally {
@@ -222,7 +265,7 @@ const IosPreview: Component = () => {
           aria-label="iOS simulator"
           disabled={booted().length === 0}
           value={udid() ?? ""}
-          onChange={(e) => setUdid(e.currentTarget.value)}
+          onChange={(e) => chooseSimulator(e.currentTarget.value)}
         >
           <Show when={booted().length > 0} fallback={<option value="">No simulator booted</option>}>
             <For each={booted()}>{(s) => <option value={s.udid}>{s.name}</option>}</For>
@@ -283,6 +326,7 @@ const IosPreview: Component = () => {
             onPointerCancel={onPointerUp}
             onWheel={onWheel}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
             onContextMenu={(e) => e.preventDefault()}
           />
           <Show when={mirror.status() === "connecting"}>

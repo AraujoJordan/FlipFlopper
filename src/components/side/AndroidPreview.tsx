@@ -1,5 +1,6 @@
 import { Component, For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import {
+  androidListDevices,
   bootAndroidEmulator,
   detectAndroidEnvironment,
   savePastedAttachment,
@@ -11,6 +12,7 @@ import {
   ANDROID_KEY,
   blobToBase64,
   canvasToBlob,
+  createAutoReconnect,
   createMirror,
   startCanvasRecording,
 } from "../../lib/androidMirror";
@@ -21,7 +23,8 @@ import { Icon } from "../shell/Icon";
 import { Spinner, toast } from "../ui";
 
 const POLL_MS = 2500;
-const MAX_BOOT_RETRIES = 6;
+/** Every Nth poll re-reads the full environment (scrcpy install, AVD list). */
+const FULL_REFRESH_EVERY = 12;
 
 const deviceLabel = (device: AndroidDevice) =>
   device.model ? `${device.model} (${device.serial})` : device.serial;
@@ -36,8 +39,6 @@ const AndroidPreview: Component = () => {
   let canvas: HTMLCanvasElement | undefined;
   let recording: ReturnType<typeof startCanvasRecording> | null = null;
   let recordTimer: ReturnType<typeof setInterval> | null = null;
-  let retries = 0;
-  let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   const mirror = createMirror(() => canvas);
   const projectPath = () => effectiveRoot() ?? "";
@@ -53,13 +54,25 @@ const AndroidPreview: Component = () => {
     } catch { /* keep the last good environment */ }
   }
 
+  // `adb devices` only; the full probe (AVDs, scrcpy) is far heavier.
+  async function refreshDevices() {
+    try {
+      const devices = await androidListDevices();
+      setEnv((prev) => (prev ? { ...prev, devices } : prev));
+    } catch { /* adb missing or busy: keep the last list */ }
+  }
+
   onMount(() => {
     void refreshEnv();
     // Poll so a plugged-in phone or a booting emulator shows up on its own;
     // slow down once a device is streaming.
     let timer: ReturnType<typeof setTimeout>;
+    let polls = 0;
     const tick = async () => {
-      if (visible()) await refreshEnv();
+      if (visible()) {
+        if (!env() || ++polls % FULL_REFRESH_EVERY === 0) await refreshEnv();
+        else await refreshDevices();
+      }
       timer = setTimeout(tick, mirror.status() === "live" ? POLL_MS * 3 : POLL_MS);
     };
     timer = setTimeout(tick, POLL_MS);
@@ -91,23 +104,24 @@ const AndroidPreview: Component = () => {
 
   // (Re)connect when the device, project or scrcpy availability changes.
   createEffect(on([serial, projectPath, scrcpyAvailable], () => {
-    retries = 0;
+    reconnect.reset();
     if (serial()) connect();
     else void mirror.stop();
   }));
 
-  // A freshly booted emulator is listed before it can serve a stream: retry.
-  createEffect(() => {
-    if (mirror.status() !== "error" || !booting() || retries >= MAX_BOOT_RETRIES) return;
-    retries++;
-    retryTimer = setTimeout(connect, 3000);
+  // A dropped stream is retried while its device is still online; a freshly
+  // booted emulator is listed before it can serve one, so it gets more tries.
+  const reconnect = createAutoReconnect({
+    status: mirror.status,
+    deviceOnline: () => onlineDevices().some((d) => d.serial === serial()),
+    reconnect: connect,
+    attempts: () => (booting() ? 6 : 3),
   });
   createEffect(() => { if (mirror.status() === "live") setBooting(null); });
 
   createEffect(() => mirror.setPaused(!visible()));
 
   onCleanup(() => {
-    if (retryTimer) clearTimeout(retryTimer);
     void stopRecording(false);
     void mirror.stop();
   });
@@ -211,6 +225,13 @@ const AndroidPreview: Component = () => {
     event.preventDefault();
   };
 
+  const onPaste = (event: ClipboardEvent) => {
+    const pasted = event.clipboardData?.getData("text");
+    if (!live() || !pasted) return;
+    event.preventDefault();
+    mirror.text(pasted);
+  };
+
   // ── devices & emulators ────────────────────────────────────────────────────
 
   function chooseDevice(value: string) {
@@ -222,7 +243,7 @@ const AndroidPreview: Component = () => {
     const path = projectPath();
     if (!path || booting()) return;
     setBooting(avd);
-    retries = 0;
+    reconnect.reset();
     try {
       const sessionId = await bootAndroidEmulator(path, avd, { headless });
       addTerminal({ sessionId, label: `Android · Boot ${avd}`, kind: "run" });
@@ -332,6 +353,7 @@ const AndroidPreview: Component = () => {
             onPointerCancel={onPointerUp}
             onWheel={onWheel}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
             onContextMenu={(e) => e.preventDefault()}
           />
           <Show when={mirror.status() === "connecting"}>

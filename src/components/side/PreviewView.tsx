@@ -39,13 +39,21 @@ const PreviewView: Component = () => {
     })();
   }));
 
-  type TargetLike = { needs_emulator: string | null; kind: string };
+  type TargetLike = { id: string; needs_emulator: string | null; kind: string };
   type View = "web" | "android" | "ios";
-  const platformOf = (t: TargetLike): View =>
-    t.needs_emulator === "android" || t.kind === "android" ? "android"
-      : t.needs_emulator === "ios" || t.kind === "ios" ? "ios"
-      : "web";
-  // Views the project can show, web first. Single-platform projects skip the switch.
+  // Targets whose output is not browsable (desktop windows, CLIs, build tools)
+  // must not conjure a Web tab; JVM only counts for Spring Boot-style servers.
+  const NON_WEB_KINDS = new Set(["desktop", "cmake", "make", "swift", "godot"]);
+  const platformOf = (t: TargetLike): View | null => {
+    if (t.needs_emulator === "android" || t.kind === "android") return "android";
+    if (t.needs_emulator === "ios" || t.kind === "ios") return "ios";
+    if (NON_WEB_KINDS.has(t.kind)) return null;
+    if (t.kind === "jvm" && !t.id.includes("boot")) return null;
+    return "web";
+  };
+  // Views the project can show. Mobile projects (React Native, Flutter, KMP,
+  // Expo) also have a Metro/dev-server target that is not a useful web
+  // preview, so a device view wins as the default.
   const views = createMemo(() => {
     const present = new Set(store.runTargets.map(platformOf));
     return (["web", "android", "ios"] as View[]).filter((v) => present.has(v));
@@ -55,16 +63,18 @@ const PreviewView: Component = () => {
     const list = views();
     const pick = chosen();
     if (pick && list.includes(pick)) return pick;
-    return list[0] ?? "web";
+    return list.find((v) => v !== "web") ?? list[0] ?? "web";
   };
   createEffect(on(() => store.currentProject?.path, () => setChosen(null)));
-  // Starting a native run brings that device into view.
+  // Starting a native run brings that device into view (never the Web tab:
+  // a Metro or dev-server run should not hide the device).
   createEffect(on(() => store.runSessionId, (id) => {
     if (!id) return;
     const path = store.currentProject?.path;
     const saved = path ? readRunTargets()[path] : undefined;
     const target = store.runTargets.find((t) => t.id === saved) ?? store.runTargets[0];
-    if (target) setChosen(platformOf(target));
+    const platform = target ? platformOf(target) : null;
+    if (platform && platform !== "web") setChosen(platform);
   }, { defer: true }));
   const VIEW_LABEL: Record<View, string> = { web: "Web", android: "Android", ios: "iOS" };
 

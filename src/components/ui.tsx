@@ -8,7 +8,46 @@ import { layout, applyTheme, resolvedMotion, motionForeground, registerMotionSet
 // Presentation only: logical actions never wait for motion. The final CSS is
 // always authoritative, and one registry settles work on OS/preference changes.
 const activeMotion = new Map<Element, Animation>();
+
+export interface PromptLaunchOptions {
+  source?: HTMLElement;
+  box?: HTMLElement;
+  sendBtn?: HTMLElement;
+  text: string;
+  attachmentsCount?: number;
+  mode?: string;
+}
+
+export interface PromptLaunchHandle {
+  rollback: (restoreTarget?: HTMLElement) => void;
+  cancel: () => void;
+}
+
+interface ActivePromptLaunch {
+  originRect: DOMRect;
+  ghost?: HTMLElement;
+  box?: HTMLElement;
+  mode?: string;
+  ts: number;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+let activePromptLaunch: ActivePromptLaunch | undefined;
+
+function clearPromptLaunch() {
+  if (!activePromptLaunch) return;
+  const current = activePromptLaunch;
+  activePromptLaunch = undefined;
+  if (current.timer !== undefined) clearTimeout(current.timer);
+  current.box?.classList?.remove?.("composer-box-launching");
+  if (current.ghost) {
+    cancelMotion(current.ghost);
+    current.ghost.remove();
+  }
+}
+
 registerMotionSettler(() => {
+  clearPromptLaunch();
   for (const animation of activeMotion.values()) {
     try { animation.finish(); } catch { animation.cancel(); }
   }
@@ -47,6 +86,175 @@ export function animateElement(element: HTMLElement | SVGElement | undefined, fr
 }
 export function reveal(element: HTMLElement | SVGElement | undefined, duration = 180) {
   return animateElement(element, [{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], duration);
+}
+
+/** Captures the composer prompt geometry on send, pulses the composer box/button,
+ *  and launches an inert floating capsule that hands off to the transcript bubble. */
+export function startPromptLaunch(options: PromptLaunchOptions): PromptLaunchHandle {
+  clearPromptLaunch();
+  const mode = resolvedMotion();
+  if (mode === "off" || !motionForeground()) return { rollback() {}, cancel() {} };
+  if (mode === "reduced") {
+    void animateElement(options.box, [{ opacity: .78 }, { opacity: 1 }], 80);
+    return { rollback() {}, cancel() {} };
+  }
+  const source = options.source;
+  if (!source || !motionVisible(source)) return { rollback() {}, cancel() {} };
+  const originRect = source.getBoundingClientRect();
+  if (options.box) {
+    options.box.classList?.add?.("composer-box-launching");
+    void animateElement(
+      options.box,
+      [
+        { transform: "translateY(2px) scale(.996)" },
+        { transform: "translateY(-1px) scale(1.001)", offset: .45 },
+        { transform: "none" },
+      ],
+      240,
+    ).then(() => options.box?.classList?.remove?.("composer-box-launching"));
+  }
+  if (options.sendBtn) {
+    void animateElement(
+      options.sendBtn,
+      [
+        { opacity: .65, transform: "translateY(-8px) scale(.84)" },
+        { opacity: 1, transform: "none" },
+      ],
+      220,
+    );
+  }
+  let ghost: HTMLElement | undefined;
+  if (typeof document !== "undefined" && typeof document.createElement === "function" && document.body?.append) {
+    ghost = document.createElement("div");
+    ghost.className = "prompt-flight-ghost";
+    if (options.mode) ghost.dataset.mode = options.mode;
+    ghost.inert = true;
+    ghost.setAttribute("aria-hidden", "true");
+    if (options.attachmentsCount && options.attachmentsCount > 0) {
+      const badge = document.createElement("span");
+      badge.className = "prompt-flight-badge";
+      badge.textContent = `${options.attachmentsCount} attached`;
+      ghost.append(badge);
+    }
+    const body = document.createElement("span");
+    body.className = "prompt-flight-text";
+    body.textContent = options.text.slice(0, 280);
+    ghost.append(body);
+    const height = Math.max(38, Math.min(112, originRect.height + 12));
+    const width = Math.max(140, Math.min(originRect.width, 680));
+    if (originRect.height > 84 || options.text.split("\n").length > 3) {
+      ghost.classList.add("prompt-flight-multiline");
+    }
+    Object.assign(ghost.style, {
+      position: "fixed",
+      top: `${originRect.top}px`,
+      left: `${originRect.left}px`,
+      width: `${width}px`,
+      maxHeight: `${height}px`,
+    });
+    document.body.append(ghost);
+    void animateElement(
+      ghost,
+      [
+        { opacity: .96, transform: "perspective(560px) translateY(0) scale(1) rotateX(4deg)" },
+        { opacity: 1, transform: "perspective(560px) translateY(-28px) scale(.96) rotateX(1deg)", offset: .55 },
+        { opacity: .86, transform: "perspective(560px) translateY(-48px) scale(.93) rotateX(0deg)" },
+      ],
+      380,
+    );
+  }
+  const current: ActivePromptLaunch = {
+    originRect,
+    ghost,
+    box: options.box,
+    mode: options.mode,
+    ts: Date.now(),
+    timer: setTimeout(() => {
+      if (activePromptLaunch !== current) return;
+      const g = current.ghost;
+      activePromptLaunch = undefined;
+      current.box?.classList?.remove?.("composer-box-launching");
+      if (g && g.isConnected) {
+        void animateElement(g, [{ opacity: .8 }, { opacity: 0, transform: "translateY(-56px) scale(.9)" }], 140).then(() => g.remove());
+      } else {
+        g?.remove();
+      }
+    }, 650),
+  };
+  activePromptLaunch = current;
+  return {
+    cancel() {
+      if (activePromptLaunch === current) clearPromptLaunch();
+    },
+    rollback(restoreTarget?: HTMLElement) {
+      if (activePromptLaunch !== current) return;
+      if (current.timer !== undefined) clearTimeout(current.timer);
+      activePromptLaunch = undefined;
+      current.box?.classList?.remove?.("composer-box-launching");
+      const g = current.ghost;
+      if (!g) return;
+      if (g.isConnected && resolvedMotion() === "full" && motionForeground()) {
+        const fromRect = g.getBoundingClientRect();
+        const toRect = restoreTarget && motionVisible(restoreTarget) ? restoreTarget.getBoundingClientRect() : originRect;
+        const dx = toRect.left - fromRect.left;
+        const dy = toRect.top - fromRect.top;
+        void animateElement(
+          g,
+          [
+            { opacity: .9, transform: "none" },
+            { opacity: 0, transform: `translate(${dx}px, ${dy}px) scale(.95)` },
+          ],
+          180,
+        ).then(() => g.remove());
+      } else {
+        cancelMotion(g);
+        g.remove();
+      }
+    },
+  };
+}
+
+/** Claims an in-flight prompt launch and FLIP-animates the newly mounted
+ *  conversation bubble or queued row from the capsule's position into its slot. */
+export function consumePromptLaunch(target: HTMLElement | undefined): boolean {
+  if (!target || !activePromptLaunch) return false;
+  const launch = activePromptLaunch;
+  const elapsed = Date.now() - launch.ts;
+  if (elapsed > 1500 || resolvedMotion() !== "full" || !motionVisible(target)) {
+    clearPromptLaunch();
+    return false;
+  }
+  let fromRect = launch.originRect;
+  if (launch.ghost && launch.ghost.isConnected) {
+    const ghostRect = launch.ghost.getBoundingClientRect();
+    if (ghostRect.width > 0 && ghostRect.height > 0) fromRect = ghostRect;
+  }
+  clearPromptLaunch();
+  const toRect = target.getBoundingClientRect();
+  if (toRect.width <= 0 || toRect.height <= 0) return false;
+  const dx = fromRect.left - toRect.left;
+  const maxTravel = (typeof window !== "undefined" ? window.innerHeight : 900) * 0.75;
+  const dy = Math.max(-maxTravel, Math.min(maxTravel, fromRect.top - toRect.top));
+  const sx = Math.max(0.72, Math.min(1.35, fromRect.width / Math.max(1, toRect.width)));
+  const sy = Math.max(0.62, Math.min(1.35, fromRect.height / Math.max(1, toRect.height)));
+  const host = target.closest?.<HTMLElement>(".msg-user, .queued-item") ?? target;
+  host.classList?.add?.("msg-user-landing");
+  if (launch.mode && host.dataset) host.dataset.launchMode = launch.mode;
+  if (target.style) target.style.transformOrigin = "left top";
+  void animateElement(
+    target,
+    [
+      { opacity: .72, transform: `perspective(600px) translate(${dx}px, ${dy}px) scale(${sx.toFixed(3)}, ${sy.toFixed(3)}) rotateX(3deg)` },
+      { opacity: 1, transform: "perspective(600px) translate(0, -2px) scale(1.006, 1.006) rotateX(0deg)", offset: .72 },
+      { opacity: 1, transform: "none" },
+    ],
+    340,
+  ).then(() => {
+    host.classList?.remove?.("msg-user-landing");
+    if (host.dataset) delete host.dataset.launchMode;
+    if (target.style) target.style.transformOrigin = "";
+  });
+  return true;
 }
 export function useValueMotion(element: () => HTMLElement | SVGElement | undefined, value: () => unknown, hinge = false) {
   createEffect(on(value, () => queueMicrotask(() => {
@@ -205,7 +413,9 @@ export function useListMotion(element: () => HTMLElement | undefined, signature:
       if (initialized && old && (Math.abs(old.rect.top - rect.top) > 1 || Math.abs(old.rect.left - rect.left) > 1)) {
         const dy = old.rect.top - rect.top, dx = old.rect.left - rect.left;
         if (Math.abs(dy) < window.innerHeight) void animateElement(row, [{ transform: `translate(${dx}px,${dy}px)` }, { transform: "none" }], 240);
-      } else if (initialized && !old && entrances) void reveal(row);
+      } else if (initialized && !old && entrances) {
+        if (!(row.classList?.contains("queued-item") && consumePromptLaunch(row))) void reveal(row);
+      }
     }
     // Removed rows have already lost their Solid owner. A tiny inert clone
     // provides the exit without delaying deletion, navigation or git results.

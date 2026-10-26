@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.0 - 2026-10-26
+
+### Added
+
+- **Prompt Launch & Materialize animation**: sending a prompt from the composer triggers a choreographed 3-stage flight (`startPromptLaunch` / `consumePromptLaunch`) — composer launch pulse, mode-tinted floating flight ghost (`--mode-c` / `--mode-rgb`) lifting and morphing into the user message bubble in the transcript (or docking into the follow-up queue), and a soft landing ring. Failed sends roll back cleanly and Reduced/Off motion settles immediately.
+- **Unified device target selection for Run & Preview**: Run and Preview share one active Android device/AVD or iOS Simulator per project (`readAndroidDevices` / `readIosSimulators`). Android Gradle runs follow `ANDROID_SERIAL`, Flutter and React Native runs are pinned with `-d` / `--deviceId` / `--udid`, and the Xcode/KMP iOS target builds, installs and launches directly on the selected simulator. Live device previews poll device lists cheaply and auto-reconnect with backoff.
+
+### Changed
+
+- Refreshed the FlipFlopper application icon across all platform bundles and updated the dark/light README workspace screenshots.
+
 ## 0.16.0 - 2026-10-26
 
 ### Added

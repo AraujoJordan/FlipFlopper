@@ -374,6 +374,16 @@ pub fn screenshot(udid: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// idb parses coordinates as integers (points) and rejects `200.0`.
+fn coord_arg(value: &str) -> Result<String, String> {
+    let parsed: f64 = value.trim().parse().map_err(|_| "Invalid number.".to_string())?;
+    if parsed.is_finite() && parsed.abs() < 100_000.0 {
+        Ok(format!("{}", parsed.round() as i64))
+    } else {
+        Err("Invalid number.".to_string())
+    }
+}
+
 fn float_arg(value: &str) -> Result<String, String> {
     let parsed: f64 = value.trim().parse().map_err(|_| "Invalid number.".to_string())?;
     if parsed.is_finite() {
@@ -392,13 +402,13 @@ fn input_args(udid: &str, kind: &str, args: &[String]) -> Result<Vec<String>, St
     match kind {
         "tap" => {
             arity(2)?;
-            out.extend(["tap".into(), float_arg(&args[0])?, float_arg(&args[1])?, "--udid".into(), udid.into()]);
+            out.extend(["tap".into(), coord_arg(&args[0])?, coord_arg(&args[1])?, "--udid".into(), udid.into()]);
         }
         "swipe" => {
             arity(5)?;
             out.push("swipe".into());
             for a in &args[..4] {
-                out.push(float_arg(a)?);
+                out.push(coord_arg(a)?);
             }
             out.extend(["--duration".into(), float_arg(&args[4])?, "--udid".into(), udid.into()]);
         }
@@ -503,6 +513,26 @@ mod tests {
         assert_eq!(configs, 1);
     }
 
+    /// Feeds a real `idb video-stream --format h264` capture through the splitter:
+    /// `FLIPFLOPPER_IDB_STREAM=/path/to/capture.h264 cargo test --lib real_idb_stream -- --ignored`
+    #[test]
+    #[ignore]
+    fn real_idb_stream_splits_into_config_and_frames() {
+        let path = std::env::var("FLIPFLOPPER_IDB_STREAM").expect("set FLIPFLOPPER_IDB_STREAM");
+        let data = std::fs::read(path).unwrap();
+        let mut splitter = NalSplitter::default();
+        let mut packets = Vec::new();
+        for chunk in data.chunks(64 * 1024) {
+            packets.extend(splitter.push(chunk));
+        }
+        let configs = packets.iter().filter(|p| matches!(p, VideoPacket::Config(_))).count();
+        let keys = packets.iter().filter(|p| matches!(p, VideoPacket::Frame { key: true, .. })).count();
+        let deltas = packets.iter().filter(|p| matches!(p, VideoPacket::Frame { key: false, .. })).count();
+        eprintln!("configs={configs} keys={keys} deltas={deltas}");
+        assert!(configs >= 1 && keys >= 1);
+        assert!(matches!(packets[0], VideoPacket::Config(_)), "stream must open with a config packet");
+    }
+
     #[test]
     fn parses_idb_describe_screen_size() {
         let json = br#"{"udid":"X","screen_dimensions":{"density":3.0,"width":1179,"height":2556,"width_points":393,"height_points":852}}"#;
@@ -516,7 +546,7 @@ mod tests {
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
             input_args("U", "tap", &a(&["10", "20.55"])).unwrap(),
-            ["ui", "tap", "10.0", "20.6", "--udid", "U"]
+            ["ui", "tap", "10", "21", "--udid", "U"]
         );
         assert_eq!(
             input_args("U", "text", &a(&["-rf; $(x)"])).unwrap(),
@@ -526,6 +556,10 @@ mod tests {
         assert!(input_args("U", "button", &a(&["power"])).is_err());
         assert!(input_args("U", "key", &a(&["300"])).is_err());
         assert!(input_args("U", "tap", &a(&["NaN", "1"])).is_err());
+        assert_eq!(
+            input_args("U", "swipe", &a(&["1.4", "2", "3", "4.6", "0.25"])).unwrap(),
+            ["ui", "swipe", "1", "2", "3", "5", "--duration", "0.2", "--udid", "U"]
+        );
         assert!(valid_udid("A1B2-C3").is_ok());
         assert!(valid_udid("a; rm").is_err());
     }

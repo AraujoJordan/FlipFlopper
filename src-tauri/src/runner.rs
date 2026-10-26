@@ -397,6 +397,30 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
             "node",
             None,
         );
+        // Expo Go / dev client runs on a device: expose it so the Preview tab
+        // can mirror the emulator or simulator.
+        push_target(
+            &mut candidates,
+            &mut order,
+            20,
+            "expo-android",
+            "Expo Android",
+            "npx expo start --android",
+            "android",
+            Some("android"),
+        );
+        if tools::current_os() == "macos" {
+            push_target(
+                &mut candidates,
+                &mut order,
+                20,
+                "expo-ios",
+                "Expo iOS",
+                "npx expo start --ios",
+                "ios",
+                Some("ios"),
+            );
+        }
     }
 
     for script in web_run_scripts(&facts) {
@@ -576,17 +600,14 @@ pub fn detect_run_targets(project_path: &str) -> Result<Vec<RunTarget>, String> 
         if let Some(xcode_file) = first_xcode_bundle(&facts) {
             if let Some((xcode_flag, file_name, scheme)) = xcode_project_parts(&facts, &xcode_file)
             {
-                let command = format!(
-                    "xcodebuild {xcode_flag} {} -scheme {} -destination 'platform=iOS Simulator' build",
-                    shell_quote(&file_name),
-                    shell_quote(&scheme),
-                );
+                let command =
+                    build_xcode_run_command(xcode_flag, &file_name, &scheme, &facts.root);
                 push_target(
                     &mut candidates,
                     &mut order,
                     20,
                     &format!("xcode-build:{scheme}"),
-                    "iOS simulator build",
+                    "iOS simulator run",
                     &command,
                     "ios",
                     Some("ios"),
@@ -1084,6 +1105,7 @@ pub fn resolve_run_command(
     target_id: Option<&str>,
     android_serial: Option<&str>,
     android_avd: Option<&str>,
+    ios_udid: Option<&str>,
 ) -> Result<RunTarget, String> {
     let targets = detect_run_targets(project_path)?;
     if targets.is_empty() {
@@ -1108,17 +1130,24 @@ pub fn resolve_run_command(
         targets.into_iter().next().unwrap()
     };
 
-    if let Some(platform) = target.needs_emulator.as_deref() {
+    let needs_emulator = target.needs_emulator.clone();
+    if let Some(platform) = needs_emulator.as_deref() {
         if platform == "android" {
             let prelude = android_run_prelude(android_serial, android_avd)?;
+            if let Some(serial) = android_serial.map(str::trim).filter(|s| !s.is_empty()) {
+                retarget_android_device_command(&mut target, serial);
+            }
             if !prelude.is_empty() {
                 target.command = format!("{prelude}{}", target.command);
             }
             return Ok(target);
         }
         if platform == "ios" {
+            if let Some(resolved) = resolve_explicit_ios_device(&mut target, ios_udid)? {
+                return Ok(resolved);
+            }
             if let Some(udid) = ios_physical_device_udid() {
-                retarget_ios_device_command(&mut target, &udid);
+                retarget_ios_device_command(&mut target, &udid, false);
                 return Ok(target);
             }
         }
@@ -1129,6 +1158,24 @@ pub fn resolve_run_command(
     }
 
     Ok(target)
+}
+
+/// Cheap device poll for the Preview tab: `adb devices` (+ model names) only.
+pub fn android_devices() -> Result<Vec<AndroidDevice>, String> {
+    let adb = find_android_tool("adb", "platform-tools/adb").ok_or_else(|| {
+        "Android Debug Bridge (adb) was not found. Install Android platform-tools or set ANDROID_HOME.".to_string()
+    })?;
+    Ok(list_android_devices(&adb))
+}
+
+/// Cheap simulator poll for the Preview tab: `simctl list` only (no `xctrace`).
+pub fn ios_simulators() -> Result<Vec<IosDevice>, String> {
+    if tools::current_os() != "macos" {
+        return Err("iOS simulator runs are only available on macOS.".to_string());
+    }
+    let xcrun = resolve_executable("xcrun")
+        .ok_or_else(|| "xcrun was not found. Install Xcode command line tools.".to_string())?;
+    Ok(list_ios_simulators(&xcrun))
 }
 
 pub fn detect_android_environment(project_path: &str) -> Result<AndroidEnvironment, String> {
@@ -3303,6 +3350,24 @@ fn android_primary_application_id(facts: &ProjectFacts) -> Option<String> {
     android_app_modules(facts)
         .into_iter()
         .find_map(|(_, dir)| android_application_id(&dir))
+        .or_else(|| nested_android_application_id(facts))
+}
+
+/// React Native and Flutter keep the Android app under `android/` (module
+/// `android/app`), with its own Gradle wrapper, so the root-based module scan
+/// misses it. Used only to find the app id for logcat/force-stop/deep links.
+fn nested_android_application_id(facts: &ProjectFacts) -> Option<String> {
+    let android = facts.root.join("android");
+    if !android.is_dir() {
+        return None;
+    }
+    ["app", ""]
+        .iter()
+        .map(|module| android.join(module))
+        .filter(|dir| {
+            dir.join("build.gradle").exists() || dir.join("build.gradle.kts").exists()
+        })
+        .find_map(|dir| android_application_id(&dir))
 }
 
 fn android_application_id(module_dir: &Path) -> Option<String> {
@@ -3746,16 +3811,105 @@ fn last_device_token(line: &str) -> Option<String> {
         .last()
 }
 
-fn retarget_ios_device_command(target: &mut RunTarget, udid: &str) {
+/// Flutter and React Native pick devices themselves (and may prompt or install
+/// on every device), so pin them to the one the Preview tab is mirroring.
+/// Gradle installs already follow `ANDROID_SERIAL`.
+fn retarget_android_device_command(target: &mut RunTarget, serial: &str) {
+    match target.id.as_str() {
+        "flutter-android" => target.command = format!("flutter run -d {}", shell_quote(serial)),
+        "react-native-android" => {
+            // `--deviceId` is deprecated (renamed `--device`) in the newest RN CLI
+            // but still works there, and it is the only spelling older CLIs know.
+            target.command = format!("{} --deviceId {}", target.command, shell_quote(serial));
+        }
+        _ => {}
+    }
+}
+
+/// Shell expression resolving to the first booted iPhone simulator.
+const BOOTED_IPHONE_UDID: &str = "$(xcrun simctl list devices booted | grep -m1 iPhone | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')";
+const XCODE_RUN_TAIL_MARKER: &str = " && APP=";
+
+/// Build the project for a simulator, then install and launch it there.
+/// Build products go to a per-project directory under the temp dir so nothing
+/// is written into the project. The simulator is `$UDID`, resolved first.
+fn build_xcode_run_command(flag: &str, file: &str, scheme: &str, root: &Path) -> String {
+    let dd = format!(
+        "\"${{TMPDIR:-/tmp}}/flipflopper-dd-{:08x}\"",
+        path_hash(root)
+    );
+    format!(
+        "UDID={BOOTED_IPHONE_UDID}; DD={dd}; xcodebuild {flag} {} -scheme {} -destination \"platform=iOS Simulator,id=$UDID\" -derivedDataPath \"$DD\" build{XCODE_RUN_TAIL_MARKER}$(ls -d \"$DD\"/Build/Products/*-iphonesimulator/*.app | head -1) && xcrun simctl install \"$UDID\" \"$APP\" && xcrun simctl launch \"$UDID\" \"$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \"$APP/Info.plist\")\"",
+        shell_quote(file),
+        shell_quote(scheme),
+    )
+}
+
+/// Stable short hash (FNV-1a) so each project gets its own derived-data dir.
+fn path_hash(path: &Path) -> u32 {
+    path.to_string_lossy().bytes().fold(0x811c_9dc5u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    })
+}
+
+fn retarget_ios_device_command(target: &mut RunTarget, udid: &str, simulator: bool) {
     if target.id == "flutter-ios" {
         target.command = format!("flutter run -d {}", shell_quote(udid));
     } else if target.id == "react-native-ios" {
         target.command = format!("npx react-native run-ios --udid {}", shell_quote(udid));
     } else if target.id.starts_with("xcode-build:") {
-        target.command = target
-            .command
-            .replace("platform=iOS Simulator", &format!("platform=iOS,id={udid}"));
+        let Some(rest) = target.command.find("; DD=").map(|i| target.command[i..].to_string()) else {
+            return;
+        };
+        let udid_q = shell_quote(udid);
+        if simulator {
+            target.command = format!("UDID={udid_q}{rest}");
+        } else {
+            // Physical devices are build-only here: simctl cannot install on them.
+            let build = rest.split(XCODE_RUN_TAIL_MARKER).next().unwrap_or(&rest);
+            target.command = format!(
+                "UDID={udid_q}{}",
+                build.replace("platform=iOS Simulator,id=", "platform=iOS,id=")
+            );
+        }
     }
+}
+
+/// Honor an iOS device chosen in the UI (the Preview tab's selection), which
+/// beats auto-detection and any plugged-in physical device. `None` means no
+/// usable explicit choice, so the caller falls back to auto-detection.
+fn resolve_explicit_ios_device(
+    target: &mut RunTarget,
+    ios_udid: Option<&str>,
+) -> Result<Option<RunTarget>, String> {
+    let Some(udid) = ios_udid.map(str::trim).filter(|u| !u.is_empty()) else {
+        return Ok(None);
+    };
+    let xcrun = resolve_executable("xcrun").ok_or_else(|| {
+        "xcrun was not found. Install Xcode command line tools, then press Run again.".to_string()
+    })?;
+    if let Some(sim) = list_ios_simulators(&xcrun).into_iter().find(|s| s.udid == udid) {
+        retarget_ios_device_command(target, udid, true);
+        target.command = format!("{}{}", ios_simulator_prelude(&sim), target.command);
+        return Ok(Some(target.clone()));
+    }
+    if list_ios_physical_devices().iter().any(|d| d.udid == udid) {
+        retarget_ios_device_command(target, udid, false);
+        return Ok(Some(target.clone()));
+    }
+    Ok(None)
+}
+
+/// Boot the chosen simulator if needed. An already-booted one is left alone
+/// (no Simulator.app window): the Preview tab or the user already has it.
+fn ios_simulator_prelude(sim: &IosDevice) -> String {
+    if sim.state == "Booted" {
+        return String::new();
+    }
+    format!(
+        "xcrun simctl boot {u} 2>/dev/null; open -a Simulator; xcrun simctl bootstatus {u} -b; ",
+        u = shell_quote(&sim.udid)
+    )
 }
 
 fn device_env_prelude(name: &str, value: &str) -> String {
@@ -3832,7 +3986,9 @@ mod tests {
         build_deeplink_command, build_device_action_command, build_logcat_command,
         detect_run_targets, detect_validation_targets, parse_android_devices,
         parse_ios_physical_devices, parse_ios_simulators, preferred_android_device,
-        preferred_ios_simulator, ProjectFacts,
+        preferred_ios_simulator, retarget_android_device_command, ProjectFacts, RunTarget,
+        build_xcode_run_command, ios_simulator_prelude, resolve_run_command,
+        retarget_ios_device_command, IosDevice,
     };
     use std::{
         fs,
@@ -4390,5 +4546,157 @@ compose.desktop { application { mainClass = "com.example.MainKt" } }
         assert!(validation_ids.contains(&"xcode-test:iosApp".to_string()));
         assert!(validation_ids.contains(&"xcode-build-check:iosApp".to_string()));
         assert!(validation_ids.contains(&"xcode-analyze:iosApp".to_string()));
+    }
+
+    #[test]
+    fn expo_projects_expose_device_targets() {
+        let project = TempProject::new("expo");
+        project.write(
+            "package.json",
+            r#"{"scripts":{"start":"expo start"},"dependencies":{"expo":"~52","react-native":"0.76.0"}}"#,
+        );
+        let targets = detect_run_targets(&project.path.to_string_lossy()).unwrap();
+        let android = targets.iter().find(|t| t.id == "expo-android").expect("expo-android");
+        assert_eq!(android.needs_emulator.as_deref(), Some("android"));
+        // Metro itself stays the first (default) target.
+        assert_eq!(targets[0].id, "expo-start");
+    }
+
+    #[test]
+    fn flutter_and_react_native_android_runs_are_pinned_to_the_device() {
+        let make = |id: &str, command: &str| RunTarget {
+            id: id.into(),
+            label: id.into(),
+            command: command.into(),
+            kind: "android".into(),
+            needs_emulator: Some("android".into()),
+        };
+        let mut flutter = make("flutter-android", "flutter run");
+        retarget_android_device_command(&mut flutter, "emulator-5554");
+        assert_eq!(flutter.command, "flutter run -d 'emulator-5554'");
+        let mut rn = make("react-native-android", "npx react-native run-android");
+        retarget_android_device_command(&mut rn, "R58M123");
+        assert_eq!(rn.command, "npx react-native run-android --deviceId 'R58M123'");
+        let mut gradle = make("android-gradle-install", "./gradlew :app:installDebug");
+        retarget_android_device_command(&mut gradle, "emulator-5554");
+        assert_eq!(gradle.command, "./gradlew :app:installDebug");
+    }
+
+    fn xcode_target(command: &str) -> RunTarget {
+        RunTarget {
+            id: "xcode-build:iosApp".into(),
+            label: "iOS simulator run".into(),
+            command: command.into(),
+            kind: "ios".into(),
+            needs_emulator: Some("ios".into()),
+        }
+    }
+
+    #[test]
+    fn xcode_run_command_builds_installs_and_launches_on_the_simulator() {
+        let command = build_xcode_run_command(
+            "-project",
+            "iosApp/iosApp.xcodeproj",
+            "iosApp",
+            Path::new("/work/demo"),
+        );
+        assert!(command.starts_with("UDID=$(xcrun simctl list devices booted"));
+        assert!(command.contains("-destination \"platform=iOS Simulator,id=$UDID\""));
+        assert!(command.contains("-derivedDataPath \"$DD\""));
+        assert!(command.contains("xcrun simctl install \"$UDID\" \"$APP\""));
+        assert!(command.contains("xcrun simctl launch \"$UDID\""));
+        assert!(command.contains("PlistBuddy -c 'Print :CFBundleIdentifier'"));
+        // Per-project derived data, stable across calls, different across projects.
+        let again = build_xcode_run_command("-project", "iosApp/iosApp.xcodeproj", "iosApp", Path::new("/work/demo"));
+        let other = build_xcode_run_command("-project", "iosApp/iosApp.xcodeproj", "iosApp", Path::new("/work/other"));
+        assert_eq!(command, again);
+        assert_ne!(command, other);
+    }
+
+    #[test]
+    fn explicit_ios_choice_pins_the_xcode_command() {
+        let base = build_xcode_run_command("-project", "a.xcodeproj", "a", Path::new("/work/demo"));
+
+        let mut sim = xcode_target(&base);
+        retarget_ios_device_command(&mut sim, "SIM-UDID-1", true);
+        assert!(sim.command.starts_with("UDID='SIM-UDID-1'; DD="));
+        assert!(sim.command.contains("simctl launch"));
+        assert!(!sim.command.contains("simctl list devices booted"));
+
+        let mut phone = xcode_target(&base);
+        retarget_ios_device_command(&mut phone, "PHONE-UDID", false);
+        assert!(phone.command.starts_with("UDID='PHONE-UDID'; DD="));
+        assert!(phone.command.contains("platform=iOS,id=$UDID"));
+        assert!(!phone.command.contains("simctl install"), "physical devices are build-only");
+    }
+
+    #[test]
+    fn flutter_and_react_native_ios_runs_take_the_udid_for_simulators_too() {
+        let make = |id: &str| RunTarget {
+            id: id.into(),
+            label: id.into(),
+            command: "x".into(),
+            kind: "ios".into(),
+            needs_emulator: Some("ios".into()),
+        };
+        let mut flutter = make("flutter-ios");
+        retarget_ios_device_command(&mut flutter, "U1", true);
+        assert_eq!(flutter.command, "flutter run -d 'U1'");
+        let mut rn = make("react-native-ios");
+        retarget_ios_device_command(&mut rn, "U2", true);
+        assert_eq!(rn.command, "npx react-native run-ios --udid 'U2'");
+    }
+
+    #[test]
+    fn booted_simulators_are_not_reopened_in_a_window() {
+        let sim = |state: &str| IosDevice {
+            name: "iPhone 16".into(),
+            udid: "U-1".into(),
+            state: state.into(),
+            kind: "simulator".into(),
+        };
+        assert_eq!(ios_simulator_prelude(&sim("Booted")), "");
+        let boot = ios_simulator_prelude(&sim("Shutdown"));
+        assert!(boot.contains("simctl boot 'U-1'") && boot.contains("open -a Simulator"));
+    }
+
+    #[test]
+    fn flutter_and_react_native_keep_the_android_app_id_under_android_dir() {
+        let flutter = TempProject::new("flutter_app_id");
+        flutter.write("android/gradlew", "#!/bin/sh\n");
+        flutter.write(
+            "android/app/build.gradle",
+            "android { defaultConfig { applicationId \"com.example.flutterapp\" } }\n",
+        );
+        assert_eq!(
+            android_primary_application_id(&ProjectFacts::new(flutter.path.clone())).as_deref(),
+            Some("com.example.flutterapp")
+        );
+
+        let rn = TempProject::new("rn_app_id");
+        rn.write(
+            "android/app/build.gradle.kts",
+            "android { defaultConfig { applicationId = \"com.example.rnapp\" } }\n",
+        );
+        assert_eq!(
+            android_primary_application_id(&ProjectFacts::new(rn.path.clone())).as_deref(),
+            Some("com.example.rnapp")
+        );
+    }
+
+    #[test]
+    fn run_resolution_pins_flutter_to_the_selected_android_device() {
+        let project = TempProject::new("flutter_pin");
+        project.write("pubspec.yaml", "name: app\nflutter:\n  uses-material-design: true\n");
+        let target = resolve_run_command(
+            &project.path.to_string_lossy(),
+            Some("flutter-android"),
+            Some("emulator-5554"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(target.command.contains("ANDROID_SERIAL"));
+        assert!(target.command.ends_with("flutter run -d 'emulator-5554'"));
     }
 }

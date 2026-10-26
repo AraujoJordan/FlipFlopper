@@ -3,7 +3,7 @@ import { activeView, chat, pendingInputCount, dropQueued, isRunning, sendQueuedN
 import { resolvedMotion } from "../../lib/layout";
 import { openConversationFile } from "../../lib/attachments";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { animateElement, reveal, cancelMotion, useListMotion, toast } from "../ui";
+import { animateElement, reveal, cancelMotion, consumePromptLaunch, useListMotion, toast } from "../ui";
 import { Icon } from "../shell/Icon";
 import { AssistantBubble, Divider, UserBubble } from "./MessageItem";
 
@@ -45,6 +45,7 @@ const Transcript: Component = () => {
     const off = onLivePresentation((sessionId, hints) => {
       queueMicrotask(() => {
         if (disposed || document.hidden || chat.activeId !== sessionId || !content) return;
+        if (stuck()) toBottom(false);
         const targets = new Set<HTMLElement>();
         for (const hint of hints) {
           const key = `${hint.kind}:${hint.messageId}:${hint.itemId ?? ""}:${hint.status ?? ""}`;
@@ -53,6 +54,11 @@ const Transcript: Component = () => {
           const message = content.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(hint.messageId)}"]`);
           if (!message) continue;
           const item = hint.itemId ? message.querySelector<HTMLElement>(`[data-motion-id="${CSS.escape(hint.itemId)}"]`) : undefined;
+          if (hint.kind === "user") {
+            const bubble = message.querySelector<HTMLElement>(".msg-user-stack") ?? message;
+            if (!consumePromptLaunch(bubble)) targets.add(message);
+            continue;
+          }
           if (hint.kind === "flip") {
             const marker = message.querySelector<HTMLElement>(".handoff-marker");
             if (marker) void animateElement(marker, [{ opacity: 0, transform: "translateX(0)" }, { opacity: 1, offset: .12 }, { opacity: 0, transform: `translateX(${Math.max(0, marker.parentElement!.clientWidth - 8)}px)` }], 420);
@@ -77,7 +83,7 @@ const Transcript: Component = () => {
       setStuck(true);
       await animateElement(content, [{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "none" }], 260);
     });
-    onCleanup(() => { offClear(); disposed = true; off(); content?.querySelectorAll<HTMLElement>("[data-message-id], [data-motion-id], .md, .msg-assistant-head, .handoff-marker, .msg-done, .turn-changes").forEach(cancelMotion); seen.clear(); });
+    onCleanup(() => { offClear(); disposed = true; off(); content?.querySelectorAll<HTMLElement>("[data-message-id], [data-motion-id], .msg-user-stack, .md, .msg-assistant-head, .handoff-marker, .msg-done, .turn-changes").forEach(cancelMotion); seen.clear(); });
   });
 
   const toBottom = (smooth = false) => {

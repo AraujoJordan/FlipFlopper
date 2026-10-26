@@ -1088,6 +1088,16 @@ async fn detect_android_environment(project_path: String) -> Result<AndroidEnvir
 }
 
 #[tauri::command]
+async fn android_list_devices() -> Result<Vec<runner::AndroidDevice>, String> {
+    run_blocking(runner::android_devices).await?
+}
+
+#[tauri::command]
+async fn ios_list_simulators() -> Result<Vec<runner::IosDevice>, String> {
+    run_blocking(runner::ios_simulators).await?
+}
+
+#[tauri::command]
 async fn detect_ios_environment(project_path: String) -> Result<IosEnvironment, String> {
     run_blocking(move || runner::detect_ios_environment(&project_path)).await?
 }
@@ -1099,6 +1109,7 @@ async fn run_project(
     target_id: Option<String>,
     android_serial: Option<String>,
     android_avd: Option<String>,
+    ios_udid: Option<String>,
 ) -> Result<String, String> {
     let spawn_app = app.clone();
     let (session_id, rx, url_action) = run_blocking(move || {
@@ -1107,6 +1118,7 @@ async fn run_project(
             target_id.as_deref(),
             android_serial.as_deref(),
             android_avd.as_deref(),
+            ios_udid.as_deref(),
         )?;
         let url_action = if runner::should_auto_open_browser(&target) {
             UrlAction::CaptureAndOpen
@@ -2048,6 +2060,8 @@ pub fn run() {
             detect_run_targets,
             detect_android_environment,
             detect_ios_environment,
+            android_list_devices,
+            ios_list_simulators,
             run_project,
             detect_validation_targets,
             validate_project,

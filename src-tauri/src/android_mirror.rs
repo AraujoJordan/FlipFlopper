@@ -12,7 +12,7 @@ use std::{
     net::{Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -52,8 +52,25 @@ pub struct MirrorManager(Mutex<HashMap<String, Mirror>>);
 /// `scrcpy --version` prints `scrcpy 3.1 <https://…>`; the server must be
 /// launched with exactly this version string.
 pub fn scrcpy_version(scrcpy: &Path) -> Option<String> {
-    let output = Command::new(scrcpy).arg("--version").output().ok()?;
-    parse_scrcpy_version(&String::from_utf8_lossy(&output.stdout))
+    // Environment detection runs on every poll; the version only changes when
+    // the binary does, so cache it per path + modification time.
+    type Key = (PathBuf, Option<std::time::SystemTime>);
+    static CACHE: OnceLock<Mutex<HashMap<Key, Option<String>>>> = OnceLock::new();
+    let key = (
+        scrcpy.to_path_buf(),
+        std::fs::metadata(scrcpy).and_then(|m| m.modified()).ok(),
+    );
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().unwrap().get(&key) {
+        return hit.clone();
+    }
+    let version = Command::new(scrcpy)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| parse_scrcpy_version(&String::from_utf8_lossy(&output.stdout)));
+    cache.lock().unwrap().insert(key, version.clone());
+    version
 }
 
 fn parse_scrcpy_version(output: &str) -> Option<String> {

@@ -698,7 +698,7 @@ async function composerFixture(activeId = 's') {
     sessions: [{id:'s'}, {id:'other'}],
   });
   const [attachments, setAttachments] = solid.createSignal([]);
-  const signals = [], nodes = [], submissions = [], animations = [];
+  const signals = [], nodes = [], submissions = [], animations = [], launches = [], rollbacks = [];
   let resolve, dispose;
   const module = await loadFrontend('../src/components/chat/Composer.tsx', {
     'solid-js': { ...solid, createSignal: (...args) => { const signal=solid.createSignal(...args); signals.push(signal); return signal; } },
@@ -712,6 +712,7 @@ async function composerFixture(activeId = 's') {
     '../../lib/shortcuts': { registerShortcutHandler: () => () => {} },
     '../ui': {
       animateElement: (...args) => { animations.push(args); return Promise.resolve(); },
+      startPromptLaunch: (opts) => { launches.push(opts); return { rollback: (target) => rollbacks.push(target), cancel() {} }; },
       cancelMotion() {}, useValueMotion() {}, useListMotion() {}, useSelectionMotion() {},
       usePresence: () => () => false, toast() {},
     },
@@ -722,7 +723,7 @@ async function composerFixture(activeId = 's') {
   finally { globalThis.React=previousReact; }
   const input = nodes.find((node) => node.tag === 'textarea').props;
   return {
-    chat, setChat, attachments, setAttachments, submissions, animations, dispose,
+    chat, setChat, attachments, setAttachments, submissions, animations, launches, rollbacks, dispose,
     value: signals[0][0], submitting: signals[1][0],
     type: (value) => input.onInput({currentTarget:{value,selectionStart:value.length}}),
     send: () => input.onKeyDown({key:'Enter',preventDefault(){}}),
@@ -741,8 +742,12 @@ test('composer clears immediately during slow startup and keeps the next draft a
     assert.equal(f.submissions[0][0],'First prompt');
     assert.deepEqual(f.submissions[0][1],[file]);
     f.send(); assert.equal(f.submissions.length,1); // No duplicate launch.
+    assert.equal(f.launches.length,1);
+    assert.equal(f.launches[0].text,'First prompt');
+    assert.equal(f.launches[0].attachmentsCount,1);
     f.type('A follow-up');
     await f.finish(true);
+    assert.equal(f.rollbacks.length,0);
     assert.equal(f.value(),'A follow-up');
     assert.equal(f.submitting(),false);
     assert(f.animations.length>0);
@@ -758,6 +763,7 @@ test('failed composer submission restores its original draft and attachments wit
     f.type('Next draft'); f.setAttachments([second]);
     f.setChat('activeId','other'); f.type('Other conversation');
     await f.finish(false);
+    assert.equal(f.rollbacks.length,1);
     assert.equal(f.value(),'Other conversation');
     assert.deepEqual(f.attachments(),[]);
     f.setChat('activeId','s');
@@ -920,6 +926,79 @@ test('reduced motion strips geometry and missing WAAPI completes immediately', a
   } finally { fixture.dispose(); }
 });
 
+test('prompt launch animates from composer to transcript bubble and settles cleanly on reduced or off motion', async () => {
+  const fixture = await motionFixture();
+  const mounted = new Set();
+  fixture.document.body = {
+    append(node) { node.isConnected = true; mounted.add(node); },
+  };
+  fixture.document.createElement = (tag) => {
+    const classes = new Set();
+    const children = [];
+    const node = {
+      tag, isConnected: false, inert: false, style: {}, dataset: {}, textContent: '',
+      classList: {
+        add: (c) => classes.add(c),
+        remove: (c) => classes.delete(c),
+        contains: (c) => classes.has(c),
+      },
+      setAttribute() {}, removeAttribute() {},
+      closest: () => null,
+      append: (...items) => children.push(...items),
+      remove() { node.isConnected = false; mounted.delete(node); },
+      getBoundingClientRect: () => ({ top: 680, left: 240, right: 740, bottom: 724, width: 500, height: 44 }),
+      animate(frames, options) {
+        return { frames, options, finished: Promise.resolve(), cancel() {} };
+      },
+    };
+    return node;
+  };
+  const ui = await loadFrontend('../src/components/ui.tsx', { 'solid-js': solid, 'solid-js/web': {}, '../lib/layout': fixture.layout, './shell/Icon': {} });
+  const makeNode = (rect) => {
+    const classes = new Set();
+    const recorded = [];
+    return {
+      isConnected: true, style: {}, dataset: {}, recorded,
+      classList: {
+        add: (c) => classes.add(c),
+        remove: (c) => classes.delete(c),
+        contains: (c) => classes.has(c),
+      },
+      closest: () => null,
+      getBoundingClientRect: () => rect,
+      animate(frames, options) {
+        const anim = { frames, options, finished: Promise.resolve(), cancel() {}, finish() {} };
+        recorded.push(anim);
+        return anim;
+      },
+    };
+  };
+  try {
+    const source = makeNode({ top: 720, left: 240, right: 740, bottom: 764, width: 500, height: 44 });
+    const box = makeNode({ top: 700, left: 220, right: 760, bottom: 800, width: 540, height: 100 });
+    const sendBtn = makeNode({ top: 756, left: 710, right: 746, bottom: 792, width: 36, height: 36 });
+    const bubble = makeNode({ top: 420, left: 240, right: 640, bottom: 468, width: 400, height: 48 });
+
+    ui.startPromptLaunch({ source, box, sendBtn, text: 'Ship the prompt launch animation', attachmentsCount: 2, mode: 'plan' });
+    assert.equal(mounted.size, 1, 'spawns an inert flight ghost in full motion');
+    assert.equal(box.recorded.length, 1);
+    assert.equal(sendBtn.recorded.length, 1);
+
+    const consumed = ui.consumePromptLaunch(bubble);
+    assert.equal(consumed, true, 'transcript bubble claims the active prompt launch');
+    assert.equal(mounted.size, 0, 'removes the flight ghost immediately upon handoff');
+    assert.equal(bubble.recorded.length, 1);
+    assert.match(bubble.recorded[0].frames[0].transform, /translate\(0px, 260px\)/);
+    assert.equal(ui.consumePromptLaunch(bubble), false, 'each launch is consumed at most once');
+
+    // Settler removes an unconsumed ghost when switching motion to Off.
+    ui.startPromptLaunch({ source, box, sendBtn, text: 'Another prompt', attachmentsCount: 0 });
+    assert.equal(mounted.size, 1);
+    fixture.layout.setMotion('off');
+    assert.equal(mounted.size, 0, 'motion settler cleans up any active flight ghost');
+  } finally { fixture.dispose(); }
+});
+
 test('presentation hints are live-only, do not replay text deltas, and unsubscribe', async () => {
   let listener;
   const meta = { id:'motion-session', project_path:'/fixture/project', cwd:'/fixture/project', agent_id:'claude', status:'idle' };
@@ -963,4 +1042,74 @@ test('spinner and running indicator animations are enabled in standard motion', 
   assert.doesNotMatch(css, /\.tool-row\s+\.ui-spinner[^{]*\{\s*animation:\s*none/);
   assert.doesNotMatch(css, /(^|\n)\.session-header-live[^{]*\{\s*animation:\s*none/);
   assert.doesNotMatch(css, /(^|\n)\.flow-gate-pulse\s*\{\s*animation:\s*none/);
+});
+
+// ── Device mirror (Android scrcpy / iOS idb) wire helpers ────────────────────
+
+async function loadMirror() {
+  const source = ts.transpileModule(readFileSync(new URL("../src/lib/androidMirror.ts", import.meta.url), "utf8"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+  }).outputText;
+  const names = new Map();
+  for (const declaration of ts.createSourceFile("m.js", source, ts.ScriptTarget.ES2022).statements) {
+    if (ts.isImportDeclaration(declaration)) names.set(declaration.moduleSpecifier.text, declaration.importClause.namedBindings.elements.map((e) => e.propertyName?.text ?? e.name.text));
+  }
+  const module = new SourceTextModule(source);
+  await module.link((specifier) => new SyntheticModule(names.get(specifier), function () {
+    for (const name of names.get(specifier)) this.setExport(name, specifier === "solid-js" ? solid[name] : () => { throw new Error(`Unexpected boundary call: ${specifier}.${name}`); });
+  }));
+  await module.evaluate();
+  return module.namespace;
+}
+
+const bytes = (...values) => new Uint8Array(values);
+
+test("Annex B streams split into NAL units with 3- and 4-byte start codes", async () => {
+  const { splitAnnexB } = await loadMirror();
+  const nals = splitAnnexB(bytes(0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 9, 0, 0, 0, 1, 0x65, 7));
+  assert.deepEqual(nals.map((n) => [...n]), [[0x67, 1, 2], [0x68, 9], [0x65, 7]]);
+});
+
+test("a config packet becomes an avcC description and codec string", async () => {
+  const { parseConfigPacket } = await loadMirror();
+  const sps = [0x67, 0x64, 0x00, 0x32, 0xac];
+  const pps = [0x68, 0xee, 0x3c, 0x80];
+  const config = parseConfigPacket(bytes(0, 0, 0, 1, ...sps, 0, 0, 0, 1, ...pps));
+  assert.equal(config.codec, "avc1.640032");
+  assert.deepEqual([...config.description], [1, 0x64, 0x00, 0x32, 0xff, 0xe1, 0, 5, ...sps, 1, 0, 4, ...pps]);
+  assert.equal(parseConfigPacket(bytes(0, 0, 0, 1, ...sps)), null, "PPS is required");
+});
+
+test("frames are re-prefixed with 4-byte NAL lengths for the avcC decoder", async () => {
+  const { annexBToAvcc } = await loadMirror();
+  assert.deepEqual([...annexBToAvcc(bytes(0, 0, 0, 1, 0x65, 7, 0, 0, 1, 0x41, 0xaa, 0xbb))], [0, 0, 0, 2, 0x65, 7, 0, 0, 0, 3, 0x41, 0xaa, 0xbb]);
+});
+
+test("scrcpy control messages use the documented byte layout", async () => {
+  const { encodeTouch, encodeKeycode, encodeText, encodeRotate } = await loadMirror();
+
+  const down = encodeTouch("down", 3, 540, 1200, 1080, 2400);
+  const view = new DataView(down.buffer);
+  assert.equal(down.length, 32);
+  assert.equal(down[0], 2);
+  assert.equal(down[1], 0);
+  assert.equal(view.getBigUint64(2), 3n);
+  assert.equal(view.getUint32(10), 540);
+  assert.equal(view.getUint32(14), 1200);
+  assert.equal(view.getUint16(18), 1080);
+  assert.equal(view.getUint16(20), 2400);
+  assert.equal(view.getUint16(22), 0xffff, "finger down has full pressure");
+  assert.equal(new DataView(encodeTouch("up", 3, 1, 1, 1080, 2400).buffer).getUint16(22), 0, "release has zero pressure");
+  assert.equal(encodeTouch("move", 0, 1, 1, 10, 10)[1], 2);
+  assert.equal(new DataView(encodeTouch("move", 0, -5, 1, 10, 10).buffer).getUint32(10), 0, "negative coordinates clamp to 0");
+
+  const [keyDown, keyUp] = encodeKeycode(66);
+  assert.deepEqual([keyDown.length, keyDown[0], keyDown[1], keyUp[1]], [14, 0, 0, 1]);
+  assert.equal(new DataView(keyDown.buffer).getUint32(2), 66);
+
+  const text = encodeText("héllo");
+  assert.equal(text[0], 1);
+  assert.equal(new DataView(text.buffer).getUint32(1), text.length - 5);
+  assert.equal(new TextDecoder().decode(text.subarray(5)), "héllo");
+  assert.deepEqual([...encodeRotate()], [11]);
 });

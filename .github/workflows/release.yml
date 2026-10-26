@@ -106,13 +106,11 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            FlipFlopper 0.14.0 adds Manual and Ask permission modes. Press Shift+Tab in
-            the composer to cycle Manual, Auto-edit, Plan and Ask (Full access stays
-            behind the YOLO switch); each mode tints the composer border and mode pill,
-            and /ask, /edit and /manual switch modes from the prompt.
-
-            Manual asks before every edit and command (Claude Code and Cursor); Ask is
-            read-only Q&A with no edits and no plan.
+            FlipFlopper 0.17.0 adds a choreographed prompt launch-to-transcript animation
+            with per-mode Circuit tinting, unifies Android and iOS device selection across
+            Run targets and live device previews (including Xcode/KMP simulator build &
+            launch and stream auto-reconnect), and refreshes the app icon and README
+            screenshots.
 
             Installers include the pinned Node sidecar and Claude ACP helper. Native
             Claude requires macOS 13.5+ on a Mac.

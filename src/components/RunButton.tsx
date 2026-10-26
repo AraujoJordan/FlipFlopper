@@ -22,6 +22,7 @@ import {
 import {
   addTerminal,
   readAndroidDevices,
+  readIosSimulators,
   readRunTargets,
   setRunSessionId,
   setRunTargets,
@@ -80,6 +81,13 @@ const RunButton: Component = () => {
   let iosEnvSeq = 0;
 
   const projectPath = () => store.currentProject?.path ?? "";
+  // The simulator Run uses: the one saved from the Preview tab (if it still
+  // exists), else the environment's preferred one.
+  const chosenSimulator = () => {
+    const env = iosEnv();
+    const saved = readIosSimulators()[projectPath()];
+    return env?.simulators.some((d) => d.udid === saved) ? saved : env?.selected_simulator ?? null;
+  };
   const running = () => store.runSessionId !== null;
   const busy = () => detecting() || starting();
   // Memoize platform presence so a target refresh with the same platforms does
@@ -197,7 +205,9 @@ const RunButton: Component = () => {
     setStarting(true);
     void triggerHaptic("generic");
     try {
-      const sessionId = await runProject(path, target.id, selectedSerial() ?? undefined);
+      // The device chosen in the Preview tab (or here) wins over auto-detection.
+      const iosUdid = isIosTarget(target) ? readIosSimulators()[path] : undefined;
+      const sessionId = await runProject(path, target.id, selectedSerial() ?? undefined, undefined, iosUdid);
       writeRunTarget(path, target.id);
       addTerminal({
         sessionId,
@@ -338,11 +348,11 @@ const RunButton: Component = () => {
 
   async function openSimulator() {
     const path = projectPath();
-    const env = iosEnv();
-    if (!path || !env?.selected_simulator || openingSimulator()) return;
+    const simulator = chosenSimulator();
+    if (!path || !simulator || openingSimulator()) return;
     setOpeningSimulator(true);
     try {
-      const sessionId = await openIosSimulator(path, env.selected_simulator);
+      const sessionId = await openIosSimulator(path, simulator);
       addTerminal({
         sessionId,
         label: "iOS · Simulator",
@@ -405,10 +415,11 @@ const RunButton: Component = () => {
       const device = env.physical_devices.find((d) => d.udid === env.selected_device);
       return { tone: "ready", title: "Physical device ready", detail: device?.name ?? env.selected_device };
     }
-    if (env.selected_simulator) {
-      const simulator = env.simulators.find((d) => d.udid === env.selected_simulator);
+    const chosen = chosenSimulator();
+    if (chosen) {
+      const simulator = env.simulators.find((d) => d.udid === chosen);
       const state = simulator?.state === "Booted" ? "ready" : "will boot";
-      return { tone: "ready", title: `Simulator ${state}`, detail: simulator?.name ?? env.selected_simulator };
+      return { tone: "ready", title: `Simulator ${state}`, detail: simulator?.name ?? chosen };
     }
     if (env.issues.length > 0) {
       return { tone: "error", title: "iOS not ready", detail: env.issues[0] };
@@ -703,16 +714,16 @@ const RunButton: Component = () => {
                   e.stopPropagation();
                   void openSimulator();
                 }}
-                disabled={!iosEnv()?.selected_simulator || openingSimulator()}
-                title={iosEnv()?.selected_simulator ? "Open iOS Simulator" : "No available iOS simulator"}
+                disabled={!chosenSimulator() || openingSimulator()}
+                title={chosenSimulator() ? "Open iOS Simulator" : "No available iOS simulator"}
                 style={{
                   padding: "3px 8px",
                   "border-radius": "6px",
                   border: "1px solid var(--border-muted)",
-                  color: iosEnv()?.selected_simulator ? "var(--fg-muted)" : "var(--fg-faint)",
+                  color: chosenSimulator() ? "var(--fg-muted)" : "var(--fg-faint)",
                   background: "transparent",
                   "font-size": "10.5px",
-                  cursor: iosEnv()?.selected_simulator && !openingSimulator() ? "pointer" : "default",
+                  cursor: chosenSimulator() && !openingSimulator() ? "pointer" : "default",
                   "flex-shrink": 0,
                 }}
               >

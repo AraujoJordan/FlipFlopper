@@ -123,10 +123,12 @@ export function effectiveRoot(): string | null {
 const RUN_TARGET_KEY = "flipflopper:run-targets";
 const VALIDATION_TARGET_KEY = "flipflopper:validation-targets";
 const ANDROID_DEVICE_KEY = "flipflopper:android-devices";
+const IOS_SIMULATOR_KEY = "flipflopper:ios-simulators";
 
 const runTargetsCache = readLegacyJson<Record<string, string>>(RUN_TARGET_KEY, {});
 const validationTargetsCache = readLegacyJson<Record<string, string>>(VALIDATION_TARGET_KEY, {});
 const androidDevicesCache = readLegacyJson<Record<string, string>>(ANDROID_DEVICE_KEY, {});
+const iosSimulatorsCache = readLegacyJson<Record<string, string>>(IOS_SIMULATOR_KEY, {});
 
 export function readRunTargets(): Record<string, string> {
   return runTargetsCache;
@@ -155,18 +157,30 @@ export function writeAndroidDevice(projectPath: string, serial: string) {
   writePref(ANDROID_DEVICE_KEY, androidDevicesCache);
 }
 
+export function readIosSimulators(): Record<string, string> {
+  return iosSimulatorsCache;
+}
+
+/** The iOS device (simulator udid) Run and the Preview tab share per project. */
+export function writeIosSimulator(projectPath: string, udid: string) {
+  iosSimulatorsCache[projectPath] = udid;
+  writePref(IOS_SIMULATOR_KEY, iosSimulatorsCache);
+}
+
 /** Load durable copies of the caches above (they are seeded synchronously from
  *  legacy localStorage so the first paint doesn't wait on the pref store). */
 export async function hydrateStorePreferences() {
-  const [runTargets, validationTargets, androidDevices, viewedFiles] = await Promise.all([
+  const [runTargets, validationTargets, androidDevices, iosSimulators, viewedFiles] = await Promise.all([
     readPref(RUN_TARGET_KEY, runTargetsCache, () => runTargetsCache),
     readPref(VALIDATION_TARGET_KEY, validationTargetsCache, () => validationTargetsCache),
     readPref(ANDROID_DEVICE_KEY, androidDevicesCache, () => androidDevicesCache),
+    readPref(IOS_SIMULATOR_KEY, iosSimulatorsCache, () => iosSimulatorsCache),
     readPref(VIEWED_FILES_KEY, viewedFilesCache, () => viewedFilesCache),
   ]);
   Object.assign(runTargetsCache, runTargets);
   Object.assign(validationTargetsCache, validationTargets);
   Object.assign(androidDevicesCache, androidDevices);
+  Object.assign(iosSimulatorsCache, iosSimulators);
   Object.assign(viewedFilesCache, viewedFiles);
   setStore("viewedFiles", { ...viewedFilesCache });
 }

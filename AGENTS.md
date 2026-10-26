@@ -85,7 +85,14 @@ Currently implemented:
   iOS projects show the booted Simulator the same way (`ios_mirror.rs` +
   `IosPreview`, macOS only): `xcrun simctl` gives screenshots, native video
   recording and headless boot; optional Meta `idb` adds the live H.264 stream
-  and tap/swipe/text input, otherwise the pane is view-only snapshots), Terminal (shell PTYs, validation targets, resume
+  and tap/swipe/text input, otherwise the pane is view-only snapshots).
+  Run and Preview share one device per project (`readAndroidDevices` /
+  `readIosSimulators`): Android Gradle runs follow `ANDROID_SERIAL`, Flutter/RN
+  are pinned with `-d` / `--deviceId`/`--udid`, and an explicit simulator choice beats
+  a plugged-in iPhone. The Xcode/KMP iOS target builds, installs and launches on
+  the simulator. Previews poll `android_list_devices` / `ios_list_simulators`
+  (cheap) and re-read the full environment only occasionally; a dropped stream
+  auto-reconnects with backoff while the device is still online), Terminal (shell PTYs, validation targets, resume
   in the agent's TUI) and Flow tabs.
 - Multi-agent orchestrator flow canvas (`lib/orchestrator.ts`): every session
   in the open project is a live node (`live-<sessionId>`); queued steps start
@@ -386,8 +393,11 @@ requires generated output.
   or overlay the pane. Saved preferred widths
   survive temporary constraints; narrow navigation is also a focus-trapped overlay.
 - `onLivePresentation` in `lib/chat.ts` emits transient hints after live reduction.
-  History/import/replay must never produce message entrances. Keep the reducer
-  pure, later text deltas immediate, and backend outcomes independent of motion.
+  History/import/replay must never produce message entrances. `startPromptLaunch`
+  and `consumePromptLaunch` in `components/ui.tsx` coordinate composer-to-transcript
+  (and composer-to-queue) prompt launch flights with rollback on failed sends and
+  immediate settling under Reduced/Off motion. Keep the reducer pure, later text
+  deltas immediate, and backend outcomes independent of motion.
 - Responsive panes retain their children, trap focus while overlaid and return
   focus when closed. Avoid animating terminal output, iframe documents or every
   diff line. Keep Flow cards/edges/gates on the shared position map.

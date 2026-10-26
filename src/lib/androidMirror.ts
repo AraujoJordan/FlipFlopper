@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { createEffect, createSignal, onCleanup } from "solid-js";
 import {
   androidInput,
   androidMirrorControl,
@@ -411,4 +411,33 @@ export function startCanvasRecording(canvas: HTMLCanvasElement) {
       recorder.stop();
     }),
   };
+}
+
+// ── Auto-reconnect ───────────────────────────────────────────────────────────
+
+const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 4000, 4000, 4000];
+
+/** Retry a dropped stream while its device is still listed online: backoff
+ *  1 s, 2 s, 4 s…, then stop and leave the manual Retry button. The counter
+ *  resets once the stream is live again. `attempts` raises the cap (a freshly
+ *  booted emulator needs a few more tries before it can serve a stream). */
+export function createAutoReconnect(opts: {
+  status: () => MirrorStatus;
+  deviceOnline: () => boolean;
+  reconnect: () => void;
+  attempts?: () => number;
+}) {
+  let tries = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  createEffect(() => {
+    const status = opts.status();
+    if (status === "live") { tries = 0; return; }
+    if (status !== "error" || !opts.deviceOnline()) return;
+    const cap = opts.attempts?.() ?? 3;
+    if (tries >= Math.min(cap, RECONNECT_DELAYS_MS.length)) return;
+    const delay = RECONNECT_DELAYS_MS[tries++];
+    timer = setTimeout(() => { timer = null; opts.reconnect(); }, delay);
+    onCleanup(() => { if (timer) clearTimeout(timer); timer = null; });
+  });
+  return { reset: () => { tries = 0; } };
 }

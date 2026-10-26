@@ -1332,7 +1332,7 @@ input, textarea {
 .project-drag-preview { position: fixed; z-index: 1000; pointer-events: none; display: flex; align-items: center; gap: 8px; max-width: 260px; padding: 9px 13px; border: 1px solid var(--accent); border-radius: var(--radius-md); background: var(--surface-3); color: var(--fg-default); box-shadow: var(--shadow-menu); font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
 .session-row {
-  display: flex; align-items: center; gap: 9px; padding: 7px 8px; margin: 1px 0;
+  display: flex; align-items: center; gap: 9px; padding: 7px 8px 7px 24px; margin: 1px 0;
   border-radius: var(--radius-md); cursor: pointer; color: var(--fg-body);
   transition: background var(--dur-fast);
 }
@@ -1851,7 +1851,7 @@ input, textarea {
 .worktree-banner-branch { flex: 1; min-width: 0; font: 12px var(--font-mono); color: var(--fg-body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .worktree-banner button { font-size: 12px; font-weight: 600; color: var(--accent); padding: 3px 8px; border-radius: var(--radius-sm); }
 .worktree-banner button:hover { background: rgba(var(--accent-rgb), .15); }
-.session-row-child { padding-left: 22px; }
+.session-row-child { padding-left: 38px; }
 
 /* ── Syntax highlighting tokens ── */
 .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag, .hljs-meta .hljs-keyword { color: var(--hl-keyword); }
@@ -2205,10 +2205,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .explain-error { font-size: 12.5px; color: var(--danger, #f85149); margin-bottom: 10px; white-space: pre-wrap; }
 
 /* Mode tint: border, focus ring and pill follow the active permission mode (Full stays amber) */
-.composer-box[data-mode="manual"] { --mode-c: var(--mode-manual-accent); --mode-rgb: var(--mode-manual-accent-rgb); }
-.composer-box[data-mode="auto_edit"] { --mode-c: var(--accent); --mode-rgb: var(--accent-rgb); }
-.composer-box[data-mode="plan"] { --mode-c: var(--mode-plan-accent); --mode-rgb: var(--mode-plan-accent-rgb); }
-.composer-box[data-mode="ask"] { --mode-c: var(--mode-ask-accent); --mode-rgb: var(--mode-ask-accent-rgb); }
+.composer-box[data-mode="manual"], .prompt-flight-ghost[data-mode="manual"], .msg-user-landing[data-launch-mode="manual"] { --mode-c: var(--mode-manual-accent); --mode-rgb: var(--mode-manual-accent-rgb); }
+.composer-box[data-mode="auto_edit"], .prompt-flight-ghost[data-mode="auto_edit"], .msg-user-landing[data-launch-mode="auto_edit"] { --mode-c: var(--accent); --mode-rgb: var(--accent-rgb); }
+.composer-box[data-mode="plan"], .prompt-flight-ghost[data-mode="plan"], .msg-user-landing[data-launch-mode="plan"] { --mode-c: var(--mode-plan-accent); --mode-rgb: var(--mode-plan-accent-rgb); }
+.composer-box[data-mode="ask"], .prompt-flight-ghost[data-mode="ask"], .msg-user-landing[data-launch-mode="ask"] { --mode-c: var(--mode-ask-accent); --mode-rgb: var(--mode-ask-accent-rgb); }
+.composer-box[data-mode="full"], .prompt-flight-ghost[data-mode="full"], .msg-user-landing[data-launch-mode="full"] { --mode-c: var(--full-access-accent); --mode-rgb: var(--full-access-accent-rgb); }
 .composer-box[data-mode]:not([data-mode="full"]) { border-color: color-mix(in srgb, var(--mode-c) 22%, var(--border-default)); }
 .composer-box[data-mode]:not([data-mode="full"]):focus-within { border-color: var(--mode-c); box-shadow: 0 0 0 2px rgba(var(--mode-rgb), .10); }
 .pill[data-mode="manual"] { --mode-c: var(--mode-manual-accent); --mode-rgb: var(--mode-manual-accent-rgb); }
@@ -2217,3 +2218,82 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .pill[data-mode="ask"] { --mode-c: var(--mode-ask-accent); --mode-rgb: var(--mode-ask-accent-rgb); }
 .pill[data-mode]:not([data-mode="full"]) { color: var(--fg-body); background: transparent; }
 .pill[data-mode]:not([data-mode="full"]):not(:disabled):hover { color: var(--mode-c); background: rgba(var(--mode-rgb), .2); }
+
+/* ── Prompt Launch & Materialize ── */
+@keyframes composer-launch-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(var(--mode-rgb, var(--accent-rgb)), .32), 0 -4px 18px rgba(var(--mode-rgb, var(--accent-rgb)), .22); }
+  100% { box-shadow: 0 0 0 4px rgba(var(--mode-rgb, var(--accent-rgb)), 0), 0 -10px 26px rgba(var(--mode-rgb, var(--accent-rgb)), 0); }
+}
+
+@keyframes prompt-land-glow {
+  0% {
+    border-color: rgba(var(--mode-rgb, var(--accent-rgb)), .65);
+    box-shadow: 0 0 0 1px rgba(var(--mode-rgb, var(--accent-rgb)), .35), 0 8px 24px rgba(var(--mode-rgb, var(--accent-rgb)), .2);
+  }
+  100% {
+    border-color: transparent;
+    box-shadow: none;
+  }
+}
+
+.composer-box-launching {
+  animation: composer-launch-pulse 260ms var(--ease-out);
+}
+
+.prompt-flight-ghost {
+  pointer-events: none;
+  z-index: 92;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 14px;
+  border-radius: 14px 14px 4px 14px;
+  background: color-mix(in srgb, var(--surface-3) 92%, rgba(var(--mode-rgb, var(--accent-rgb)), .08));
+  border: 1px solid color-mix(in srgb, var(--mode-c, var(--accent)) 55%, var(--border-default));
+  box-shadow: 0 0 0 1px rgba(var(--mode-rgb, var(--accent-rgb)), .25), 0 10px 28px rgba(3, 12, 16, .36);
+  color: var(--fg-default);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  transform-origin: center bottom;
+  will-change: transform, opacity;
+}
+
+.prompt-flight-multiline {
+  -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+}
+
+.prompt-flight-badge {
+  align-self: flex-start;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  background: rgba(var(--mode-rgb, var(--accent-rgb)), .16);
+  color: var(--mode-c, var(--accent-soft));
+}
+
+.prompt-flight-text {
+  display: block;
+  min-width: 0;
+}
+
+.msg-user-landing .msg-user-body,
+.queued-item.msg-user-landing {
+  animation: prompt-land-glow 420ms var(--ease-out);
+}
+
+:root:is([data-motion="reduced"], [data-motion="off"]) :is(.composer-box-launching, .msg-user-landing .msg-user-body, .queued-item.msg-user-landing, .prompt-flight-ghost) {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root :is(.composer-box-launching, .msg-user-landing .msg-user-body, .queued-item.msg-user-landing, .prompt-flight-ghost) {
+    animation: none !important;
+  }
+}

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="FlipFlopper app icon">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#24323A"/>
+      <stop offset="0.55" stop-color="#182229"/>
+      <stop offset="1" stop-color="#0F1417"/>
+    </linearGradient>
+    <linearGradient id="iris" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#C5BCFF"/>
+      <stop offset="1" stop-color="#947FE6"/>
+    </linearGradient>
+    <linearGradient id="jade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#91F1D6"/>
+      <stop offset="0.55" stop-color="#54E0BA"/>
+      <stop offset="1" stop-color="#20AF89"/>
+    </linearGradient>
+    <filter id="overlap" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="15" stdDeviation="12" flood-color="#070D10" flood-opacity="0.38"/>
+    </filter>
+    <path id="conversation" d="M303 411H721C767 411 797 441 797 487V543C797 589 767 619 721 619H411L319 681L336 619H303C257 619 227 589 227 543V487C227 441 257 411 303 411Z"/>
+  </defs>
+
+  <rect x="12" y="12" width="1000" height="1000" rx="222" fill="url(#tile)"/>
+  <rect x="28" y="28" width="968" height="968" rx="206" fill="none" stroke="#60727D" stroke-opacity="0.32" stroke-width="8"/>
+
+  <g transform="translate(512 512) scale(1.23) translate(-512 -512)">
+    <use href="#conversation" transform="rotate(38 512 512)" fill="url(#iris)"/>
+    <use href="#conversation" transform="rotate(-38 512 512)" fill="url(#jade)" filter="url(#overlap)"/>
+    <path d="M485 479L527 512L485 545" fill="none" stroke="#EAC06B" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -9,7 +9,7 @@ import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMod
 import { openSide } from "../../lib/layout";
 import { registerShortcutHandler } from "../../lib/shortcuts";
 import { effectiveRoot, setStore, store } from "../../lib/store";
-import { Menu, MenuDivider, MenuItem, MenuLabel, Spinner, animateElement, cancelMotion, useValueMotion, useListMotion, usePresence, useSelectionMotion, toast } from "../ui";
+import { Menu, MenuDivider, MenuItem, MenuLabel, Spinner, animateElement, cancelMotion, startPromptLaunch, useValueMotion, useListMotion, usePresence, useSelectionMotion, toast } from "../ui";
 import { Icon, type IconName } from "../shell/Icon";
 import { getFileIcon } from "../../lib/fileIcons";
 import {
@@ -79,6 +79,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   let agentAnchor: HTMLButtonElement | undefined;
   let modelAnchor: HTMLButtonElement | undefined;
   let modeAnchor: HTMLButtonElement | undefined;
+  let composerBox: HTMLDivElement | undefined;
   let sendControl: HTMLDivElement | undefined;
   let sendingStatus: HTMLSpanElement | undefined;
   let draftMove: { from: string; to: string } | undefined;
@@ -257,6 +258,14 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
       return;
     }
     if (!text && files.length === 0) return;
+    const launch = startPromptLaunch({
+      source: textarea,
+      box: composerBox,
+      sendBtn: sendControl,
+      text: text || `${files.length} attachment${files.length === 1 ? "" : "s"}`,
+      attachmentsCount: files.length,
+      mode: chat.composer.mode,
+    });
     const source = draftKey();
     let target = source;
     // Acknowledge the press before any IPC, worktree creation or CLI startup.
@@ -291,6 +300,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
       toast(`Couldn't send message: ${String(error)}`, "error");
     } finally {
       if (!ok) {
+        launch.rollback(textarea);
         // Startup can fail after creating (or removing) a native session.
         const removed = target !== source && !chat.sessions.some((s) => s.id === target) ? target : undefined;
         const movedText = removed ? drafts.get(removed) ?? "" : "";
@@ -391,7 +401,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   createEffect(on(submitting, (pending) => {
     if (pending) queueMicrotask(() => void animateElement(sendingStatus, [{ opacity: 0, transform: "translateX(4px)" }, { opacity: 1, transform: "none" }], 160));
   }));
-  onCleanup(() => { cancelMotion(sendControl); cancelMotion(sendingStatus); cancelMotion(textarea); });
+  onCleanup(() => { cancelMotion(composerBox); cancelMotion(sendControl); cancelMotion(sendingStatus); cancelMotion(textarea); });
   useValueMotion(() => agentAnchor, () => chat.composer.agentId, true);
   useValueMotion(() => modeAnchor, () => chat.composer.mode);
   useValueMotion(() => modelAnchor, modelSummary);
@@ -438,7 +448,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           </button>
         </Show>
       </div>
-      <div class="composer-box" data-mode={chat.composer.mode} classList={{ "composer-box-full": chat.composer.mode === "full" }}>
+      <div ref={composerBox} class="composer-box" data-mode={chat.composer.mode} classList={{ "composer-box-full": chat.composer.mode === "full" }}>
         <Show when={suggestionsPresent()}>
           <div ref={suggestions} class="mention-menu" role="listbox">
             <For each={items()}>

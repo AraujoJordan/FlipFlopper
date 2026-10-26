@@ -435,13 +435,19 @@ export const runProject = (
   targetId?: string,
   androidSerial?: string,
   androidAvd?: string,
+  iosUdid?: string,
 ): Promise<string> =>
   invoke("run_project", {
     projectPath,
     targetId: targetId ?? null,
     androidSerial: androidSerial ?? null,
     androidAvd: androidAvd ?? null,
+    iosUdid: iosUdid ?? null,
   });
+
+/** Cheap device polls for the Preview tab (no full environment probe). */
+export const androidListDevices = (): Promise<AndroidDevice[]> => invoke("android_list_devices");
+export const iosListSimulators = (): Promise<IosDevice[]> => invoke("ios_list_simulators");
 
 export const startAndroidScrcpy = (projectPath: string, serial?: string): Promise<string> =>
   invoke("start_android_scrcpy", { projectPath, serial: serial ?? null });
