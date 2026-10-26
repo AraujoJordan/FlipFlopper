@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.16.0 - 2026-10-26
+
+### Added
+
+- **Real-time searchable branch switcher**: click the branch pill in either the top session header or the Changes panel header to filter local and remote branches in real time with fuzzy matching, keyboard navigation (`↑`/`↓`/`Enter`), and one-click switching (including automatic tracking checkout for remote-only branches and on-the-fly new branch creation).
+- **Background remote branch fetching**: automatically runs non-blocking `git fetch --prune` when opening the branch switcher and debounced while typing missing branch names, updating the branch list live without interrupting input.
+- **Enhanced Changes review & staging**:
+  - Always-visible `+ Stage` and `− Unstage` buttons on each file row, sticky header stage/unstage toggle while stepping through file diffs, and whole-file/all-files staging inside `DiffPane`.
+  - Inline GitHub-style line comments and "Ask changes" review cards with multi-comment review queue and single-turn batch submission.
+  - Per-hunk and per-selection Git patch actions (stage, unstage, discard selected lines).
+  - GitHub-style "Viewed" file tracking with persistent state, auto-collapsing viewed diff cards, and an "Unviewed only" filter.
+- **Live device previews**: live Android (via scrcpy H.264 stream and control protocol) and iOS Simulator preview mirroring and control inside the Preview pane, with headless AVD booting and screenshot/video recording attachments.
+- **macOS overlay titlebar integration**: native macOS overlay title bar with hidden title text, integrated toolbar and review headers, and system-respecting double click actions.
+
 ## 0.15.0 - 2026-10-23
 
 ### Added
