@@ -28,13 +28,6 @@ losing context.
   <img src="docs/media/screenshot.jpg" alt="FlipFlopper's Circuit conversation workspace in dark mode, with sessions, agent controls and the Changes pane" width="1200" />
 </div>
 
-<details>
-<summary>See the light theme</summary>
-
-![FlipFlopper conversation workspace in light mode](docs/media/screenshot-light.jpg)
-
-</details>
-
 ## 🤔 But why??
 
 Because the whole agentic-coding industry is running on VC cash and government
