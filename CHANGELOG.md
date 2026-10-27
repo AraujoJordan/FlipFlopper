@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.18.0 - 2026-10-27
+## 0.18.1 - 2026-10-27
 
 ### Added
 
@@ -15,6 +15,10 @@
 - Agent version detection resolves the launch binary once and skips version probes when the CLI is not installed.
 - Ollama one-shot output consistently prefers stderr diagnostics on failure and surfaces empty-output errors.
 - CLI session import and attachment snapshots handle edge cases around missing transcripts and native IDs more gracefully.
+
+### Fixed
+
+- Bump `tauri.conf.json` version so macOS/Windows/Linux bundle filenames match the release tag.
 
 ## 0.17.0 - 2026-10-26
 

@@ -106,7 +106,7 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            FlipFlopper 0.18.0 refactors the ACP notification/tool pipeline into a
+            FlipFlopper 0.18.1 refactors the ACP notification/tool pipeline into a
             dedicated module, extracts pure transcript and diff models for easier testing,
             and unifies Run/Validation target selection behind a shared component. The
             chat engine also handles transcript-store failures more gracefully.
