@@ -818,8 +818,6 @@ export const chatImport = (requests: Omit<ImportCandidate, "size">[]): Promise<S
 export const onChatEntry = (sessionId: string, cb: (entry: ChatEntry) => void): Promise<UnlistenFn> =>
   listen<ChatEntry>(`chat://${sessionId}`, (e) => cb(e.payload));
 
-// ── Handoff ──────────────────────────────────────────────────────────────────
-
 // ── Native menu ──────────────────────────────────────────────────────────────
 
 export interface NativeMenuState {
@@ -840,9 +838,6 @@ export const windowTitlebarDoubleClick = (): Promise<void> =>
 
 export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenFn> =>
   listen<string>("native-menu-command", (e) => cb(e.payload));
-
-// ── Project tabs (single-window session) ─────────────────────────────────────
-
 
 export const chatDetachNative = (sessionId: string): Promise<void> => invoke("chat_detach_native", { sessionId });
 export const chatRuntimeState = (sessionId: string): Promise<AgentRuntimeState> => invoke("chat_runtime_state", { sessionId });

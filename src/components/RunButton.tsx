@@ -1,4 +1,3 @@
-import { Icon } from "./shell/Icon";
 import { Component, For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import {
   bootAndroidEmulator,
@@ -26,15 +25,15 @@ import {
   readRunTargets,
   setRunSessionId,
   setRunTargets,
+  effectiveRoot,
   store,
   writeAndroidDevice,
   writeRunTarget,
 } from "../lib/store";
-import { Menu, MenuItem, MenuLabel, Spinner, toast } from "./ui";
+import { Spinner, toast } from "./ui";
+import TargetButton, { preferredTarget, shortLabel, type TargetChoice } from "./TargetButton";
 
-const shortLabel = (target: RunTarget) => target.label.split(" - ")[0] || target.id;
-
-const emulatorHint = (target: RunTarget) => {
+const emulatorHint = (target: TargetChoice & { needs_emulator?: string | null }) => {
   if (target.needs_emulator === "android") return "Android device/emulator";
   if (target.needs_emulator === "ios") return "iOS device/simulator";
   return "";
@@ -74,13 +73,13 @@ const RunButton: Component = () => {
   const [menuOpen, setMenuOpen] = createSignal(false);
   const [detecting, setDetecting] = createSignal(false);
   const [starting, setStarting] = createSignal(false);
-  let toggleRef: HTMLDivElement | undefined;
   let runExitUnlisten: (() => void) | null = null;
   let loadSeq = 0;
   let androidEnvSeq = 0;
   let iosEnvSeq = 0;
 
   const projectPath = () => store.currentProject?.path ?? "";
+  const rootPath = () => effectiveRoot() ?? "";
   // The simulator Run uses: the one saved from the Preview tab (if it still
   // exists), else the environment's preferred one.
   const chosenSimulator = () => {
@@ -96,13 +95,7 @@ const RunButton: Component = () => {
   const hasAndroidTargets = createMemo(() => targets().some(isAndroidTarget));
   const hasIosTargets = createMemo(() => targets().some(isIosTarget));
 
-  const preferredTarget = () => {
-    const list = targets();
-    if (list.length === 0) return null;
-    const path = projectPath();
-    const savedId = path ? readRunTargets()[path] : undefined;
-    return list.find((target) => target.id === savedId) ?? list[0];
-  };
+  const preferred = () => preferredTarget(targets(), readRunTargets()[projectPath()]);
 
   async function loadTargets(path: string) {
     const seq = ++loadSeq;
@@ -147,7 +140,7 @@ const RunButton: Component = () => {
   }
 
   createEffect(() => {
-    const path = projectPath();
+    const root = rootPath();
     runExitUnlisten?.();
     runExitUnlisten = null;
     setRunSessionId(null);
@@ -155,25 +148,25 @@ const RunButton: Component = () => {
     setTargets([]);
     setAndroidEnv(null);
     setIosEnv(null);
-    if (path) void loadTargets(path);
+    if (root) void loadTargets(root);
   });
 
   createEffect(() => {
-    const path = projectPath();
+    const root = rootPath();
     const hasIos = hasIosTargets();
-    if (path && menuOpen() && hasIos) {
-      void loadIosEnvironment(path);
-    } else if (!path || !hasIos) {
+    if (root && menuOpen() && hasIos) {
+      void loadIosEnvironment(root);
+    } else if (!root || !hasIos) {
       setIosEnv(null);
     }
   });
 
   createEffect(() => {
-    const path = projectPath();
+    const root = rootPath();
     const hasAndroid = hasAndroidTargets();
-    if (path && menuOpen() && hasAndroid) {
-      void loadAndroidEnvironment(path);
-    } else if (!path || !hasAndroid) {
+    if (root && menuOpen() && hasAndroid) {
+      void loadAndroidEnvironment(root);
+    } else if (!root || !hasAndroid) {
       setAndroidEnv(null);
     }
   });
@@ -199,16 +192,17 @@ const RunButton: Component = () => {
   });
 
   async function startTarget(target: RunTarget) {
-    const path = projectPath();
-    if (!path || starting()) return;
+    const root = rootPath();
+    const project = projectPath();
+    if (!root || !project || starting()) return;
     setMenuOpen(false);
     setStarting(true);
     void triggerHaptic("generic");
     try {
       // The device chosen in the Preview tab (or here) wins over auto-detection.
-      const iosUdid = isIosTarget(target) ? readIosSimulators()[path] : undefined;
-      const sessionId = await runProject(path, target.id, selectedSerial() ?? undefined, undefined, iosUdid);
-      writeRunTarget(path, target.id);
+      const iosUdid = isIosTarget(target) ? readIosSimulators()[project] : undefined;
+      const sessionId = await runProject(root, target.id, selectedSerial() ?? undefined, undefined, iosUdid);
+      writeRunTarget(project, target.id);
       addTerminal({
         sessionId,
         label: `Run · ${shortLabel(target)}`,
@@ -246,7 +240,7 @@ const RunButton: Component = () => {
   }
 
   async function startScrcpy() {
-    const path = projectPath();
+    const path = rootPath();
     const serial = selectedSerial();
     if (!path || !serial || startingScrcpy()) return;
     setStartingScrcpy(true);
@@ -265,12 +259,13 @@ const RunButton: Component = () => {
   }
 
   async function selectDeviceOrAvd(value: string) {
-    const path = projectPath();
-    if (!path || !value) return;
+    const path = rootPath();
+    const project = projectPath();
+    if (!path || !project || !value) return;
     if (value.startsWith("device:")) {
       const serial = value.slice("device:".length);
       setSelectedSerial(serial);
-      writeAndroidDevice(path, serial);
+      writeAndroidDevice(project, serial);
       return;
     }
     if (value.startsWith("avd:")) {
@@ -289,7 +284,7 @@ const RunButton: Component = () => {
   }
 
   async function startLogcat() {
-    const path = projectPath();
+    const path = rootPath();
     const serial = selectedSerial();
     if (!path || !serial || startingLogcat()) return;
     setStartingLogcat(true);
@@ -315,7 +310,7 @@ const RunButton: Component = () => {
   };
 
   async function runDeviceAction(action: AndroidDeviceAction) {
-    const path = projectPath();
+    const path = rootPath();
     const serial = selectedSerial();
     if (!path || !serial || deviceActionBusy() !== null) return;
     setDeviceActionBusy(action);
@@ -330,7 +325,7 @@ const RunButton: Component = () => {
   }
 
   async function openDeeplink() {
-    const path = projectPath();
+    const path = rootPath();
     const serial = selectedSerial();
     const uri = deeplinkUri().trim();
     if (!path || !serial || !uri || sendingDeeplink()) return;
@@ -347,7 +342,7 @@ const RunButton: Component = () => {
   }
 
   async function openSimulator() {
-    const path = projectPath();
+    const path = rootPath();
     const simulator = chosenSimulator();
     if (!path || !simulator || openingSimulator()) return;
     setOpeningSimulator(true);
@@ -370,7 +365,7 @@ const RunButton: Component = () => {
       await stopRun();
       return;
     }
-    const target = preferredTarget();
+    const target = preferred();
     if (!target) return;
     await startTarget(target);
   }
@@ -378,11 +373,11 @@ const RunButton: Component = () => {
   const mainTitle = () => {
     if (!projectPath()) return "Open a project to run";
     if (running()) {
-      const target = preferredTarget();
+      const target = preferred();
       return target ? `Stop ${shortLabel(target)}` : "Stop run";
     }
     if (detecting()) return "Detecting runnable targets";
-    return preferredTarget()?.label ?? "No runnable target detected";
+    return preferred()?.label ?? "No runnable target detected";
   };
 
   const androidStatus = () => {
@@ -428,82 +423,52 @@ const RunButton: Component = () => {
   };
 
   return (
-    <div ref={toggleRef} style={{ position: "relative", display: "flex", "align-items": "center" }}>
-      <div style={{
-        display: "flex",
-        "align-items": "center",
-        height: "25px",
-        background: "var(--surface-3)",
-        border: "1px solid var(--border-muted)",
-        "border-radius": "var(--radius-md)",
-        overflow: "hidden",
-      }}>
-        <button
-          class="hover-tint press"
-          onclick={handleMainClick}
-          disabled={!projectPath() || (!running() && targets().length === 0) || busy()}
-          title={mainTitle()}
-          aria-label={mainTitle()}
-          style={{
-            height: "23px",
-            width: "29px",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            color: running()
-              ? "var(--status-del)"
-              : targets().length > 0
-                ? "var(--status-add)"
-                : "var(--fg-faint)",
-            cursor: !projectPath() || (!running() && targets().length === 0) || busy() ? "default" : "pointer",
-          }}
-        >
-          <div style={{ position: "relative", width: "13px", height: "13px", display: "flex", "align-items": "center", "justify-content": "center" }}>
-            <span class="icon-fade" classList={{ "icon-fade-visible": busy() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <Spinner size={12} color="var(--status-add)" />
+    <TargetButton
+      targets={targets()}
+      selectedId={preferred()?.id}
+      running={running()}
+      busy={busy()}
+      starting={starting()}
+      detecting={detecting()}
+      mainDisabled={!projectPath() || (!running() && targets().length === 0) || busy()}
+      menuDisabled={!projectPath() || running() || starting()}
+      menuOpen={menuOpen()}
+      title={mainTitle()}
+      menuTitle="Run target"
+      menuLabel="Run project"
+      detectingLabel={targets().length > 0 ? "Refreshing run targets…" : "Discovering run targets…"}
+      accent="var(--status-add)"
+      icon="play"
+      onMainClick={() => void handleMainClick()}
+      onToggleMenu={(e) => {
+        e.stopPropagation();
+        const root = rootPath();
+        if (!root || running()) return;
+        const open = !menuOpen();
+        setMenuOpen(open);
+        // Refresh on open, unless project discovery is already in flight.
+        // Device sections begin loading from the current target set and do
+        // not wait for this refresh to finish.
+        if (open && !detecting()) void loadTargets(root);
+      }}
+      onCloseMenu={() => setMenuOpen(false)}
+      onSelectTarget={(target) => void startTarget(target as RunTarget)}
+      badge={(target) => (
+        <Show when={emulatorHint(target)}>
+          {(hint) => (
+            <span style={{
+              "font-size": "10px",
+              color: "var(--fg-subtle)",
+              border: "1px solid var(--border-muted)",
+              "border-radius": "var(--radius-sm)",
+              padding: "1px 5px",
+            }}>
+              {hint()}
             </span>
-            <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && !running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <Icon name="play" size={13} />
-            </span>
-            <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <Icon name="stop" size={12} class="running-pulse" style={{ color: "var(--status-del)" }} />
-            </span>
-          </div>
-        </button>
-        <button
-          class="hover-tint press"
-          onclick={(e) => {
-            e.stopPropagation();
-            const path = projectPath();
-            if (!path || running()) return;
-            const open = !menuOpen();
-            setMenuOpen(open);
-            // Refresh on open, unless project discovery is already in flight.
-            // Device sections begin loading from the current target set and do
-            // not wait for this refresh to finish.
-            if (open && !detecting()) void loadTargets(path);
-          }}
-          disabled={!projectPath() || running() || starting()}
-          title="Run target"
-          aria-label="Choose run target"
-          style={{
-            height: "23px",
-            width: "20px",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            color: projectPath() && !running() ? "var(--fg-subtle)" : "var(--fg-faint)",
-            border: "0",
-            "border-left": "1px solid var(--border-muted)",
-            cursor: projectPath() && !running() && !starting() ? "pointer" : "default",
-          }}
-        >
-          <Icon name="chevronDown" size={10} style={{ transform: menuOpen() ? "rotate(180deg)" : "none", transition: "transform var(--dur-base) var(--ease-standard)" }} />
-        </button>
-      </div>
-
-      <Menu open={menuOpen()} onClose={() => setMenuOpen(false)} anchorRef={toggleRef} align="right" width={360}>
-        <MenuLabel>Run project</MenuLabel>
+          )}
+        </Show>
+      )}
+    >
         <Show when={hasAndroidTargets() && androidStatus()}>
           {(status) => (
             <>
@@ -732,77 +697,7 @@ const RunButton: Component = () => {
             </div>
           )}
         </Show>
-        <For each={targets()}>
-          {(target) => {
-            const selected = () => preferredTarget()?.id === target.id;
-            return (
-              <MenuItem
-                disabled={starting()}
-                onSelect={() => startTarget(target)}
-                style={{
-                  "align-items": "flex-start",
-                  background: selected() ? "var(--surface-4)" : undefined,
-                }}
-              >
-                <Icon name="play" size={13} style={{ color: selected() ? "var(--status-add)" : "var(--fg-muted)" }} />
-                <div style={{ flex: "1", "min-width": 0 }}>
-                  <div style={{
-                    display: "flex",
-                    "align-items": "center",
-                    gap: "8px",
-                    "font-size": "12.5px",
-                    color: "var(--fg-default)",
-                    "font-weight": "500",
-                  }}>
-                    <span>{shortLabel(target)}</span>
-                    <Show when={emulatorHint(target)}>
-                      {(hint) => (
-                        <span style={{
-                          "font-size": "10px",
-                          color: "var(--fg-subtle)",
-                          border: "1px solid var(--border-muted)",
-                          "border-radius": "var(--radius-sm)",
-                          padding: "1px 5px",
-                        }}>
-                          {hint()}
-                        </span>
-                      )}
-                    </Show>
-                  </div>
-                  <div style={{
-                    "font-size": "10.5px",
-                    color: "var(--fg-subtle)",
-                    "font-family": "var(--font-mono)",
-                    "margin-top": "3px",
-                    overflow: "hidden",
-                    "text-overflow": "ellipsis",
-                    "white-space": "nowrap",
-                  }}>
-                    {target.command}
-                  </div>
-                </div>
-                <Show when={selected()}>
-                  <span style={{ color: "var(--status-add)", "font-size": "12px" }}>•</span>
-                </Show>
-              </MenuItem>
-            );
-          }}
-        </For>
-        <Show when={detecting()}>
-          <div style={{
-            display: "flex",
-            "align-items": "center",
-            gap: "8px",
-            padding: "8px 10px",
-            color: "var(--fg-subtle)",
-            "font-size": "11px",
-          }}>
-            <Spinner size={12} />
-            {targets().length > 0 ? "Refreshing run targets…" : "Discovering run targets…"}
-          </div>
-        </Show>
-      </Menu>
-    </div>
+    </TargetButton>
   );
 };
 

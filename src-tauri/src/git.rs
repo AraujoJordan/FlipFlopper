@@ -105,6 +105,7 @@ pub fn get_status_v2(project_path: &str) -> Result<Vec<StatusEntry>, String> {
             "core.quotepath=false",
             "status",
             "--porcelain=v1",
+            "-uall",
             "-z",
         ],
     )?;

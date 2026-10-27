@@ -111,13 +111,17 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn root_dir() -> PathBuf {
+pub(crate) fn data_root() -> PathBuf {
     // `FLIPFLOPPER_DATA_DIR` lets tests keep their sessions out of the real store.
     let base = std::env::var_os("FLIPFLOPPER_DATA_DIR")
         .map(PathBuf::from)
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("."));
-    let dir = base.join("flipflopper").join("chat");
+    base.join("flipflopper")
+}
+
+fn root_dir() -> PathBuf {
+    let dir = data_root().join("chat");
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -133,10 +137,17 @@ fn transcript_path(id: &str) -> PathBuf {
 }
 
 fn read_index() -> Vec<SessionMeta> {
-    fs::read_to_string(index_path())
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    read_index_strict().unwrap_or_default()
+}
+
+/// Mutations must never replace an unreadable index with an empty one.
+fn read_index_strict() -> Result<Vec<SessionMeta>, String> {
+    let text = match fs::read_to_string(index_path()) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("Failed to read sessions: {error}")),
+    };
+    serde_json::from_str(&text).map_err(|error| format!("Failed to parse sessions: {error}"))
 }
 
 fn write_index(sessions: &[SessionMeta]) -> Result<(), String> {
@@ -163,7 +174,7 @@ pub fn get_session(id: &str) -> Option<SessionMeta> {
 
 pub fn insert_session(meta: SessionMeta) -> Result<(), String> {
     let _guard = INDEX_LOCK.lock().unwrap();
-    let mut sessions = read_index();
+    let mut sessions = read_index_strict()?;
     sessions.retain(|s| s.id != meta.id);
     let path=transcript_path(&meta.id);
     sessions.push(meta);
@@ -176,7 +187,7 @@ pub fn insert_session(meta: SessionMeta) -> Result<(), String> {
 /// session no longer exists (e.g. deleted while a turn was running).
 pub fn update_session(id: &str, f: impl FnOnce(&mut SessionMeta)) -> Result<Option<SessionMeta>, String> {
     let _guard = INDEX_LOCK.lock().unwrap();
-    let mut sessions = read_index();
+    let mut sessions = read_index_strict()?;
     let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
         return Ok(None);
     };
@@ -187,32 +198,32 @@ pub fn update_session(id: &str, f: impl FnOnce(&mut SessionMeta)) -> Result<Opti
 }
 
 pub fn delete_session(id: &str) -> Result<(), String> {
-    // Pasted images live in the app data dir; drop them with the session.
-    let owned: Vec<Attachment> = load_entries(id)
-        .into_iter()
-        .filter_map(|e| match e { Entry::User { attachments, .. } => Some(attachments), _ => None })
-        .flatten()
-        .collect();
-    super::attach::delete_owned(&owned);
     let _guard = INDEX_LOCK.lock().unwrap();
-    let mut sessions = read_index();
+    let mut sessions = read_index_strict()?;
     sessions.retain(|s| s.id != id);
     let mut deleted=TRANSCRIPT_LOCK.lock().unwrap();
     write_index(&sessions)?;
+    // Pasted images live in the app data dir; drop them only after the index
+    // mutation succeeds, so a malformed index leaves the session untouched.
+    let owned: Vec<Attachment> = load_entries(id)
+        .into_iter()
+        .flat_map(|e| match e { Entry::User { attachments, .. } => attachments, _ => Vec::new() })
+        .collect();
+    super::attach::delete_owned(&owned);
     let path=transcript_path(id);deleted.insert(path.clone());
     let _ = fs::remove_file(path);
     Ok(())
 }
 
-pub fn append_entry(id: &str, entry: &Entry) {
-    let Ok(mut line) = serde_json::to_string(entry) else { return };
+pub fn append_entry(id: &str, entry: &Entry) -> Result<(), String> {
+    let mut line = serde_json::to_string(entry).map_err(|e| format!("Failed to serialize transcript entry: {e}"))?;
     line.push('\n');
     let path=transcript_path(id);
     let deleted=TRANSCRIPT_LOCK.lock().unwrap();
-    if deleted.contains(&path){return;}
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = file.write_all(line.as_bytes());
-    }
+    if deleted.contains(&path){return Ok(());}
+    let mut file = OpenOptions::new().create(true).append(true).open(path)
+        .map_err(|e| format!("Failed to open transcript: {e}"))?;
+    file.write_all(line.as_bytes()).map_err(|e| format!("Failed to append transcript: {e}"))
 }
 
 /// Replace a session's transcript with `entries` (used by import).
@@ -607,8 +618,8 @@ mod tests {
             created_at: 1, updated_at: 2,
         };
         insert_session(meta).unwrap();
-        append_entry(id, &Entry::User { text: "Why does the Pineapple parser crash?".into(), agent_id: "claude".into(), ts: 5, attachments: vec![] });
-        append_entry(id, &ev(ChatEvent::Text { delta: "Because the tokenizer never sees a closing brace.".into() }));
+        append_entry(id, &Entry::User { text: "Why does the Pineapple parser crash?".into(), agent_id: "claude".into(), ts: 5, attachments: vec![] }).unwrap();
+        append_entry(id, &ev(ChatEvent::Text { delta: "Because the tokenizer never sees a closing brace.".into() })).unwrap();
 
         let hits = search("pineapple", 10);
         assert_eq!(hits.len(), 1);
@@ -618,6 +629,44 @@ mod tests {
         assert_eq!(search("CLOSING brace", 10)[0].role, "assistant");
         assert!(search("nothing like this", 10).is_empty());
         assert!(search("p", 10).is_empty(), "one-char queries are ignored");
+        let _ = fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn malformed_index_is_never_replaced_by_mutations() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-malformed-index-{}", uuid::Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let id = "00000000-0000-0000-0000-00000000bbbb";
+        let meta = SessionMeta {
+            id: id.into(), project_path: "/p".into(), cwd: "/p".into(), worktree: None,
+            title: "Keep me".into(), agent_id: "claude".into(), model: None, effort: None,
+            mode: PermissionMode::AutoEdit, title_locked: false, native_ids: HashMap::new(), acp_sessions: HashMap::new(), agent_last_entry: HashMap::new(),
+            entry_count: 0, status: "idle".into(), archived: false, pinned: false, parent_id: None,
+            created_at: 1, updated_at: 2,
+        };
+        insert_session(meta.clone()).unwrap();
+        let malformed = "{ definitely not valid json";
+        fs::write(index_path(), malformed).unwrap();
+        assert!(insert_session(meta).is_err());
+        assert!(update_session(id, |m| m.title = "Lost".into()).is_err());
+        assert!(delete_session(id).is_err());
+        assert_eq!(fs::read_to_string(index_path()).unwrap(), malformed);
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn append_reports_transcript_io_failures() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-append-io-{}", uuid::Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let id = "00000000-0000-0000-0000-00000000cccc";
+        fs::create_dir_all(transcript_path(id)).unwrap();
+        assert!(append_entry(id, &ev(ChatEvent::Text { delta: "not saved".into() })).is_err());
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
         let _ = fs::remove_dir_all(&data);
     }
 

@@ -20,7 +20,8 @@ async function loadChat(overrides = {}) {
   globalThis.document = { hasFocus: () => true };
   globalThis.requestAnimationFrame = () => 1;
   globalThis.cancelAnimationFrame = () => {};
-  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { AGENT_TUNING: {} }, "./store": { store: {} }, "./layout": { layout: {projectNames:{},projectOrder:[],hiddenProjects:[]} }, ...overrides };
+  const transcript = overrides["./transcript"] ?? await loadFrontend("../src/lib/transcript.ts", {});
+  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { AGENT_TUNING: {} }, "./store": { store: {} }, "./layout": { layout: {projectNames:{},projectOrder:[],hiddenProjects:[]} }, "./transcript": transcript, ...overrides };
   const module = new SourceTextModule(source);
   await module.link((specifier) => {
     const names = imports.get(specifier);
@@ -369,6 +370,150 @@ async function motionFixture(saved = {}) {
   return { layout, document, window, reduced, writes, dispose };
 }
 const settle = async () => { for (let i=0;i<8;i++) await Promise.resolve(); };
+
+test('transcript module is pure and chat re-exports the same reducer', async () => {
+  const transcript = await loadFrontend('../src/lib/transcript.ts', {});
+  const chat = await loadChat({ './transcript': transcript });
+  assert.equal(chat.applyEntry, transcript.applyEntry);
+  assert.equal(chat.reduceTranscript, transcript.reduceTranscript);
+  const view = transcript.reduceTranscript([
+    { kind:'user', ts:1, agent_id:'claude', text:'Legacy prompt' },
+    event({ type:'turn_started', turn_id:'turn', agent_id:'claude' },2),
+    event({ type:'thinking', delta:'Consider' },3),
+    event({ type:'text', delta:'Answer' },4),
+  ]);
+  assert.equal(view.messages[0].attachments.length, 0);
+  assert.equal(view.messages[1].blocks[0].endedAt, 4);
+  assert.equal(view.messages[1].status, 'cancelled');
+});
+
+test('diff model indexes lines and builds selected forward and reverse patches', async () => {
+  const model = await loadFrontend('../src/lib/diffModel.ts', {});
+  const file = {
+    old_path:'src/a.ts', new_path:'src/a.ts', hunks:[{
+      header:'@@ -1,2 +1,2 @@', old_start:1, new_start:1,
+      lines:[
+        { kind:'context', content:'const keep = true;', old_lineno:1, new_lineno:1 },
+        { kind:'del', content:'const oldValue = 1;', old_lineno:2, new_lineno:null },
+        { kind:'add', content:'const newValue = 2;', old_lineno:null, new_lineno:2 },
+      ],
+    }],
+  };
+  const { hunks, flat } = model.indexFileHunks(file);
+  assert.equal(flat.map((line) => line.flatIndex).join(','), '0,1,2');
+  assert.equal(model.formatLineRange(flat), 'L1–L2');
+  assert.equal(model.formatColonRange(flat.slice(1)), '2');
+  assert.equal(model.langForPath('src/a.TSX'), 'typescript');
+  assert.equal(model.basename('src/a.ts'), 'a.ts');
+  assert.equal(model.buildPatchForFile(file,hunks,new Set([2]),'forward'),
+    '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,3 @@\n const keep = true;\n const oldValue = 1;\n+const newValue = 2;\n');
+  assert.equal(model.buildPatchForFile(file,hunks,new Set([1]),'reverse'),
+    '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,3 +1,2 @@\n const keep = true;\n-const oldValue = 1;\n const newValue = 2;\n');
+  assert.equal(model.buildPatchForFile(file,hunks,null,'forward'),
+    '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n const keep = true;\n-const oldValue = 1;\n+const newValue = 2;\n');
+  assert.match(model.buildSelectionPrompt('src/a.ts',flat.slice(1),' Update it '), /```diff\n-const oldValue = 1;\n\+const newValue = 2;\n```\nUpdate it$/);
+  assert.equal(model.buildPatchForFile(file,hunks,new Set([0]),'forward'), null);
+  const renamed = { ...file, old_path:'src/before.ts', new_path:'src/after.ts' };
+  assert.match(model.buildPatchForFile(renamed,hunks,null,'reverse'), /^--- a\/src\/before\.ts\n\+\+\+ b\/src\/after\.ts\n/);
+});
+
+test('preferred targets use saved choices and retain concrete short labels', async () => {
+  const module = await loadFrontend('../src/components/TargetButton.tsx', { 'solid-js':solid });
+  const targets = [
+    { id:'dev', label:'Web - npm run dev', command:'npm run dev' },
+    { id:'test', label:'Tests', command:'npm test' },
+  ];
+  assert.equal(module.preferredTarget(targets,'test').id, 'test');
+  assert.equal(module.preferredTarget(targets,'removed').id, 'dev');
+  assert.equal(module.preferredTarget([],undefined), null);
+  assert.equal(module.shortLabel(targets[0]), 'Web');
+  assert.equal(module.shortLabel({ id:'fallback', label:'', command:'' }), 'fallback');
+});
+
+test('project string preferences preserve legacy seeding, durable hydration and writes', async () => {
+  const legacy = { 'flipflopper:run-targets':{ '/project':'legacy-run' } };
+  const durable = { 'flipflopper:run-targets':{ '/project':'durable-run' } };
+  const writes = [];
+  const module = await loadFrontend('../src/lib/store.ts', {
+    'solid-js/store':solidStore,
+    './appPrefs': {
+      readLegacyJson:(key,fallback) => ({ ...(legacy[key] ?? fallback) }),
+      readPref:async (key,fallback) => durable[key] ?? fallback,
+      writePref:(...args) => writes.push(args),
+    },
+  });
+  assert.equal(module.readRunTargets()['/project'], 'legacy-run');
+  module.writeRunTarget('/project','canonical-choice');
+  assert.equal(module.readRunTargets()['/project'], 'canonical-choice');
+  assert.equal(writes[0][0], 'flipflopper:run-targets');
+  await module.hydrateStorePreferences();
+  assert.equal(module.readRunTargets()['/project'], 'durable-run');
+  module.writeValidationTarget('/project','npm-test');
+  assert.equal(module.readValidationTargets()['/project'], 'npm-test');
+});
+
+test('branch updates ignore stale responses after the effective root changes', async () => {
+  const requests = [];
+  const module = await loadFrontend('../src/lib/store.ts', {
+    'solid-js/store':solidStore,
+    './appPrefs': { readLegacyJson:(_key,fallback) => fallback, readPref:async (_key,fallback) => fallback, writePref() {} },
+    './ipc': { getCurrentBranch:(root) => new Promise((resolve,reject) => requests.push({root,resolve,reject})) },
+  });
+  module.setStore({ currentProject:{ path:'/project', name:'project', is_git:true, has_agents_md:false }, activeCwd:'/worktree-a' });
+  const first = module.updateCurrentBranch();
+  module.setStore('activeCwd','/worktree-b');
+  const second = module.updateCurrentBranch();
+  assert.deepEqual(requests.map((request) => request.root), ['/worktree-a','/worktree-b']);
+  requests[1].resolve('branch-b');
+  await second;
+  requests[0].resolve('branch-a');
+  await first;
+  assert.equal(module.store.currentBranch, 'branch-b');
+});
+
+test('preview setup unsubscribes stale listeners and ignores stale URLs', async () => {
+  const [sessions,setSessions] = solidStore.createStore({ runSessionId:'old', runTargets:[], currentProject:null });
+  const signals = [], urlListeners = new Map(), urlDeferred = new Map(), existingDeferred = new Map(), exitDeferred = new Map();
+  const removed = [], existingReads = [];
+  const deferred = () => { let resolve; const promise = new Promise((done) => { resolve=done; }); return {promise,resolve}; };
+  for (const id of ['old','new']) { urlDeferred.set(id,deferred()); existingDeferred.set(id,deferred()); exitDeferred.set(id,deferred()); }
+  const module = await loadFrontend('../src/components/side/PreviewView.tsx', {
+    'solid-js': { ...solid, createSignal:(...args) => { const signal=solid.createSignal(...args); signals.push(signal); return signal; } },
+    '../../lib/store': { store:sessions, readRunTargets:() => ({}), setRunSessionId:(id) => setSessions('runSessionId',id) },
+    '../../lib/ipc': {
+      onPreviewUrl:(id,callback) => { urlListeners.set(id,callback); return urlDeferred.get(id).promise; },
+      getSessionUrl:(id) => { existingReads.push(id); return existingDeferred.get(id).promise; },
+      onPtyExit:(id) => exitDeferred.get(id).promise,
+    },
+    '../../lib/layout': { openSide() {} },
+    '../ui': { useValueMotion() {}, animateElement() {} },
+    '../RunButton': { default:() => null },
+    './AndroidPreview': { default:() => null },
+    './IosPreview': { default:() => null },
+    '../shell/Icon': { Icon:() => null },
+  });
+  const previousReact = globalThis.React;
+  globalThis.React = { createElement:(tag,props,...children) => ({tag,props,children}) };
+  let dispose;
+  try {
+    solid.createRoot((stop) => { dispose=stop; module.default({}); });
+    await settle();
+    setSessions('runSessionId','new');
+    urlDeferred.get('new').resolve(() => removed.push('new-url'));
+    await settle();
+    existingDeferred.get('new').resolve('http://new.test');
+    await settle();
+    exitDeferred.get('new').resolve(() => removed.push('new-exit'));
+    await settle();
+    assert.equal(signals[0][0](), 'http://new.test');
+    urlDeferred.get('old').resolve(() => removed.push('old-url'));
+    await settle();
+    assert.deepEqual(removed, ['old-url']);
+    assert.deepEqual(existingReads, ['new']);
+    urlListeners.get('old')('http://stale.test');
+    assert.equal(signals[0][0](), 'http://new.test');
+  } finally { dispose?.(); globalThis.React=previousReact; }
+});
 
 test('review panes protect conversation width across sidebar sizes and zoom', async () => {
   const f = await motionFixture({ sideWidth: 1200 });

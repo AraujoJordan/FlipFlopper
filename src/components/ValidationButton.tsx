@@ -1,5 +1,4 @@
-import { Icon } from "./shell/Icon";
-import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
+import { Component, createEffect, createSignal, onCleanup } from "solid-js";
 import {
   detectValidationTargets,
   onPtyExit,
@@ -11,13 +10,13 @@ import {
 import {
   addTerminal,
   readValidationTargets,
+  effectiveRoot,
   setValidationSessionId,
   store,
   writeValidationTarget,
 } from "../lib/store";
-import { Menu, MenuItem, MenuLabel, Spinner, toast } from "./ui";
-
-const shortLabel = (target: ValidationTarget) => target.label.split(" - ")[0] || target.id;
+import { toast } from "./ui";
+import TargetButton, { preferredTarget, shortLabel } from "./TargetButton";
 
 const categoryLabel = (category: string) => {
   switch (category) {
@@ -38,21 +37,15 @@ const ValidationButton: Component = () => {
   const [menuOpen, setMenuOpen] = createSignal(false);
   const [detecting, setDetecting] = createSignal(false);
   const [starting, setStarting] = createSignal(false);
-  let toggleRef: HTMLDivElement | undefined;
   let validationExitUnlisten: (() => void) | null = null;
   let loadSeq = 0;
 
   const projectPath = () => store.currentProject?.path ?? "";
+  const rootPath = () => effectiveRoot() ?? "";
   const running = () => store.validationSessionId !== null;
   const busy = () => detecting() || starting();
 
-  const preferredTarget = () => {
-    const list = targets();
-    if (list.length === 0) return null;
-    const path = projectPath();
-    const savedId = path ? readValidationTargets()[path] : undefined;
-    return list.find((target) => target.id === savedId) ?? list[0];
-  };
+  const preferred = () => preferredTarget(targets(), readValidationTargets()[projectPath()]);
 
   async function loadTargets(path: string) {
     const seq = ++loadSeq;
@@ -71,18 +64,18 @@ const ValidationButton: Component = () => {
   }
 
   createEffect(() => {
-    const path = projectPath();
+    const root = rootPath();
     validationExitUnlisten?.();
     validationExitUnlisten = null;
     setValidationSessionId(null);
     setMenuOpen(false);
     setTargets([]);
-    if (path) void loadTargets(path);
+    if (root) void loadTargets(root);
   });
 
   createEffect(() => {
-    const path = projectPath();
-    if (path && menuOpen()) void loadTargets(path);
+    const root = rootPath();
+    if (root && menuOpen()) void loadTargets(root);
   });
 
   onCleanup(() => {
@@ -91,14 +84,15 @@ const ValidationButton: Component = () => {
   });
 
   async function startTarget(target: ValidationTarget) {
-    const path = projectPath();
-    if (!path || starting()) return;
+    const root = rootPath();
+    const project = projectPath();
+    if (!root || !project || starting()) return;
     setMenuOpen(false);
     setStarting(true);
     void triggerHaptic("generic");
     try {
-      const sessionId = await validateProject(path, target.id);
-      writeValidationTarget(path, target.id);
+      const sessionId = await validateProject(root, target.id);
+      writeValidationTarget(project, target.id);
       addTerminal({
         sessionId,
         label: `Validate · ${shortLabel(target)}`,
@@ -140,7 +134,7 @@ const ValidationButton: Component = () => {
       await stopValidation();
       return;
     }
-    const target = preferredTarget();
+    const target = preferred();
     if (!target) return;
     await startTarget(target);
   }
@@ -148,150 +142,49 @@ const ValidationButton: Component = () => {
   const mainTitle = () => {
     if (!projectPath()) return "Open a project to validate";
     if (running()) {
-      const target = preferredTarget();
+      const target = preferred();
       return target ? `Stop ${shortLabel(target)}` : "Stop validation";
     }
     if (detecting()) return "Detecting validation targets";
-    return preferredTarget()?.label ?? "No validation target detected";
+    return preferred()?.label ?? "No validation target detected";
   };
 
   return (
-    <div ref={toggleRef} style={{ position: "relative", display: "flex", "align-items": "center" }}>
-      <div style={{
-        display: "flex",
-        "align-items": "center",
-        height: "25px",
-        background: "var(--surface-3)",
-        border: "1px solid var(--border-muted)",
-        "border-radius": "var(--radius-md)",
-        overflow: "hidden",
-      }}>
-        <button
-          class="hover-tint press"
-          onclick={handleMainClick}
-          disabled={!projectPath() || (!running() && targets().length === 0) || busy()}
-          title={mainTitle()}
-          aria-label={mainTitle()}
-          style={{
-            height: "23px",
-            width: "29px",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            color: running()
-              ? "var(--status-del)"
-              : targets().length > 0
-                ? "var(--accent)"
-                : "var(--fg-faint)",
-            cursor: !projectPath() || (!running() && targets().length === 0) || busy() ? "default" : "pointer",
-          }}
-        >
-          <div style={{ position: "relative", width: "13px", height: "13px", display: "flex", "align-items": "center", "justify-content": "center" }}>
-            <span class="icon-fade" classList={{ "icon-fade-visible": busy() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <Spinner size={12} color="var(--accent)" />
-            </span>
-            <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && !running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <Icon name="check" size={13} />
-            </span>
-            <span class="icon-fade" classList={{ "icon-fade-visible": !busy() && running() }} style={{ position: "absolute", inset: 0, display: "flex", "align-items": "center", "justify-content": "center" }}>
-              <Icon name="stop" size={12} class="running-pulse" style={{ color: "var(--status-del)" }} />
-            </span>
-          </div>
-        </button>
-        <button
-          class="hover-tint press"
-          onclick={(e) => {
-            e.stopPropagation();
-            if (projectPath() && targets().length > 0 && !running()) setMenuOpen((open) => !open);
-          }}
-          disabled={!projectPath() || targets().length === 0 || running() || starting()}
-          title="Validation target"
-          aria-label="Choose validation target"
-          style={{
-            height: "23px",
-            width: "20px",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            color: targets().length > 0 && !running() ? "var(--fg-subtle)" : "var(--fg-faint)",
-            border: "0",
-            "border-left": "1px solid var(--border-muted)",
-            cursor: projectPath() && targets().length > 0 && !running() ? "pointer" : "default",
-          }}
-        >
-          <Icon name="chevronDown" size={10} style={{ transform: menuOpen() ? "rotate(180deg)" : "none", transition: "transform var(--dur-base) var(--ease-standard)" }} />
-        </button>
-      </div>
-
-      <Menu open={menuOpen()} onClose={() => setMenuOpen(false)} anchorRef={toggleRef} align="right" width={360}>
-        <MenuLabel>Validate project</MenuLabel>
-        <For each={targets()}>
-          {(target) => {
-            const selected = () => preferredTarget()?.id === target.id;
-            return (
-              <MenuItem
-                disabled={starting()}
-                onSelect={() => startTarget(target)}
-                style={{
-                  "align-items": "flex-start",
-                  background: selected() ? "var(--surface-4)" : undefined,
-                }}
-              >
-                <Icon name="check" size={13} style={{ color: selected() ? "var(--accent)" : "var(--fg-muted)" }} />
-                <div style={{ flex: "1", "min-width": 0 }}>
-                  <div style={{
-                    display: "flex",
-                    "align-items": "center",
-                    gap: "8px",
-                    "font-size": "12.5px",
-                    color: "var(--fg-default)",
-                    "font-weight": "500",
-                  }}>
-                    <span>{shortLabel(target)}</span>
-                    <span style={{
-                      "font-size": "10px",
-                      color: "var(--fg-subtle)",
-                      border: "1px solid var(--border-muted)",
-                      "border-radius": "var(--radius-sm)",
-                      padding: "1px 5px",
-                    }}>
-                      {categoryLabel(target.category)}
-                    </span>
-                  </div>
-                  <div style={{
-                    "font-size": "10.5px",
-                    color: "var(--fg-subtle)",
-                    "font-family": "var(--font-mono)",
-                    "margin-top": "3px",
-                    overflow: "hidden",
-                    "text-overflow": "ellipsis",
-                    "white-space": "nowrap",
-                  }}>
-                    {target.command}
-                  </div>
-                </div>
-                <Show when={selected()}>
-                  <span style={{ color: "var(--accent)", "font-size": "12px" }}>•</span>
-                </Show>
-              </MenuItem>
-            );
-          }}
-        </For>
-        <Show when={detecting()}>
-          <div style={{
-            display: "flex",
-            "align-items": "center",
-            gap: "8px",
-            padding: "8px 10px",
-            color: "var(--fg-subtle)",
-            "font-size": "11px",
-          }}>
-            <Spinner size={12} />
-            Detecting
-          </div>
-        </Show>
-      </Menu>
-    </div>
+    <TargetButton
+      targets={targets()}
+      selectedId={preferred()?.id}
+      running={running()}
+      busy={busy()}
+      starting={starting()}
+      detecting={detecting()}
+      mainDisabled={!projectPath() || (!running() && targets().length === 0) || busy()}
+      menuDisabled={!projectPath() || targets().length === 0 || running() || starting()}
+      menuOpen={menuOpen()}
+      title={mainTitle()}
+      menuTitle="Validation target"
+      menuLabel="Validate project"
+      detectingLabel="Detecting"
+      accent="var(--accent)"
+      icon="check"
+      onMainClick={() => void handleMainClick()}
+      onToggleMenu={(e) => {
+        e.stopPropagation();
+        if (projectPath() && targets().length > 0 && !running()) setMenuOpen((open) => !open);
+      }}
+      onCloseMenu={() => setMenuOpen(false)}
+      onSelectTarget={(target) => void startTarget(target as ValidationTarget)}
+      badge={(target) => (
+        <span style={{
+          "font-size": "10px",
+          color: "var(--fg-subtle)",
+          border: "1px solid var(--border-muted)",
+          "border-radius": "var(--radius-sm)",
+          padding: "1px 5px",
+        }}>
+          {categoryLabel((target as ValidationTarget).category)}
+        </span>
+      )}
+    />
   );
 };
 

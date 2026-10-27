@@ -88,7 +88,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   const canCompact = () => !running() && !submitting() && nativeCommands().some((c) => c.name === "compact");
   const compactNow = () => { if (canCompact()) void submitPrompt("/agent:compact"); };
   const fmtTokens = (n: number) => n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n);
-  const projectRoot = () => effectiveRoot() ?? store.currentProject?.path ?? null;
+  const projectRoot = () => effectiveRoot();
 
   // ── Drafts follow the session ──
   let lastKey = draftKey();

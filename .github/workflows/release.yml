@@ -106,11 +106,10 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            FlipFlopper 0.17.0 adds a choreographed prompt launch-to-transcript animation
-            with per-mode Circuit tinting, unifies Android and iOS device selection across
-            Run targets and live device previews (including Xcode/KMP simulator build &
-            launch and stream auto-reconnect), and refreshes the app icon and README
-            screenshots.
+            FlipFlopper 0.18.0 refactors the ACP notification/tool pipeline into a
+            dedicated module, extracts pure transcript and diff models for easier testing,
+            and unifies Run/Validation target selection behind a shared component. The
+            chat engine also handles transcript-store failures more gracefully.
 
             Installers include the pinned Node sidecar and Claude ACP helper. Native
             Claude requires macOS 13.5+ on a Mac.

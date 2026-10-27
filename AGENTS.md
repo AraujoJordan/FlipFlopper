@@ -223,9 +223,10 @@ src/
   App.css                    theme tokens (Circuit graphite/jade and porcelain) + shell styles
   lib/ipc.ts                 typed Tauri invoke/listen wrappers (incl. chat_*)
   lib/chat.ts                single source of truth for sessions: Solid store,
-                             transcript reducer (live + loaded entries share
-                             it), subscribe/send/cancel/queue, startSessionTurn,
+                             subscribe/send/cancel/queue, startSessionTurn,
                              onTurnEnd hook, composer prefs
+  lib/transcript.ts          pure transcript view model and shared live/history reducer
+  lib/diffModel.ts           pure diff indexing, selection prompts and patch construction
   lib/store.ts               app-level state: open project, agents, terminals,
                              git refresh counters, diff review target,
                              activeCwd/worktree (effectiveRoot)
@@ -265,14 +266,15 @@ src/
                              (squash-push, conflict fix, worktree merge/discard)
     DiffPane.tsx             native unified/split diff (lazy, hosted in Changes)
     TerminalPane.tsx         xterm for shell PTYs (theme-aware)
-    RunButton / ValidationButton / BranchIndicator / ProjectPicker /
-    NewProjectWizard / SettingsPanel / ImportDialog / ShortcutHelp /
-    UpdateDialog / ui.tsx
+    RunButton / ValidationButton / TargetButton (shared target picker shell) /
+    BranchIndicator / ProjectPicker / NewProjectWizard / SettingsPanel /
+    ImportDialog / ShortcutHelp / UpdateDialog / ui.tsx
 
 src-tauri/src/
   lib.rs                     Tauri builder, command registry, native menu,
                              PTY event bridge
   chat/                      acp.rs (persistent SDK transport/pool/lifecycle),
+                             acp/live.rs (notification/tool normalization),
                              acp_types.rs (live interaction validation), import.rs (CLI session import), attach.rs
                              (attachments), mod.rs (ChatManager, send/cancel, changed-file
                              snapshots), event.rs (ChatEvent), store.rs (sessions

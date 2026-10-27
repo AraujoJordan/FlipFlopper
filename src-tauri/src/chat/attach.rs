@@ -8,21 +8,13 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use uuid::Uuid;
 use serde::Serialize;
 
-use super::store::Attachment;
+use super::store::{self, Attachment};
 
 /// Largest image returned as an inline data URL for transcript thumbnails.
 const MAX_THUMB_BYTES: u64 = 3 * 1024 * 1024;
 
-fn data_root() -> PathBuf {
-    let base = std::env::var_os("FLIPFLOPPER_DATA_DIR")
-        .map(PathBuf::from)
-        .or_else(dirs::data_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("flipflopper")
-}
-
 pub fn attachments_dir() -> PathBuf {
-    let dir = data_root().join("attachments");
+    let dir = store::data_root().join("attachments");
     let _ = fs::create_dir_all(&dir);
     dir
 }

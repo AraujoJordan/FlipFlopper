@@ -328,12 +328,30 @@ impl Builder {
                 ts,
             });
         }
+        self.trim_completed();
+    }
+
+    /// Discard oldest completed turns as conversion proceeds. Never drain the
+    /// only retained turn, even when that final turn exceeds the entry budget.
+    fn trim_completed(&mut self) {
+        while self.entries.len() > MAX_ENTRIES {
+            let mut cut = self.entries.len() - MAX_ENTRIES;
+            while cut < self.entries.len() && !matches!(self.entries[cut], Entry::User { .. }) {
+                cut += 1;
+            }
+            if cut == self.entries.len() {
+                break;
+            }
+            self.entries.drain(..cut);
+        }
     }
 
     fn user(&mut self, text: String, ts: u64) {
         let ts = self.touch(ts);
         self.close(ts);
         self.entries.push(Entry::User { text, agent_id: self.agent.clone(), ts, attachments: vec![] });
+        // A previously oversized completed turn is no longer the final turn.
+        self.trim_completed();
     }
 
     fn event(&mut self, event: ChatEvent, ts: u64) {
@@ -355,16 +373,7 @@ impl Builder {
     fn finish(mut self) -> (Vec<Entry>, u64, u64) {
         let ts = self.last_ts;
         self.close(ts);
-        let mut entries = self.entries;
-        if entries.len() > MAX_ENTRIES {
-            let mut cut = entries.len() - MAX_ENTRIES;
-            // Start on a user prompt so the kept transcript begins at a turn boundary.
-            while cut < entries.len() && !matches!(entries[cut], Entry::User { .. }) {
-                cut += 1;
-            }
-            entries.drain(..cut.min(entries.len()));
-        }
-        (entries, self.first_ts, self.last_ts)
+        (self.entries, self.first_ts, self.last_ts)
     }
 }
 
@@ -627,13 +636,36 @@ mod tests {
     #[test]
     fn long_sessions_keep_the_newest_entries_from_a_prompt() {
         let mut b = Builder::new("claude");
-        for i in 0..(MAX_ENTRIES) {
+        for i in 0..(MAX_ENTRIES + 10) {
             b.user(format!("q{i}"), 1000 + i as u64);
             b.event(ChatEvent::Text { delta: "a".into() }, 1000 + i as u64);
+            assert!(b.entries.len() <= MAX_ENTRIES + 3, "completed turns were not trimmed incrementally");
         }
         let (entries, _, _) = b.finish();
         assert!(entries.len() <= MAX_ENTRIES);
         assert!(matches!(entries[0], Entry::User { .. }));
+    }
+
+    #[test]
+    fn final_trim_preserves_one_oversized_turn() {
+        let mut b = Builder::new("claude");
+        b.user("keep this prompt".into(), 1);
+        for _ in 0..=MAX_ENTRIES {
+            b.event(ChatEvent::Text { delta: "large turn".into() }, 2);
+        }
+        let (entries, _, _) = b.finish();
+        assert!(entries.len() > MAX_ENTRIES);
+        assert!(matches!(&entries[0], Entry::User { text, .. } if text == "keep this prompt"));
+        assert!(matches!(entries.last(), Some(Entry::Event { event: ChatEvent::TurnEnded { .. }, .. })));
+
+        let mut b = Builder::new("claude");
+        b.user("old oversized turn".into(), 1);
+        for _ in 0..=MAX_ENTRIES {
+            b.event(ChatEvent::Text { delta: "large turn".into() }, 2);
+        }
+        b.user("newest prompt".into(), 3);
+        assert_eq!(b.entries.len(), 1);
+        assert!(matches!(&b.entries[0], Entry::User { text, .. } if text == "newest prompt"));
     }
 
     /// Creates a real Claude session in a temp repo, imports it, then continues

@@ -57,10 +57,6 @@ pub struct Invocation {
 
 pub trait Parser: Send {
     fn parse_line(&mut self, line: &str) -> Vec<ChatEvent>;
-    /// Called once at EOF to flush buffered state.
-    fn finish(&mut self) -> Vec<ChatEvent> {
-        Vec::new()
-    }
 }
 
 /// Agents that can run as a chat session.

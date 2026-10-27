@@ -130,13 +130,35 @@ pub struct SendArgs {
 /// engine can run (and be tested) without a Tauri app handle.
 pub type Emitter = Arc<dyn Fn(&str, &Entry) + Send + Sync>;
 
-fn emit_entry(app: &Emitter, session_id: &str, entry: &Entry) {
-    store::append_entry(session_id, entry);
+fn emit_entry(app: &Emitter, session_id: &str, entry: &Entry) -> Result<(), String> {
+    store::append_entry(session_id, entry)?;
     app(session_id, entry);
+    Ok(())
 }
 
-fn emit_event(app: &Emitter, session_id: &str, event: ChatEvent) {
-    emit_entry(app, session_id, &Entry::Event { event, ts: store::now_ms() });
+fn emit_event(app: &Emitter, session_id: &str, event: ChatEvent) -> Result<(), String> {
+    emit_entry(app, session_id, &Entry::Event { event, ts: store::now_ms() })
+}
+
+/// Persist streaming events when possible, but keep the turn usable when the
+/// transcript becomes unwritable. Only the first failure is shown to the user.
+fn emit_stream_event(app: &Emitter, session_id: &str, event: ChatEvent, append_failed: &mut bool) -> bool {
+    let entry = Entry::Event { event, ts: store::now_ms() };
+    let result = store::append_entry(session_id, &entry);
+    app(session_id, &entry);
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            if !*append_failed {
+                *append_failed = true;
+                app(session_id, &Entry::Event {
+                    event: ChatEvent::Error { message: format!("Couldn't save the transcript: {error}") },
+                    ts: store::now_ms(),
+                });
+            }
+            false
+        }
+    }
 }
 
 pub fn create_session(args: NewSession) -> Result<SessionMeta, String> {
@@ -418,7 +440,7 @@ impl ChatManager {
 
         let session_id = meta.id.clone();
         let mut count = entries.len();
-        let _ = store::update_session(&session_id, |m| {
+        if let Err(error) = store::update_session(&session_id, |m| {
             m.status = "running".into();
             m.agent_id = args.agent_id.clone();
             m.model = args.model.clone();
@@ -427,33 +449,53 @@ impl ChatManager {
             if m.title.is_empty() {
                 m.title = first_line(&prompt, 60);
             }
-        });
+        }) {
+            cancelled.store(true, Ordering::SeqCst);
+            kill_tree(child.id());
+            let _ = child.wait();
+            self.running.lock().unwrap().remove(&session_id);
+            return Err(error);
+        }
 
         // Transcript preamble is emitted before the thread starts so the UI
         // sees the user message and divider immediately.
-        let ts = store::now_ms();
-        if flipped {
-            emit_entry(&app, &session_id, &Entry::Divider {
-                from: meta.agent_id.clone(),
-                to: args.agent_id.clone(),
+        let preamble = (|| -> Result<(), String> {
+            let ts = store::now_ms();
+            if flipped {
+                emit_entry(&app, &session_id, &Entry::Divider {
+                    from: meta.agent_id.clone(),
+                    to: args.agent_id.clone(),
+                    ts,
+                })?;
+                count += 1;
+            }
+            emit_entry(&app, &session_id, &Entry::User {
+                text: prompt.clone(),
+                agent_id: args.agent_id.clone(),
                 ts,
-            });
+                attachments: args.attachments.clone(),
+            })?;
             count += 1;
+            emit_event(&app, &session_id, ChatEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                agent_id: args.agent_id.clone(),
+            })?;
+            count += 1;
+            emit_event(&app, &session_id, ChatEvent::RuntimeUpdated { state: self.runtime_state(&session_id) })?;
+            count += 1;
+            Ok(())
+        })();
+        if let Err(error) = preamble {
+            cancelled.store(true, Ordering::SeqCst);
+            kill_tree(child.id());
+            let _ = child.wait();
+            self.running.lock().unwrap().remove(&session_id);
+            let _ = store::update_session(&session_id, |m| {
+                m.status = "error".into();
+                m.entry_count = count;
+            });
+            return Err(error);
         }
-        emit_entry(&app, &session_id, &Entry::User {
-            text: prompt.clone(),
-            agent_id: args.agent_id.clone(),
-            ts,
-            attachments: args.attachments.clone(),
-        });
-        count += 1;
-        emit_event(&app, &session_id, ChatEvent::TurnStarted {
-            turn_id: turn_id.clone(),
-            agent_id: args.agent_id.clone(),
-        });
-        count += 1;
-        emit_event(&app, &session_id, ChatEvent::RuntimeUpdated { state: self.runtime_state(&session_id) });
-        count += 1;
 
         let manager = Arc::clone(self);
         let agent_id = args.agent_id.clone();
@@ -487,20 +529,23 @@ impl ChatManager {
 
             let mut native_id: Option<String> = None;
             let mut saw_error = false;
+            let mut append_failed = false;
             let mut pending: Vec<ChatEvent> = Vec::new();
 
             let handle = |events: Vec<ChatEvent>,
                               count: &mut usize,
                               native_id: &mut Option<String>,
-                              saw_error: &mut bool| {
+                              saw_error: &mut bool,
+                              append_failed: &mut bool| {
                 for ev in events {
                     match &ev {
                         ChatEvent::NativeSession { id } => *native_id = Some(id.clone()),
                         ChatEvent::Error { .. } => *saw_error = true,
                         _ => {}
                     }
-                    emit_event(&app, &session_id, ev);
-                    *count += 1;
+                    if emit_stream_event(&app, &session_id, ev, append_failed) {
+                        *count += 1;
+                    }
                 }
             };
 
@@ -515,12 +560,11 @@ impl ChatManager {
                             let line = String::from_utf8_lossy(&raw);
                             let events = parser.parse_line(line.trim_end_matches(['\n', '\r']));
                             pending.extend(events);
-                            handle(std::mem::take(&mut pending), &mut count, &mut native_id, &mut saw_error);
+                            handle(std::mem::take(&mut pending), &mut count, &mut native_id, &mut saw_error, &mut append_failed);
                         }
                     }
                 }
             }
-            handle(parser.finish(), &mut count, &mut native_id, &mut saw_error);
 
             let exit = child.wait();
             let stderr_text = stderr_handle
@@ -552,17 +596,21 @@ impl ChatManager {
                 } else {
                     tail
                 };
-                emit_event(&app, &session_id, ChatEvent::Error { message });
-                count += 1;
+                if emit_stream_event(&app, &session_id, ChatEvent::Error { message }, &mut append_failed) {
+                    count += 1;
+                }
             }
 
             let changed_files = diff_changes(&before, &snapshot_changes(&cwd));
-            emit_event(&app, &session_id, ChatEvent::TurnEnded {
-                turn_id: turn.clone(),
-                status,
-                changed_files,
-            });
-            count += 1;
+            let ended = Entry::Event { event: ChatEvent::TurnEnded { turn_id: turn.clone(), status, changed_files }, ts: store::now_ms() };
+            if let Err(error) = store::append_entry(&session_id, &ended) {
+                if !append_failed {
+                    app(&session_id, &Entry::Event { event: ChatEvent::Error { message: format!("Couldn't save the transcript: {error}") }, ts: store::now_ms() });
+                }
+            } else {
+                count += 1;
+            }
+            app(&session_id, &ended);
 
             let _ = store::update_session(&session_id, |m| {
                 m.status = if status == TurnStatus::Error { "error".into() } else { "idle".into() };
@@ -616,17 +664,31 @@ impl ChatManager {
             m.model = args.model.clone(); m.effort = args.effort.clone(); m.mode = args.mode;
             if m.title.is_empty() { m.title = first_line(&prompt, 60); }
         }) { self.running.lock().unwrap().remove(&meta.id); return Err(error); }
-        let ts = store::now_ms();
-        if flipped {
-            emit_entry(&app, &meta.id, &Entry::Divider { from: meta.agent_id.clone(), to: args.agent_id.clone(), ts }); count += 1;
+        let preamble = (|| -> Result<(), String> {
+            let ts = store::now_ms();
+            if flipped {
+                emit_entry(&app, &meta.id, &Entry::Divider { from: meta.agent_id.clone(), to: args.agent_id.clone(), ts })?;
+                count += 1;
+            }
+            emit_entry(&app, &meta.id, &Entry::User { text: prompt, agent_id: args.agent_id.clone(), ts, attachments: args.attachments.clone() })?;
+            count += 1;
+            emit_event(&app, &meta.id, ChatEvent::TurnStarted { turn_id: turn_id.clone(), agent_id: args.agent_id.clone() })?;
+            count += 1;
+            emit_event(&app, &meta.id, ChatEvent::NativeSession { id: native_id })?;
+            count += 1;
+            Ok(())
+        })();
+        if let Err(error) = preamble {
+            connection.close();
+            self.running.lock().unwrap().remove(&meta.id);
+            let _ = store::update_session(&meta.id, |m| { m.status = "error".into(); m.entry_count = count; });
+            return Err(error);
         }
-        emit_entry(&app, &meta.id, &Entry::User { text: prompt, agent_id: args.agent_id.clone(), ts, attachments: args.attachments.clone() }); count += 1;
-        emit_event(&app, &meta.id, ChatEvent::TurnStarted { turn_id: turn_id.clone(), agent_id: args.agent_id.clone() }); count += 1;
-        emit_event(&app, &meta.id, ChatEvent::NativeSession { id: native_id }); count += 1;
         let before = snapshot_changes(&meta.cwd);
         let received = connection.prompt(turn_id.clone(), full_prompt, args.attachments);
         let manager = self.clone(); let turn = turn_id.clone();
         std::thread::spawn(move || {
+            let mut append_failed = false;
             let result = match received {
                 Err(e) => Err(e),
                 Ok(events) => {
@@ -638,7 +700,7 @@ impl ChatManager {
                                     let title = title.clone();
                                     let _ = store::update_session(&meta.id, |m| if !m.title_locked && !title.trim().is_empty() { m.title = title; });
                                 }
-                                emit_event(&app, &meta.id, event); count += 1;
+                                if emit_stream_event(&app, &meta.id, event, &mut append_failed) { count += 1; }
                             }
                             acp::Message::Finished(outcome) => { result = outcome; break; }
                         }
@@ -650,18 +712,28 @@ impl ChatManager {
             let status = if cancelled.load(Ordering::SeqCst) { TurnStatus::Cancelled } else {
                 match result {
                     Ok(status) => status,
-                    Err(message) => { emit_event(&app, &meta.id, ChatEvent::Error { message }); count += 1; TurnStatus::Error }
+                    Err(message) => {
+                        if emit_stream_event(&app, &meta.id, ChatEvent::Error { message }, &mut append_failed) { count += 1; }
+                        TurnStatus::Error
+                    }
                 }
             };
             let changed_files = diff_changes(&before, &snapshot_changes(&meta.cwd));
-            count += 1;
+            let ended = Entry::Event { event: ChatEvent::TurnEnded { turn_id: turn, status, changed_files }, ts: store::now_ms() };
+            if let Err(error) = store::append_entry(&meta.id, &ended) {
+                if !append_failed {
+                    app(&meta.id, &Entry::Event { event: ChatEvent::Error { message: format!("Couldn't save the transcript: {error}") }, ts: store::now_ms() });
+                }
+            } else {
+                count += 1;
+            }
             let _ = store::update_session(&meta.id, |m| {
                 m.status = if status == TurnStatus::Error { "error".into() } else { "idle".into() };
                 m.entry_count = count; m.agent_last_entry.insert(args.agent_id, count); m.updated_at = store::now_ms();
             });
             // Release before TurnEnded: queued follow-ups can start immediately.
             manager.running.lock().unwrap().remove(&meta.id);
-            emit_event(&app, &meta.id, ChatEvent::TurnEnded { turn_id: turn, status, changed_files });
+            app(&meta.id, &ended);
         });
         Ok(turn_id)
     }
@@ -678,8 +750,8 @@ pub fn recover_interrupted_sessions() {
         if let Some(turn_id) = turn {
             let ended = entries.iter().rev().take_while(|e| !matches!(e, Entry::Event {event: ChatEvent::TurnStarted {..},..})).any(|e| matches!(e, Entry::Event {event:ChatEvent::TurnEnded {..},..}));
             if !ended {
-                store::append_entry(&meta.id, &Entry::Event { event: ChatEvent::Error { message: "The application closed during this turn. Continue the conversation to resume its native session.".into() }, ts: store::now_ms() });
-                store::append_entry(&meta.id, &Entry::Event { event: ChatEvent::TurnEnded { turn_id, status: TurnStatus::Cancelled, changed_files: Vec::new() }, ts: store::now_ms() });
+                let _ = store::append_entry(&meta.id, &Entry::Event { event: ChatEvent::Error { message: "The application closed during this turn. Continue the conversation to resume its native session.".into() }, ts: store::now_ms() });
+                let _ = store::append_entry(&meta.id, &Entry::Event { event: ChatEvent::TurnEnded { turn_id, status: TurnStatus::Cancelled, changed_files: Vec::new() }, ts: store::now_ms() });
             }
         }
         let count = store::load_entries(&meta.id).len();
@@ -709,19 +781,17 @@ type Snapshot = HashMap<String, (String, u64, u64)>;
 /// `path → (status, mtime_ms, len)` for everything git reports as dirty.
 fn snapshot_changes(cwd: &str) -> Snapshot {
     let mut snap = Snapshot::new();
-    let Ok(out) = crate::git::git(cwd, &["status", "--porcelain", "-uall"]) else {
+    let Ok(entries) = crate::git::get_status_v2(cwd) else {
         return snap;
     };
-    for line in out.lines() {
-        // `git()` trims its output, so the first line may have lost its
-        // leading space; split on whitespace rather than fixed columns.
-        let line = line.trim_start();
-        let Some((status, rest)) = line.split_once(char::is_whitespace) else { continue };
-        let path = rest.trim().rsplit(" -> ").next().unwrap_or(rest).trim_matches('"');
-        if path.is_empty() {
-            continue;
-        }
-        let (mtime, len) = std::fs::metadata(Path::new(cwd).join(path))
+    for entry in entries {
+        let path = entry.path;
+        let status = if entry.index_status == "?" && entry.worktree_status == "?" {
+            "??".into()
+        } else {
+            format!("{}{}", entry.index_status, entry.worktree_status).trim().to_string()
+        };
+        let (mtime, len) = std::fs::metadata(Path::new(cwd).join(&path))
             .map(|m| {
                 let mtime = m
                     .modified()
@@ -732,7 +802,7 @@ fn snapshot_changes(cwd: &str) -> Snapshot {
                 (mtime, m.len())
             })
             .unwrap_or((0, 0));
-        snap.insert(path.to_string(), (status.to_string(), mtime, len));
+        snap.insert(path, (status, mtime, len));
     }
     snap
 }
@@ -799,7 +869,7 @@ mod tests {
         let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,parent_id:None,title:None}).unwrap();
         store::update_session(&meta.id,|m|m.status="running".into()).unwrap();
         let started=Entry::Event {event:ChatEvent::TurnStarted {turn_id:"interrupted".into(),agent_id:"claude".into()},ts:1};
-        store::append_entry(&meta.id,&started);
+        store::append_entry(&meta.id,&started).unwrap();
         recover_interrupted_sessions();recover_interrupted_sessions();
         let entries=store::load_entries(&meta.id);
         assert_eq!(entries.iter().filter(|e|matches!(e,Entry::Event {event:ChatEvent::TurnEnded {status:TurnStatus::Cancelled,..},..})).count(),1);
@@ -807,7 +877,7 @@ mod tests {
         // Old stored metadata must migrate additively.
         let mut old=serde_json::to_value(&meta).unwrap();old.as_object_mut().unwrap().remove("acp_sessions");
         assert!(serde_json::from_value::<SessionMeta>(old).unwrap().acp_sessions.is_empty());
-        store::delete_session(&meta.id).unwrap();store::append_entry(&meta.id,&started);
+        store::delete_session(&meta.id).unwrap();store::append_entry(&meta.id,&started).unwrap();
         assert!(store::load_entries(&meta.id).is_empty());
         assert!(!data.join("flipflopper/chat").join(format!("{}.jsonl",meta.id)).exists());
         match previous {Some(value)=>std::env::set_var("FLIPFLOPPER_DATA_DIR",value),None=>std::env::remove_var("FLIPFLOPPER_DATA_DIR")}
@@ -822,7 +892,7 @@ mod tests {
         std::env::set_var("FLIPFLOPPER_DATA_DIR",&data);
         let manager=ChatManager::default();
         let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,parent_id:None,title:Some("Fix bug".into())}).unwrap();
-        store::append_entry(&meta.id,&Entry::User {text:"hi".into(),agent_id:"claude".into(),ts:1,attachments:vec![]});
+        store::append_entry(&meta.id,&Entry::User {text:"hi".into(),agent_id:"claude".into(),ts:1,attachments:vec![]}).unwrap();
         store::update_session(&meta.id,|m|{m.native_ids.insert("claude".into(),"native-1".into());m.entry_count=1;}).unwrap();
 
         let result=manager.clear_session(&meta.id).unwrap();
@@ -841,6 +911,63 @@ mod tests {
 
         match previous {Some(value)=>std::env::set_var("FLIPFLOPPER_DATA_DIR",value),None=>std::env::remove_var("FLIPFLOPPER_DATA_DIR")}
         let _=std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn streaming_append_failure_emits_one_visible_error() {
+        let _env = store::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-stream-append-{}", Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let id = "00000000-0000-0000-0000-00000000dddd";
+        std::fs::create_dir_all(data.join("flipflopper/chat").join(format!("{id}.jsonl"))).unwrap();
+        let entries = Arc::new(Mutex::new(Vec::new()));
+        let captured = entries.clone();
+        let app: Emitter = Arc::new(move |_, entry| captured.lock().unwrap().push(entry.clone()));
+        let mut failed = false;
+        let mut count = 0;
+        for delta in ["first", "second"] {
+            if emit_stream_event(&app, id, ChatEvent::Text { delta: delta.into() }, &mut failed) {
+                count += 1;
+            }
+        }
+        let entries = entries.lock().unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(&entries[0], Entry::Event { event: ChatEvent::Text { delta }, .. } if delta == "first"));
+        assert!(matches!(&entries[1], Entry::Event { event: ChatEvent::Error { message }, .. } if message.contains("save the transcript")));
+        assert!(matches!(&entries[2], Entry::Event { event: ChatEvent::Text { delta }, .. } if delta == "second"));
+        drop(entries);
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn snapshots_preserve_special_paths_and_rename_destinations() {
+        let repo = std::env::temp_dir().join(format!("ff-snapshot-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "snapshot@example.invalid"]);
+        git(&["config", "user.name", "Snapshot"]);
+        let old = "old \"name\".txt";
+        let renamed = "new -> [x]\n.txt";
+        let untracked = "dir with spaces/quo\"te\nΩ.txt";
+        std::fs::write(repo.join(old), "rename me").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+        git(&["mv", old, renamed]);
+        std::fs::create_dir(repo.join("dir with spaces")).unwrap();
+        std::fs::write(repo.join(untracked), "special").unwrap();
+        let snapshot = snapshot_changes(repo.to_str().unwrap());
+        assert_eq!(snapshot.get(renamed).map(|v| v.0.as_str()), Some("R"));
+        assert_eq!(snapshot.get(renamed).map(|v| v.2), Some(9));
+        assert_eq!(snapshot.get(untracked).map(|v| v.0.as_str()), Some("??"));
+        assert!(!snapshot.contains_key(old));
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     fn snap(items: &[(&str, &str, u64)]) -> Snapshot {

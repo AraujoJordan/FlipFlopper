@@ -1,5 +1,4 @@
-//! Claude Code `--output-format stream-json` (also used for agy / qwen, which
-//! mirror its schema).
+//! Claude Code stream-json schema used for session imports and Qwen.
 
 use serde_json::Value;
 

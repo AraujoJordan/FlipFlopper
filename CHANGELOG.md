@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.18.0 - 2026-10-27
+
+### Added
+
+- **ACP notification and tool normalization** moved into a dedicated `chat/acp/live.rs` module, separating persistent ACP lifecycle handling from the headless chat engine.
+- **Pure transcript view model** extracted to `lib/transcript.ts`: the live/history reducer and message-block types now live independently of the chat store.
+- **Pure diff model** extracted to `lib/diffModel.ts`: unified/split diff indexing, selection prompts and patch construction are no longer tied to `DiffPane`.
+- **Shared `TargetButton` component** for Run and Validation targets, consolidating target selection, saved preferences and busy states in one place.
+
+### Changed
+
+- The chat engine now propagates transcript-store write failures and cancels the turn cleanly when the preamble or session metadata cannot be persisted.
+- Agent version detection resolves the launch binary once and skips version probes when the CLI is not installed.
+- Ollama one-shot output consistently prefers stderr diagnostics on failure and surfaces empty-output errors.
+- CLI session import and attachment snapshots handle edge cases around missing transcripts and native IDs more gracefully.
+
 ## 0.17.0 - 2026-10-26
 
 ### Added

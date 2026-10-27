@@ -120,67 +120,46 @@ export function effectiveRoot(): string | null {
 
 // ── Per-project remembered choices ───────────────────────────────────────────
 
-const RUN_TARGET_KEY = "flipflopper:run-targets";
-const VALIDATION_TARGET_KEY = "flipflopper:validation-targets";
-const ANDROID_DEVICE_KEY = "flipflopper:android-devices";
-const IOS_SIMULATOR_KEY = "flipflopper:ios-simulators";
-
-const runTargetsCache = readLegacyJson<Record<string, string>>(RUN_TARGET_KEY, {});
-const validationTargetsCache = readLegacyJson<Record<string, string>>(VALIDATION_TARGET_KEY, {});
-const androidDevicesCache = readLegacyJson<Record<string, string>>(ANDROID_DEVICE_KEY, {});
-const iosSimulatorsCache = readLegacyJson<Record<string, string>>(IOS_SIMULATOR_KEY, {});
-
-export function readRunTargets(): Record<string, string> {
-  return runTargetsCache;
+function projectStringPreferences(key: string) {
+  // Seed synchronously from legacy localStorage so the first paint doesn't wait
+  // on the pref store, then hydrate this same object with its durable values.
+  const cache = readLegacyJson<Record<string, string>>(key, {});
+  return {
+    read: () => cache,
+    write(projectPath: string, value: string) {
+      cache[projectPath] = value;
+      writePref(key, cache);
+    },
+    async hydrate() {
+      Object.assign(cache, await readPref(key, cache, () => cache));
+    },
+  };
 }
 
-export function writeRunTarget(projectPath: string, targetId: string) {
-  runTargetsCache[projectPath] = targetId;
-  writePref(RUN_TARGET_KEY, runTargetsCache);
-}
+const runTargetPrefs = projectStringPreferences("flipflopper:run-targets");
+const validationTargetPrefs = projectStringPreferences("flipflopper:validation-targets");
+const androidDevicePrefs = projectStringPreferences("flipflopper:android-devices");
+const iosSimulatorPrefs = projectStringPreferences("flipflopper:ios-simulators");
 
-export function readValidationTargets(): Record<string, string> {
-  return validationTargetsCache;
-}
-
-export function writeValidationTarget(projectPath: string, targetId: string) {
-  validationTargetsCache[projectPath] = targetId;
-  writePref(VALIDATION_TARGET_KEY, validationTargetsCache);
-}
-
-export function readAndroidDevices(): Record<string, string> {
-  return androidDevicesCache;
-}
-
-export function writeAndroidDevice(projectPath: string, serial: string) {
-  androidDevicesCache[projectPath] = serial;
-  writePref(ANDROID_DEVICE_KEY, androidDevicesCache);
-}
-
-export function readIosSimulators(): Record<string, string> {
-  return iosSimulatorsCache;
-}
-
+export const readRunTargets = runTargetPrefs.read;
+export const writeRunTarget = runTargetPrefs.write;
+export const readValidationTargets = validationTargetPrefs.read;
+export const writeValidationTarget = validationTargetPrefs.write;
+export const readAndroidDevices = androidDevicePrefs.read;
+export const writeAndroidDevice = androidDevicePrefs.write;
+export const readIosSimulators = iosSimulatorPrefs.read;
 /** The iOS device (simulator udid) Run and the Preview tab share per project. */
-export function writeIosSimulator(projectPath: string, udid: string) {
-  iosSimulatorsCache[projectPath] = udid;
-  writePref(IOS_SIMULATOR_KEY, iosSimulatorsCache);
-}
+export const writeIosSimulator = iosSimulatorPrefs.write;
 
-/** Load durable copies of the caches above (they are seeded synchronously from
- *  legacy localStorage so the first paint doesn't wait on the pref store). */
+/** Load durable copies of the project preferences and viewed-file state. */
 export async function hydrateStorePreferences() {
-  const [runTargets, validationTargets, androidDevices, iosSimulators, viewedFiles] = await Promise.all([
-    readPref(RUN_TARGET_KEY, runTargetsCache, () => runTargetsCache),
-    readPref(VALIDATION_TARGET_KEY, validationTargetsCache, () => validationTargetsCache),
-    readPref(ANDROID_DEVICE_KEY, androidDevicesCache, () => androidDevicesCache),
-    readPref(IOS_SIMULATOR_KEY, iosSimulatorsCache, () => iosSimulatorsCache),
+  const [, , , , viewedFiles] = await Promise.all([
+    runTargetPrefs.hydrate(),
+    validationTargetPrefs.hydrate(),
+    androidDevicePrefs.hydrate(),
+    iosSimulatorPrefs.hydrate(),
     readPref(VIEWED_FILES_KEY, viewedFilesCache, () => viewedFilesCache),
   ]);
-  Object.assign(runTargetsCache, runTargets);
-  Object.assign(validationTargetsCache, validationTargets);
-  Object.assign(androidDevicesCache, androidDevices);
-  Object.assign(iosSimulatorsCache, iosSimulators);
   Object.assign(viewedFilesCache, viewedFiles);
   setStore("viewedFiles", { ...viewedFilesCache });
 }
@@ -305,12 +284,6 @@ export function setFileViewed(path: string, viewed: boolean, rev?: string, diffS
   writePref(VIEWED_FILES_KEY, viewedFilesCache);
 }
 
-export function toggleFileViewed(path: string, rev?: string, diffSig?: string): boolean {
-  const next = !isFileViewed(path, rev, diffSig);
-  setFileViewed(path, next, rev, diffSig);
-  return next;
-}
-
 export function addReviewComment(draft: Omit<ReviewCommentDraft, "id">): ReviewCommentDraft {
   const item: ReviewCommentDraft = {
     ...draft,
@@ -371,7 +344,9 @@ export function bumpGitStatus() {
 
 /** Fetch the current git branch and update the store. Empty string means
  *  "no project" or "couldn't determine" — never a lie about being on main. */
+let branchRequestSeq = 0;
 export async function updateCurrentBranch() {
+  const seq = ++branchRequestSeq;
   const projectPath = effectiveRoot();
   if (!projectPath) {
     setStore("currentBranch", "");
@@ -379,8 +354,8 @@ export async function updateCurrentBranch() {
   }
   try {
     const branchName = await getCurrentBranch(projectPath);
-    setStore("currentBranch", branchName || "");
+    if (seq === branchRequestSeq && effectiveRoot() === projectPath) setStore("currentBranch", branchName || "");
   } catch {
-    setStore("currentBranch", "");
+    if (seq === branchRequestSeq && effectiveRoot() === projectPath) setStore("currentBranch", "");
   }
 }

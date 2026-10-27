@@ -16,26 +16,36 @@ const PreviewView: Component = () => {
   const [nonce, setNonce] = createSignal(0);
   let unlistenUrl: (() => void) | null = null;
   let unlistenExit: (() => void) | null = null;
+  let setupSeq = 0;
 
   const clear = () => {
     unlistenUrl?.(); unlistenUrl = null;
     unlistenExit?.(); unlistenExit = null;
   };
-  onCleanup(clear);
+  onCleanup(() => { setupSeq++; clear(); });
 
   createEffect(on(() => store.runSessionId, (sessionId) => {
+    const seq = ++setupSeq;
     clear();
     setUrl(null);
     if (!sessionId) return;
     void (async () => {
-      unlistenUrl = await onPreviewUrl(sessionId, (u) => setUrl(u));
+      const offUrl = await onPreviewUrl(sessionId, (u) => {
+        if (seq === setupSeq && store.runSessionId === sessionId) setUrl(u);
+      });
+      if (seq !== setupSeq) { offUrl(); return; }
+      unlistenUrl = offUrl;
       // The URL may have been printed before we subscribed.
       const existing = await getSessionUrl(sessionId).catch(() => null);
+      if (seq !== setupSeq) return;
       if (existing) setUrl(existing);
-      unlistenExit = await onPtyExit(sessionId, () => {
+      const offExit = await onPtyExit(sessionId, () => {
+        if (seq !== setupSeq) return;
         if (store.runSessionId === sessionId) setRunSessionId(null);
         setUrl(null);
       });
+      if (seq !== setupSeq) { offExit(); return; }
+      unlistenExit = offExit;
     })();
   }));
 

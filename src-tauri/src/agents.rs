@@ -158,20 +158,7 @@ pub static AGENTS: &[AgentDef] = &[
     },
 ];
 
-/// Resolve the actual binary path for an agent, trying primary + aliases.
-fn resolve_binary(def: &AgentDef) -> Option<String> {
-    if let Some(p) = resolve_executable(def.binary) {
-        return Some(p.to_string_lossy().to_string());
-    }
-    for alias in def.aliases {
-        if let Some(p) = resolve_executable(alias) {
-            return Some(p.to_string_lossy().to_string());
-        }
-    }
-    None
-}
-
-/// Return the binary to actually invoke (primary or first alias found).
+/// Resolve the binary to actually invoke (primary or first alias found).
 pub fn launch_binary(def: &AgentDef) -> Option<String> {
     if let Some(p) = resolve_executable(def.binary) {
         return Some(p.to_string_lossy().to_string());
@@ -222,11 +209,10 @@ pub fn list_agents(include_versions: bool) -> Vec<AgentInfo> {
             .iter()
             .map(|def| {
                 s.spawn(move || {
-                    let binary_path = resolve_binary(def);
+                    let binary_path = launch_binary(def);
                     let installed = binary_path.is_some();
-                    let version = if installed && include_versions {
-                        let bin = launch_binary(def).unwrap_or_default();
-                        get_version(def, &bin)
+                    let version = if include_versions {
+                        binary_path.as_deref().and_then(|binary| get_version(def, binary))
                     } else {
                         None
                     };
@@ -256,7 +242,7 @@ pub fn find_agent(id: &str) -> Option<&'static AgentDef> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cheapest_model, clean_explanation, find_agent, parse_ollama_list, strip_ansi};
+    use super::{cheapest_model, clean_explanation, find_agent, one_shot_output, parse_ollama_list, strip_ansi};
 
     #[test]
     fn cursor_uses_unambiguous_binary() {
@@ -275,6 +261,14 @@ mod tests {
     #[test]
     fn strips_ansi_sequences() {
         assert_eq!(strip_ansi("\u{1b}[?25lhello\u{1b}[0m"), "hello");
+    }
+
+    #[test]
+    fn one_shot_output_requires_a_successful_exit() {
+        assert_eq!(one_shot_output(true, "answer".into(), String::new(), "empty".into()).unwrap(), "answer");
+        assert_eq!(one_shot_output(false, "misleading stdout".into(), "failed".into(), "empty".into()).unwrap_err(), "failed");
+        assert_eq!(one_shot_output(false, "misleading stdout".into(), String::new(), "empty".into()).unwrap_err(), "empty");
+        assert_eq!(one_shot_output(true, String::new(), String::new(), "empty".into()).unwrap_err(), "empty");
     }
 
     #[test]
@@ -384,6 +378,18 @@ pub async fn list_ollama_models() -> Vec<String> {
     }
 }
 
+/// Interpret a completed one-shot process. Stdout is an answer only after a
+/// successful exit; otherwise prefer the CLI's diagnostic on stderr.
+fn one_shot_output(success: bool, stdout: String, stderr: String, empty_error: String) -> Result<String, String> {
+    if success && !stdout.is_empty() {
+        Ok(stdout)
+    } else if stderr.is_empty() {
+        Err(empty_error)
+    } else {
+        Err(stderr)
+    }
+}
+
 /// One-shot prompt to a local Ollama model through its CLI.
 pub async fn run_ollama(model: &str, prompt: &str) -> Result<String, String> {
     let binary = resolve_executable("ollama")
@@ -403,15 +409,8 @@ pub async fn run_ollama(model: &str, prompt: &str) -> Result<String, String> {
         .map_err(|_| format!("Ollama model {model} timed out."))?
         .map_err(|e| format!("Ollama exited with an error: {e}"))?;
     let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout)).trim().to_string();
-    if output.status.success() && !stdout.is_empty() {
-        return Ok(stdout);
-    }
     let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr)).trim().to_string();
-    Err(if stderr.is_empty() {
-        format!("Ollama model {model} produced no output.")
-    } else {
-        stderr
-    })
+    one_shot_output(output.status.success(), stdout, stderr, format!("Ollama model {model} produced no output."))
 }
 
 /// Run `def`'s non-interactive print/exec mode with `prompt` and capture its
@@ -465,13 +464,6 @@ pub async fn run_headless_with_model(
         .map_err(|e| format!("{} exited with an error: {e}", def.name))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return Ok(stdout);
-    }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(if stderr.is_empty() {
-        format!("{} produced no output.", def.name)
-    } else {
-        stderr
-    })
+    one_shot_output(output.status.success(), stdout, stderr, format!("{} produced no output.", def.name))
 }
