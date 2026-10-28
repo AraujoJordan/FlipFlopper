@@ -32,7 +32,7 @@ pub struct CommitResult {
 //     care about that distinction (review.rs) must not treat it as an error.
 // ────────────────────────────────────────────────
 
-fn git_output(project_path: &str, args: &[&str]) -> Result<std::process::Output, String> {
+pub(crate) fn git_output(project_path: &str, args: &[&str]) -> Result<std::process::Output, String> {
     Command::new("git")
         .args(args)
         .current_dir(project_path)

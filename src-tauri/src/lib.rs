@@ -1588,6 +1588,34 @@ async fn get_review_diff(
     run_blocking(move || review::get_review_diff(&project_path, rev, path, mode)).await?
 }
 
+#[tauri::command]
+async fn get_review_media(
+    app: tauri::AppHandle,
+    project_path: String,
+    path: String,
+    old_path: Option<String>,
+    new_path: Option<String>,
+    rev: Option<String>,
+    mode: Option<String>,
+) -> Result<review::ReviewMediaDiff, String> {
+    let media = run_blocking(move || {
+        review::get_review_media(&project_path, &path, old_path, new_path, rev, mode)
+    }).await??;
+
+    if let Some(ref before) = media.before {
+        app.asset_protocol_scope()
+            .allow_file(std::path::Path::new(&before.path))
+            .map_err(|e| format!("Couldn't allow media preview: {e}"))?;
+    }
+    if let Some(ref after) = media.after {
+        app.asset_protocol_scope()
+            .allow_file(std::path::Path::new(&after.path))
+            .map_err(|e| format!("Couldn't allow media preview: {e}"))?;
+    }
+
+    Ok(media)
+}
+
 // ════════════════════════════════════════════════
 // Handoff commands
 // ════════════════════════════════════════════════
@@ -2129,6 +2157,7 @@ pub fn run() {
             chat_clear_session,
             // Review
             get_review_diff,
+            get_review_media,
             // Handoff
             // Dialog
             create_project,

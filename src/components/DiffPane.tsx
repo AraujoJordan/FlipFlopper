@@ -2,10 +2,12 @@ import { resolvedMotion } from "../lib/layout";
 import {
   Component, createEffect, createResource, createSignal, For, Show, createMemo, onCleanup,
 } from "solid-js";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { escapeHtml, highlightCode } from "../lib/markdownLite";
 import {
   basename, buildPatchForFile, buildSelectionPrompt, formatColonRange,
-  formatLineRange, formatSnippetDetails, indexFileHunks, langForPath,
+  formatLineRange, formatMediaBytes, formatMediaSizeDelta, formatSnippetDetails,
+  indexFileHunks, isMediaFile, langForPath,
   type IndexedDiffLine, type IndexedHunk, type LineSelection,
 } from "../lib/diffModel";
 import {
@@ -15,9 +17,10 @@ import {
   type ReviewCommentDraft,
 } from "../lib/store";
 import { submitPrompt, isRunning, chat } from "../lib/chat";
+import { addPaths } from "../lib/attachments";
 import {
-  getReviewDiff, gitApplyPatch, gitStage, gitUnstage, gitDiscard,
-  triggerHaptic, type FileDiff,
+  getReviewDiff, getReviewMedia, gitApplyPatch, gitStage, gitUnstage, gitDiscard,
+  openAttachment, triggerHaptic, type FileDiff,
 } from "../lib/ipc";
 import { gitStatus } from "../lib/gitStatus";
 import { getFileIcon } from "../lib/fileIcons";
@@ -30,6 +33,1011 @@ import { Icon } from "./shell/Icon";
 
 // ── Layout toggle ────────────────────────────────────────────────────────────
 type LayoutMode = "unified" | "split";
+
+// ── Media Diff & Side-by-Side Comparison View ────────────────────────────────
+interface MediaDiffViewProps {
+  filePath: string;
+  oldPath?: string | null;
+  newPath?: string | null;
+  fileStatus: string;
+  layoutMode: LayoutMode;
+  isStaged?: boolean;
+  hasUnstaged?: boolean;
+  canPatchWorktree?: boolean;
+  onStageFile?: (path: string) => void;
+  onUnstageFile?: (path: string) => void;
+  onDiscardFile?: (path: string) => void;
+}
+
+type ImageCompMode = "side-by-side" | "swipe" | "onion" | "diff" | "before" | "after";
+type VideoCompMode = "side-by-side" | "before" | "after";
+type ZoomMode = "fit" | "100" | "200";
+
+function formatMediaDuration(sec: number): string {
+  if (!Number.isFinite(sec) || sec <= 0) return "00:00";
+  const mins = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${mins.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+}
+
+const MediaDiffView: Component<MediaDiffViewProps> = (props) => {
+  const [data, { refetch }] = createResource(
+    () => ({
+      root: effectiveRoot(),
+      path: props.filePath,
+      oldPath: props.oldPath,
+      newPath: props.newPath,
+      rev: store.review?.rev,
+      mode: store.review?.mode,
+      gitVer: store.gitStatusVersion,
+    }),
+    async ({ root, path, oldPath, newPath, rev, mode }) => {
+      if (!root || !path) return null;
+      return await getReviewMedia(root, path, oldPath, newPath, rev, mode);
+    }
+  );
+
+  const before = createMemo(() => data()?.before ?? null);
+  const after = createMemo(() => data()?.after ?? null);
+  const kind = createMemo(() => data()?.kind ?? "image");
+  const isComp = createMemo(() => !!(before() && after()));
+
+  const [imageMode, setImageMode] = createSignal<ImageCompMode>("side-by-side");
+  const [videoMode, setVideoMode] = createSignal<VideoCompMode>("side-by-side");
+  const [zoom, setZoom] = createSignal<ZoomMode>("fit");
+  const [showGrid, setShowGrid] = createSignal(true);
+  const [splitPos, setSplitPos] = createSignal(50);
+  const [isDraggingSplit, setIsDraggingSplit] = createSignal(false);
+  const [onionOpacity, setOnionOpacity] = createSignal(50);
+
+  // Dimensions & decode error tracking
+  const [beforeDim, setBeforeDim] = createSignal<{ w: number; h: number } | null>(null);
+  const [afterDim, setAfterDim] = createSignal<{ w: number; h: number } | null>(null);
+  const [beforeLoadErr, setBeforeLoadErr] = createSignal(false);
+  const [afterLoadErr, setAfterLoadErr] = createSignal(false);
+
+  // Synchronized video player state
+  let beforeVideoEl: HTMLVideoElement | undefined;
+  let afterVideoEl: HTMLVideoElement | undefined;
+  let swipeContainerEl: HTMLDivElement | undefined;
+
+  const [isPlaying, setIsPlaying] = createSignal(false);
+  const [currentTime, setCurrentTime] = createSignal(0);
+  const [duration, setDuration] = createSignal(0);
+  const [isMuted, setIsMuted] = createSignal(true);
+  const [isLoop, setIsLoop] = createSignal(true);
+  const [playbackSpeed, setPlaybackSpeed] = createSignal(1);
+
+  onCleanup(() => {
+    beforeVideoEl?.pause();
+    afterVideoEl?.pause();
+  });
+
+  // URLs for Tauri asset protocol with size + mtime cache busting
+  const beforeUrl = createMemo(() => {
+    const b = before();
+    return b ? `${convertFileSrc(b.path)}?s=${b.size}&t=${b.mtime ?? 0}` : null;
+  });
+
+  const afterUrl = createMemo(() => {
+    const a = after();
+    return a ? `${convertFileSrc(a.path)}?s=${a.size}&t=${a.mtime ?? 0}` : null;
+  });
+
+  createEffect(() => {
+    beforeUrl();
+    setBeforeLoadErr(false);
+    setBeforeDim(null);
+  });
+
+  createEffect(() => {
+    afterUrl();
+    setAfterLoadErr(false);
+    setAfterDim(null);
+  });
+
+  // Size delta
+  const sizeDelta = createMemo(() => {
+    const b = before();
+    const a = after();
+    if (!b || !a) return null;
+    return formatMediaSizeDelta(b.size, a.size);
+  });
+
+  // Dimension delta
+  const dimDelta = createMemo(() => {
+    const b = beforeDim();
+    const a = afterDim();
+    if (!b || !a) return null;
+    if (b.w === a.w && b.h === a.h) {
+      return `${a.w} × ${a.h} px`;
+    }
+    return `${b.w} × ${b.h} → ${a.w} × ${a.h} px`;
+  });
+
+  // Reset or initialize view modes based on availability
+  createEffect(() => {
+    if (!isComp()) {
+      if (after()) {
+        setImageMode("after");
+        setVideoMode("after");
+      } else if (before()) {
+        setImageMode("before");
+        setVideoMode("before");
+      }
+    } else {
+      if (imageMode() === "before" || imageMode() === "after") {
+        setImageMode("side-by-side");
+      }
+      if (videoMode() === "before" || videoMode() === "after") {
+        setVideoMode("side-by-side");
+      }
+    }
+  });
+
+  // Respond to top-level DiffPane Unified / Split toggle when comparing images
+  createEffect(() => {
+    const lm = props.layoutMode;
+    if (!isComp() || kind() !== "image") return;
+    if (lm === "split" && imageMode() !== "side-by-side") {
+      setImageMode("side-by-side");
+    }
+  });
+
+  // Video synchronization
+  function syncVideosTime(targetTime: number) {
+    if (beforeVideoEl && Math.abs(beforeVideoEl.currentTime - targetTime) > 0.05) {
+      beforeVideoEl.currentTime = targetTime;
+    }
+    if (afterVideoEl && Math.abs(afterVideoEl.currentTime - targetTime) > 0.05) {
+      afterVideoEl.currentTime = targetTime;
+    }
+    setCurrentTime(targetTime);
+  }
+
+  function handleVideoTimeUpdate(e: Event) {
+    const v = e.currentTarget as HTMLVideoElement;
+    setCurrentTime(v.currentTime);
+    const dur = v.duration;
+    if (Number.isFinite(dur) && dur > 0 && dur !== duration()) {
+      setDuration(dur);
+    }
+  }
+
+  function handleVideoLoadedMetadata(side: "before" | "after", e: Event) {
+    const v = e.currentTarget as HTMLVideoElement;
+    if (side === "before") {
+      setBeforeDim({ w: v.videoWidth, h: v.videoHeight });
+    } else {
+      setAfterDim({ w: v.videoWidth, h: v.videoHeight });
+    }
+    if (Number.isFinite(v.duration) && v.duration > duration()) {
+      setDuration(v.duration);
+    }
+  }
+
+  function togglePlay() {
+    if (isPlaying()) {
+      beforeVideoEl?.pause();
+      afterVideoEl?.pause();
+      setIsPlaying(false);
+    } else {
+      if (beforeVideoEl && afterVideoEl) {
+        afterVideoEl.currentTime = beforeVideoEl.currentTime;
+      }
+      beforeVideoEl?.play().catch(() => {});
+      afterVideoEl?.play().catch(() => {});
+      setIsPlaying(true);
+    }
+  }
+
+  function handleSeek(val: number) {
+    syncVideosTime(val);
+  }
+
+  function toggleMute() {
+    const next = !isMuted();
+    setIsMuted(next);
+    if (beforeVideoEl) beforeVideoEl.muted = next;
+    if (afterVideoEl) afterVideoEl.muted = next;
+  }
+
+  function toggleLoop() {
+    const next = !isLoop();
+    setIsLoop(next);
+    if (beforeVideoEl) beforeVideoEl.loop = next;
+    if (afterVideoEl) afterVideoEl.loop = next;
+  }
+
+  function cycleSpeed() {
+    const speeds = [1, 1.5, 2, 0.5];
+    const current = playbackSpeed();
+    const next = speeds[(speeds.indexOf(current) + 1) % speeds.length];
+    setPlaybackSpeed(next);
+    if (beforeVideoEl) beforeVideoEl.playbackRate = next;
+    if (afterVideoEl) afterVideoEl.playbackRate = next;
+  }
+
+  // Pointer drag for swipe divider
+  function onPointerDownSwipe(e: PointerEvent) {
+    if (!swipeContainerEl) return;
+    swipeContainerEl.setPointerCapture(e.pointerId);
+    setIsDraggingSplit(true);
+    updateSplitFromPointer(e);
+  }
+
+  function onPointerMoveSwipe(e: PointerEvent) {
+    if (!isDraggingSplit() || !swipeContainerEl) return;
+    updateSplitFromPointer(e);
+  }
+
+  function onPointerUpSwipe(e: PointerEvent) {
+    if (!swipeContainerEl) return;
+    try {
+      swipeContainerEl.releasePointerCapture(e.pointerId);
+    } catch {}
+    setIsDraggingSplit(false);
+  }
+
+  function updateSplitFromPointer(e: PointerEvent) {
+    if (!swipeContainerEl) return;
+    const rect = swipeContainerEl.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const pos = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+    setSplitPos(pos);
+  }
+
+  async function openInDefaultApp(path: string) {
+    try {
+      await openAttachment(path);
+    } catch (err) {
+      toast(`Couldn't open media: ${String(err)}`, "error");
+    }
+  }
+
+  async function copyPath(path: string) {
+    try {
+      await writeClipboardText(path);
+      toast("Copied path", "success");
+    } catch (err) {
+      toast(`Failed to copy: ${String(err)}`, "error");
+    }
+  }
+
+  function attachMediaToChat(path: string) {
+    addPaths([path]);
+    toast(`Attached ${basename(props.filePath)} to chat`, "success");
+    void triggerHaptic("generic");
+  }
+
+  function askChangesOnMedia() {
+    const activePath = after()?.path ?? before()?.path;
+    if (activePath) {
+      addPaths([activePath]);
+    }
+    setPendingPromptSeed({
+      text: `In \`@${props.filePath}\`: `,
+    });
+    toast(`Referenced @${basename(props.filePath)} in composer`, "info");
+    void triggerHaptic("generic");
+  }
+
+  function cycleZoomOnClick() {
+    setZoom((z) => (z === "fit" ? "100" : z === "100" ? "200" : "fit"));
+  }
+
+  // Image zoom scale style
+  const imgZoomStyle = () => {
+    switch (zoom()) {
+      case "100":
+        return {
+          "max-width": "none",
+          "max-height": "none",
+          width: "auto",
+          height: "auto",
+          cursor: "zoom-in" as const,
+        };
+      case "200":
+        return {
+          "max-width": "none",
+          "max-height": "none",
+          transform: "scale(2)",
+          "transform-origin": "center center",
+          "image-rendering": "pixelated" as const,
+          cursor: "zoom-out" as const,
+        };
+      default:
+        return {
+          "max-width": "100%",
+          "max-height": "420px",
+          "object-fit": "contain" as const,
+          cursor: "zoom-in" as const,
+        };
+    }
+  };
+
+  return (
+    <div class="media-diff" data-kind={kind()}>
+      {/* Loading state */}
+      <Show when={data.loading}>
+        <div class="media-diff-loading">
+          <Spinner size={20} />
+          <span>Preparing {kind()} comparison…</span>
+        </div>
+      </Show>
+
+      {/* Error state */}
+      <Show when={data.error}>
+        <div class="media-diff-error">
+          <Icon name="alert" size={16} />
+          <span style={{ flex: "1" }}>{String(data.error)}</span>
+          <button type="button" class="diff-quick-chip hover-tint" onClick={() => void refetch()}>
+            <Icon name="refresh" size={11} /> Retry
+          </button>
+        </div>
+      </Show>
+
+      {/* Main loaded view */}
+      <Show when={!data.loading && !data.error && data()}>
+        {/* Top Control Bar */}
+        <div class="media-diff-toolbar">
+          {/* Status & Info pill */}
+          <div class="media-diff-info">
+            <span class="media-diff-kind-badge">
+              <Icon name={kind() === "video" ? "video" : "image"} size={12} />
+              <span>{kind().toUpperCase()}</span>
+            </span>
+
+            <Show when={!isComp() && after() && !before()}>
+              <span class="media-diff-status-pill media-diff-status-added">Added</span>
+            </Show>
+            <Show when={!isComp() && before() && !after()}>
+              <span class="media-diff-status-pill media-diff-status-deleted">Deleted</span>
+            </Show>
+            <Show when={isComp()}>
+              <span class="media-diff-status-pill media-diff-status-modified">
+                {props.fileStatus === "renamed" ? "Renamed" : "Modified"}
+              </span>
+            </Show>
+
+            <Show when={dimDelta()}>
+              <span class="media-diff-meta-tag" title="Dimensions">
+                {dimDelta()}
+              </span>
+            </Show>
+
+            <Show when={!isComp() && (afterDim() || beforeDim())}>
+              {(dim) => (
+                <span class="media-diff-meta-tag" title="Dimensions">
+                  {dim().w} × {dim().h} px
+                </span>
+              )}
+            </Show>
+
+            <Show when={sizeDelta()}>
+              {(sd) => (
+                <span
+                  class="media-diff-meta-tag"
+                  classList={{
+                    "media-diff-size-smaller": !sd().isIncrease && sd().delta !== 0,
+                    "media-diff-size-larger": sd().isIncrease,
+                  }}
+                  title={`File size: ${formatMediaBytes(before()!.size)} → ${formatMediaBytes(after()!.size)}`}
+                >
+                  {formatMediaBytes(before()!.size)} → {formatMediaBytes(after()!.size)} ({sd().text})
+                </span>
+              )}
+            </Show>
+
+            <Show when={!isComp()}>
+              <span class="media-diff-meta-tag">
+                {formatMediaBytes(after()?.size ?? before()?.size ?? 0)}
+              </span>
+            </Show>
+          </div>
+
+          {/* Mode Switcher (only when both Before and After exist) */}
+          <Show when={isComp()}>
+            <div class="media-diff-mode-group">
+              <Show
+                when={kind() === "image"}
+                fallback={
+                  <>
+                    <button
+                      type="button"
+                      class="media-diff-mode-btn hover-tint press"
+                      classList={{ "media-diff-mode-on": videoMode() === "side-by-side" }}
+                      onClick={() => setVideoMode("side-by-side")}
+                      title="Side by side comparison"
+                    >
+                      Side by Side
+                    </button>
+                    <button
+                      type="button"
+                      class="media-diff-mode-btn hover-tint press"
+                      classList={{ "media-diff-mode-on": videoMode() === "before" }}
+                      onClick={() => setVideoMode("before")}
+                      title="View before video only"
+                    >
+                      Before
+                    </button>
+                    <button
+                      type="button"
+                      class="media-diff-mode-btn hover-tint press"
+                      classList={{ "media-diff-mode-on": videoMode() === "after" }}
+                      onClick={() => setVideoMode("after")}
+                      title="View after video only"
+                    >
+                      After
+                    </button>
+                  </>
+                }
+              >
+                <button
+                  type="button"
+                  class="media-diff-mode-btn hover-tint press"
+                  classList={{ "media-diff-mode-on": imageMode() === "side-by-side" }}
+                  onClick={() => setImageMode("side-by-side")}
+                  title="Side by side comparison (2-up)"
+                >
+                  Side by Side
+                </button>
+                <button
+                  type="button"
+                  class="media-diff-mode-btn hover-tint press"
+                  classList={{ "media-diff-mode-on": imageMode() === "swipe" }}
+                  onClick={() => setImageMode("swipe")}
+                  title="Swipe comparison slider"
+                >
+                  Swipe
+                </button>
+                <button
+                  type="button"
+                  class="media-diff-mode-btn hover-tint press"
+                  classList={{ "media-diff-mode-on": imageMode() === "onion" }}
+                  onClick={() => setImageMode("onion")}
+                  title="Onion skin crossfade opacity"
+                >
+                  Onion Skin
+                </button>
+                <button
+                  type="button"
+                  class="media-diff-mode-btn hover-tint press"
+                  classList={{ "media-diff-mode-on": imageMode() === "diff" }}
+                  onClick={() => setImageMode("diff")}
+                  title="Pixel difference overlay"
+                >
+                  Difference
+                </button>
+                <button
+                  type="button"
+                  class="media-diff-mode-btn hover-tint press"
+                  classList={{ "media-diff-mode-on": imageMode() === "before" }}
+                  onClick={() => setImageMode("before")}
+                  title="View original before change"
+                >
+                  Before
+                </button>
+                <button
+                  type="button"
+                  class="media-diff-mode-btn hover-tint press"
+                  classList={{ "media-diff-mode-on": imageMode() === "after" }}
+                  onClick={() => setImageMode("after")}
+                  title="View new after change"
+                >
+                  After
+                </button>
+              </Show>
+            </div>
+          </Show>
+
+          {/* Right utility buttons: Zoom, Grid, Chat Actions & Open */}
+          <div class="media-diff-tools">
+            <Show when={kind() === "image"}>
+              <div class="media-diff-tool-pill">
+                <button
+                  type="button"
+                  class="media-diff-sub-btn"
+                  classList={{ "media-diff-sub-on": zoom() === "fit" }}
+                  onClick={() => setZoom("fit")}
+                  title="Fit to card"
+                >
+                  Fit
+                </button>
+                <button
+                  type="button"
+                  class="media-diff-sub-btn"
+                  classList={{ "media-diff-sub-on": zoom() === "100" }}
+                  onClick={() => setZoom("100")}
+                  title="100% Actual size"
+                >
+                  100%
+                </button>
+                <button
+                  type="button"
+                  class="media-diff-sub-btn"
+                  classList={{ "media-diff-sub-on": zoom() === "200" }}
+                  onClick={() => setZoom("200")}
+                  title="200% Pixel zoom"
+                >
+                  200%
+                </button>
+              </div>
+
+              <button
+                type="button"
+                class="diff-quick-chip hover-tint"
+                classList={{ "diff-quick-chip-on": showGrid() }}
+                onClick={() => setShowGrid((g) => !g)}
+                title="Toggle checkerboard transparency grid"
+              >
+                Grid
+              </button>
+            </Show>
+
+            <Show when={after()?.path || before()?.path}>
+              {(p) => (
+                <>
+                  <button
+                    type="button"
+                    class="diff-quick-chip hover-tint"
+                    onClick={() => attachMediaToChat(p())}
+                    title="Attach media file to chat composer"
+                  >
+                    <Icon name="plus" size={11} /> Attach
+                  </button>
+                  <button
+                    type="button"
+                    class="diff-quick-chip hover-tint"
+                    onClick={askChangesOnMedia}
+                    title="Reference this media file in the chat composer"
+                  >
+                    <Icon name="message" size={11} /> Ask changes
+                  </button>
+                  <button
+                    type="button"
+                    class="diff-quick-chip hover-tint"
+                    onClick={() => void openInDefaultApp(p())}
+                    title="Open media in default desktop app"
+                  >
+                    <Icon name="external" size={11} /> Open
+                  </button>
+                </>
+              )}
+            </Show>
+          </div>
+        </div>
+
+        {/* ── IMAGE COMPARISON MODES ── */}
+        <Show when={kind() === "image"}>
+          {/* 1. Side by Side Mode */}
+          <Show when={imageMode() === "side-by-side" && isComp()}>
+            <div class="media-diff-split-grid">
+              {/* Left: Before */}
+              <div class="media-diff-column">
+                <div class="media-diff-col-head">
+                  <span class="media-diff-col-label media-diff-col-before">Before</span>
+                  <Show when={beforeDim()}>
+                    {(dim) => <span class="media-diff-col-dim">{dim().w} × {dim().h}</span>}
+                  </Show>
+                  <span class="media-diff-col-size">{formatMediaBytes(before()!.size)}</span>
+                  <button
+                    type="button"
+                    class="icon-btn hover-tint"
+                    onClick={() => void copyPath(before()!.path)}
+                    title="Copy path"
+                    style={{ "margin-left": "auto", width: "20px", height: "20px" }}
+                  >
+                    <Icon name="copy" size={11} />
+                  </button>
+                </div>
+                <div
+                  class="media-diff-viewport"
+                  classList={{ "media-diff-checkerboard": showGrid() }}
+                >
+                  <Show
+                    when={!beforeLoadErr() && beforeUrl()}
+                    fallback={
+                      <div style={{ padding: "16px", color: "var(--fg-muted)", "font-size": "12px", "text-align": "center" }}>
+                        Preview unavailable in WebView.
+                        <div style={{ "margin-top": "8px" }}>
+                          <button type="button" class="diff-quick-chip hover-tint" onClick={() => void openInDefaultApp(before()!.path)}>
+                            <Icon name="external" size={11} /> Open in default app
+                          </button>
+                        </div>
+                      </div>
+                    }
+                  >
+                    {(url) => (
+                      <img
+                        src={url()}
+                        alt="Before"
+                        class="media-diff-img"
+                        style={imgZoomStyle()}
+                        onClick={cycleZoomOnClick}
+                        onLoad={(e) => {
+                          const img = e.currentTarget;
+                          setBeforeDim({ w: img.naturalWidth, h: img.naturalHeight });
+                        }}
+                        onError={() => setBeforeLoadErr(true)}
+                      />
+                    )}
+                  </Show>
+                </div>
+              </div>
+
+              {/* Right: After */}
+              <div class="media-diff-column">
+                <div class="media-diff-col-head">
+                  <span class="media-diff-col-label media-diff-col-after">After</span>
+                  <Show when={afterDim()}>
+                    {(dim) => <span class="media-diff-col-dim">{dim().w} × {dim().h}</span>}
+                  </Show>
+                  <span class="media-diff-col-size">{formatMediaBytes(after()!.size)}</span>
+                  <button
+                    type="button"
+                    class="icon-btn hover-tint"
+                    onClick={() => void copyPath(after()!.path)}
+                    title="Copy path"
+                    style={{ "margin-left": "auto", width: "20px", height: "20px" }}
+                  >
+                    <Icon name="copy" size={11} />
+                  </button>
+                </div>
+                <div
+                  class="media-diff-viewport"
+                  classList={{ "media-diff-checkerboard": showGrid() }}
+                >
+                  <Show
+                    when={!afterLoadErr() && afterUrl()}
+                    fallback={
+                      <div style={{ padding: "16px", color: "var(--fg-muted)", "font-size": "12px", "text-align": "center" }}>
+                        Preview unavailable in WebView.
+                        <div style={{ "margin-top": "8px" }}>
+                          <button type="button" class="diff-quick-chip hover-tint" onClick={() => void openInDefaultApp(after()!.path)}>
+                            <Icon name="external" size={11} /> Open in default app
+                          </button>
+                        </div>
+                      </div>
+                    }
+                  >
+                    {(url) => (
+                      <img
+                        src={url()}
+                        alt="After"
+                        class="media-diff-img"
+                        style={imgZoomStyle()}
+                        onClick={cycleZoomOnClick}
+                        onLoad={(e) => {
+                          const img = e.currentTarget;
+                          setAfterDim({ w: img.naturalWidth, h: img.naturalHeight });
+                        }}
+                        onError={() => setAfterLoadErr(true)}
+                      />
+                    )}
+                  </Show>
+                </div>
+              </div>
+            </div>
+          </Show>
+
+          {/* 2. Swipe / Split Slider Mode */}
+          <Show when={imageMode() === "swipe" && isComp()}>
+            <div class="media-diff-swipe-wrapper">
+              <div
+                ref={swipeContainerEl}
+                class="media-diff-swipe-container"
+                classList={{ "media-diff-checkerboard": showGrid() }}
+                onPointerDown={onPointerDownSwipe}
+                onPointerMove={onPointerMoveSwipe}
+                onPointerUp={onPointerUpSwipe}
+              >
+                {/* Before Image (underneath, visible on the left side) */}
+                <img
+                  src={beforeUrl()!}
+                  alt="Before"
+                  class="media-diff-swipe-img"
+                  style={imgZoomStyle()}
+                />
+
+                {/* After Image (overlay, clipped to split position) */}
+                <div
+                  class="media-diff-swipe-overlay"
+                  style={{ "clip-path": `inset(0 0 0 ${splitPos()}%)` }}
+                >
+                  <img
+                    src={afterUrl()!}
+                    alt="After"
+                    class="media-diff-swipe-img"
+                    style={imgZoomStyle()}
+                  />
+                </div>
+
+                {/* Draggable Divider Handle */}
+                <div
+                  class="media-diff-swipe-divider"
+                  style={{ left: `${splitPos()}%` }}
+                >
+                  <div class="media-diff-swipe-handle">
+                    <span class="media-diff-handle-arrows">‹›</span>
+                  </div>
+                </div>
+
+                {/* Corner Labels */}
+                <span class="media-diff-floating-tag media-diff-tag-left">Before</span>
+                <span class="media-diff-floating-tag media-diff-tag-right">After</span>
+              </div>
+              <div class="media-diff-swipe-hint">
+                Drag the divider or click anywhere to compare before & after
+              </div>
+            </div>
+          </Show>
+
+          {/* 3. Onion Skin Mode */}
+          <Show when={imageMode() === "onion" && isComp()}>
+            <div class="media-diff-onion-wrapper">
+              <div
+                class="media-diff-onion-stage"
+                classList={{ "media-diff-checkerboard": showGrid() }}
+              >
+                <img
+                  src={beforeUrl()!}
+                  alt="Before"
+                  class="media-diff-onion-base"
+                  style={imgZoomStyle()}
+                />
+                <img
+                  src={afterUrl()!}
+                  alt="After"
+                  class="media-diff-onion-top"
+                  style={{
+                    ...imgZoomStyle(),
+                    opacity: `${onionOpacity() / 100}`,
+                  }}
+                />
+              </div>
+
+              {/* Opacity Slider */}
+              <div class="media-diff-onion-bar">
+                <span class="media-diff-slider-label">Before (0%)</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  value={onionOpacity()}
+                  class="media-diff-range"
+                  onInput={(e) => setOnionOpacity(Number(e.currentTarget.value))}
+                />
+                <span class="media-diff-slider-label">After (100%)</span>
+                <span class="media-diff-slider-val">{onionOpacity()}% After</span>
+              </div>
+            </div>
+          </Show>
+
+          {/* 4. Difference Mode */}
+          <Show when={imageMode() === "diff" && isComp()}>
+            <div class="media-diff-diff-wrapper">
+              <div class="media-diff-diff-stage">
+                <img
+                  src={beforeUrl()!}
+                  alt="Before"
+                  class="media-diff-diff-base"
+                  style={imgZoomStyle()}
+                />
+                <img
+                  src={afterUrl()!}
+                  alt="After"
+                  class="media-diff-diff-blend"
+                  style={imgZoomStyle()}
+                />
+              </div>
+              <div class="media-diff-diff-legend">
+                <span class="media-diff-legend-dot" /> Black areas = unchanged pixels · Colored areas = altered pixels
+              </div>
+            </div>
+          </Show>
+
+          {/* 5. Before Only */}
+          <Show when={imageMode() === "before" && before()}>
+            <div class="media-diff-single-wrapper">
+              <div class="media-diff-col-head" style={{ "border-radius": "var(--radius-md) var(--radius-md) 0 0" }}>
+                <span class="media-diff-col-label media-diff-col-before">Before (Original)</span>
+                <Show when={beforeDim()}>
+                  {(dim) => <span class="media-diff-col-dim">{dim().w} × {dim().h}</span>}
+                </Show>
+                <span class="media-diff-col-size">{formatMediaBytes(before()!.size)}</span>
+              </div>
+              <div
+                class="media-diff-viewport"
+                classList={{ "media-diff-checkerboard": showGrid() }}
+              >
+                <img
+                  src={beforeUrl()!}
+                  alt="Before"
+                  class="media-diff-img"
+                  style={imgZoomStyle()}
+                  onClick={cycleZoomOnClick}
+                  onLoad={(e) => {
+                    const img = e.currentTarget;
+                    setBeforeDim({ w: img.naturalWidth, h: img.naturalHeight });
+                  }}
+                />
+              </div>
+            </div>
+          </Show>
+
+          {/* 6. After Only */}
+          <Show when={imageMode() === "after" && after()}>
+            <div class="media-diff-single-wrapper">
+              <div class="media-diff-col-head" style={{ "border-radius": "var(--radius-md) var(--radius-md) 0 0" }}>
+                <span class="media-diff-col-label media-diff-col-after">After (New)</span>
+                <Show when={afterDim()}>
+                  {(dim) => <span class="media-diff-col-dim">{dim().w} × {dim().h}</span>}
+                </Show>
+                <span class="media-diff-col-size">{formatMediaBytes(after()!.size)}</span>
+              </div>
+              <div
+                class="media-diff-viewport"
+                classList={{ "media-diff-checkerboard": showGrid() }}
+              >
+                <img
+                  src={afterUrl()!}
+                  alt="After"
+                  class="media-diff-img"
+                  style={imgZoomStyle()}
+                  onClick={cycleZoomOnClick}
+                  onLoad={(e) => {
+                    const img = e.currentTarget;
+                    setAfterDim({ w: img.naturalWidth, h: img.naturalHeight });
+                  }}
+                />
+              </div>
+            </div>
+          </Show>
+        </Show>
+
+        {/* ── VIDEO COMPARISON MODES ── */}
+        <Show when={kind() === "video"}>
+          {/* Side by Side Videos */}
+          <Show when={videoMode() === "side-by-side" && isComp()}>
+            <div class="media-diff-split-grid">
+              {/* Left Video */}
+              <div class="media-diff-column">
+                <div class="media-diff-col-head">
+                  <span class="media-diff-col-label media-diff-col-before">Before</span>
+                  <Show when={beforeDim()}>
+                    {(dim) => <span class="media-diff-col-dim">{dim().w} × {dim().h}</span>}
+                  </Show>
+                  <span class="media-diff-col-size">{formatMediaBytes(before()!.size)}</span>
+                </div>
+                <div class="media-diff-video-container">
+                  <video
+                    ref={(el) => { beforeVideoEl = el; }}
+                    src={beforeUrl()!}
+                    class="media-diff-video"
+                    muted={isMuted()}
+                    loop={isLoop()}
+                    playsinline
+                    onTimeUpdate={handleVideoTimeUpdate}
+                    onLoadedMetadata={(e) => handleVideoLoadedMetadata("before", e)}
+                    onEnded={() => { if (!isLoop()) setIsPlaying(false); }}
+                  />
+                </div>
+              </div>
+
+              {/* Right Video */}
+              <div class="media-diff-column">
+                <div class="media-diff-col-head">
+                  <span class="media-diff-col-label media-diff-col-after">After</span>
+                  <Show when={afterDim()}>
+                    {(dim) => <span class="media-diff-col-dim">{dim().w} × {dim().h}</span>}
+                  </Show>
+                  <span class="media-diff-col-size">{formatMediaBytes(after()!.size)}</span>
+                </div>
+                <div class="media-diff-video-container">
+                  <video
+                    ref={(el) => { afterVideoEl = el; }}
+                    src={afterUrl()!}
+                    class="media-diff-video"
+                    muted={isMuted()}
+                    loop={isLoop()}
+                    playsinline
+                    onLoadedMetadata={(e) => handleVideoLoadedMetadata("after", e)}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Synchronized Master Video Controls */}
+            <div class="media-diff-video-bar">
+              <button
+                type="button"
+                class="media-diff-play-btn press"
+                onClick={togglePlay}
+                title={isPlaying() ? "Pause both videos" : "Play both videos"}
+              >
+                <Icon name={isPlaying() ? "stop" : "play"} size={14} />
+              </button>
+
+              <span class="media-diff-time-readout">
+                {formatMediaDuration(currentTime())} / {formatMediaDuration(duration())}
+              </span>
+
+              {/* Master timeline scrub bar */}
+              <input
+                type="range"
+                min="0"
+                max={duration() > 0 ? duration() : 100}
+                step="0.02"
+                value={currentTime()}
+                class="media-diff-video-scrub"
+                onInput={(e) => handleSeek(Number(e.currentTarget.value))}
+              />
+
+              <button
+                type="button"
+                class="diff-quick-chip hover-tint"
+                classList={{ "diff-quick-chip-on": playbackSpeed() !== 1 }}
+                onClick={cycleSpeed}
+                title="Playback speed"
+              >
+                {playbackSpeed()}x
+              </button>
+
+              <button
+                type="button"
+                class="diff-quick-chip hover-tint"
+                classList={{ "diff-quick-chip-on": isLoop() }}
+                onClick={toggleLoop}
+                title={isLoop() ? "Loop enabled" : "Loop disabled"}
+              >
+                Loop
+              </button>
+
+              <button
+                type="button"
+                class="diff-quick-chip hover-tint"
+                classList={{ "diff-quick-chip-on": !isMuted() }}
+                onClick={toggleMute}
+                title={isMuted() ? "Unmute" : "Mute"}
+              >
+                {isMuted() ? "Muted" : "Sound"}
+              </button>
+            </div>
+          </Show>
+
+          {/* Single Video (Before or After) */}
+          <Show when={videoMode() !== "side-by-side" || !isComp()}>
+            <div class="media-diff-single-wrapper">
+              <div class="media-diff-col-head" style={{ "border-radius": "var(--radius-md) var(--radius-md) 0 0" }}>
+                <span
+                  class="media-diff-col-label"
+                  classList={{
+                    "media-diff-col-before": videoMode() === "before" || Boolean(before() && !after()),
+                    "media-diff-col-after": videoMode() === "after" || Boolean(after() && !before()),
+                  }}
+                >
+                  {videoMode() === "before" || (before() && !after()) ? "Before" : "After"}
+                </span>
+                <span class="media-diff-col-size">
+                  {formatMediaBytes((videoMode() === "before" ? before()?.size : after()?.size) ?? 0)}
+                </span>
+              </div>
+              <div class="media-diff-video-container" style={{ padding: "16px" }}>
+                <video
+                  src={(videoMode() === "before" ? beforeUrl() : afterUrl()) ?? ""}
+                  class="media-diff-video"
+                  controls
+                  playsinline
+                />
+              </div>
+            </div>
+          </Show>
+        </Show>
+      </Show>
+    </div>
+  );
+};
 
 // ── Colors — match GitHub dark's diff palette ────────────────────────────────
 const ADD_BG   = "rgba(46,160,67,0.15)";
@@ -507,15 +1515,19 @@ const FileBlock: Component<{
   const displayPath = () => props.file.new_path ?? props.file.old_path ?? "(unknown)";
   const diffSig = createMemo(() => fileDiffSignature(props.file));
   const viewed = createMemo(() => isFileViewed(displayPath(), store.review?.rev, diffSig()));
-  const [collapsed, setCollapsed] = createSignal(viewed());
+  const isSingleFileReview = () => Boolean(store.review?.path);
+  const [collapsed, setCollapsed] = createSignal(isSingleFileReview() ? false : viewed());
 
   createEffect(() => {
-    setCollapsed(viewed());
+    setCollapsed(isSingleFileReview() ? false : viewed());
   });
 
   const lang = createMemo(() => langForPath(props.file.new_path ?? props.file.old_path));
   const st = () => STATUS_COLORS[props.file.status] ?? STATUS_COLORS.modified;
   const indexed = createMemo(() => indexFileHunks(props.file));
+  const isMedia = createMemo(() => isMediaFile(displayPath()));
+  const hasHunks = () => props.file.hunks.length > 0;
+  const [svgViewMode, setSvgViewMode] = createSignal<"visual" | "code">("visual");
 
   function toggleViewed(next: boolean) {
     setFileViewed(displayPath(), next, store.review?.rev, diffSig());
@@ -591,7 +1603,7 @@ const FileBlock: Component<{
         </Show>
 
         {/* Stats */}
-        <Show when={!props.file.is_binary}>
+        <Show when={!props.file.is_binary && (!isMedia() || hasHunks())}>
           <span style={{ "font-family": MONO, "font-size": "11px", color: ADD_SIGN, "flex-shrink": "0" }}>
             +{props.file.additions}
           </span>
@@ -599,8 +1611,36 @@ const FileBlock: Component<{
             −{props.file.deletions}
           </span>
         </Show>
-        <Show when={props.file.is_binary}>
-          <span style={{ "font-family": MONO, "font-size": "11px", color: "var(--fg-faint)" }}>binary</span>
+        <Show when={props.file.is_binary || (isMedia() && !hasHunks())}>
+          <span style={{ "font-family": MONO, "font-size": "11px", color: isMedia() ? "var(--accent)" : "var(--fg-faint)" }}>
+            {isMedia() ? "media" : "binary"}
+          </span>
+        </Show>
+
+        <Show when={isMedia() && hasHunks()}>
+          <div
+            onclick={(e) => e.stopPropagation()}
+            style={{ display: "inline-flex", background: "var(--surface-3)", padding: "1px", "border-radius": "var(--radius-sm)", border: "1px solid var(--border-muted)" }}
+          >
+            <button
+              type="button"
+              class="media-diff-sub-btn"
+              classList={{ "media-diff-sub-on": svgViewMode() === "visual" }}
+              onClick={() => setSvgViewMode("visual")}
+              title="Visual comparison"
+            >
+              Visual
+            </button>
+            <button
+              type="button"
+              class="media-diff-sub-btn"
+              classList={{ "media-diff-sub-on": svgViewMode() === "code" }}
+              onClick={() => setSvgViewMode("code")}
+              title="Code diff"
+            >
+              Code
+            </button>
+          </div>
         </Show>
 
         {/* Per-file Git Stage / Unstage / Discard actions */}
@@ -677,17 +1717,32 @@ const FileBlock: Component<{
 
       {/* Diff body */}
       <Disclosure open={!collapsed()}>
-        <Show when={props.file.is_binary}>
+        <Show when={isMedia() && (!hasHunks() || svgViewMode() === "visual")}>
+          <MediaDiffView
+            filePath={displayPath()}
+            oldPath={props.file.old_path}
+            newPath={props.file.new_path}
+            fileStatus={props.file.status}
+            layoutMode={props.mode}
+            isStaged={props.isStaged}
+            hasUnstaged={props.hasUnstaged}
+            canPatchWorktree={props.canPatchWorktree}
+            onStageFile={props.onStageFile}
+            onUnstageFile={props.onUnstageFile}
+            onDiscardFile={props.onDiscardFile}
+          />
+        </Show>
+        <Show when={!isMedia() && props.file.is_binary}>
           <div style={{ padding: "24px", color: "var(--fg-faint)", "font-size": "12px", "text-align": "center" }}>
             Binary file — no diff available
           </div>
         </Show>
-        <Show when={!props.file.is_binary && props.file.hunks.length === 0}>
+        <Show when={!isMedia() && !props.file.is_binary && props.file.hunks.length === 0}>
           <div style={{ padding: "24px", color: "var(--fg-faint)", "font-size": "12px", "text-align": "center" }}>
             No changes
           </div>
         </Show>
-        <Show when={!props.file.is_binary && props.file.hunks.length > 0}>
+        <Show when={(!isMedia() || svgViewMode() === "code") && !props.file.is_binary && props.file.hunks.length > 0}>
           <div style={{ overflow: "visible", "font-family": MONO, "font-size": "12px" }}>
             <For each={indexed().hunks}>
               {(hunk) => (
@@ -1887,7 +2942,7 @@ const DiffPane: Component = () => {
             </div>
 
             {/* Selection hint when nothing is selected */}
-            <Show when={!selection()}>
+            <Show when={!selection() && totalLines() > 0}>
               <div style={{
                 "font-size": "11.5px", color: "var(--fg-faint)",
                 "margin-bottom": "12px", display: "flex", "align-items": "center", gap: "6px",

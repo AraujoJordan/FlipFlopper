@@ -16,6 +16,7 @@ import {
 } from "../ui";
 import { writeClipboardText } from "../../lib/native";
 import { isProtectedBranch } from "../../lib/constants";
+import { isMediaFile } from "../../lib/diffModel";
 
 const iconBtnStyle = {
   display: "flex", "align-items": "center", "justify-content": "center",
@@ -33,6 +34,7 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
   const [removing, setRemoving] = createSignal(false);
   const [menuPos, setMenuPos] = createSignal<{ x: number; y: number } | null>(null);
   const isUntracked = () => props.entry.index_status === "?" && props.entry.worktree_status === "?";
+  const isMedia = () => isMediaFile(props.entry.path);
   const viewed = () => isFileViewed(props.entry.path);
 
   function settle() {
@@ -214,7 +216,7 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
         <MenuLabel>{displayName()}</MenuLabel>
         <MenuItem onSelect={() => { setMenuPos(null); openDiff(); }}>
           <Icon name="diff" size={15} />
-          <span style={{ flex: 1 }}>View diff & select lines</span>
+          <span style={{ flex: 1 }}>{isMedia() ? "View media diff & compare" : "View diff & select lines"}</span>
         </MenuItem>
         <MenuItem onSelect={() => { setMenuPos(null); toggleViewed(!viewed()); }}>
           <Icon name={viewed() ? "eye" : "check"} size={15} />

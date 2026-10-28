@@ -4,7 +4,7 @@
 //! structs that the frontend can render without any external process or iframe.
 
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -42,6 +42,24 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewMediaSide {
+    pub path: String,
+    pub name: String,
+    pub size: u64,
+    pub mtime: Option<u64>,
+    pub mime: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewMediaDiff {
+    pub kind: String,
+    pub file_name: String,
+    pub before: Option<ReviewMediaSide>,
+    pub after: Option<ReviewMediaSide>,
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Shell helper
 //
@@ -51,7 +69,7 @@ pub struct FileDiff {
 // (e.g. `ls-files`) uses `git`, which treats a non-zero exit as a real error.
 // ────────────────────────────────────────────────────────────────────────────
 
-use crate::git::{git, git_ignore_exit};
+use crate::git::{git, git_ignore_exit, git_output};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Unified-diff parser
@@ -153,7 +171,15 @@ fn parse_unified_diff(raw: &str) -> Vec<FileDiff> {
         } else if line.starts_with("Binary files") {
             if let Some(ref mut f) = current {
                 f.is_binary = true;
-                f.status = "binary".into();
+                if line.contains("/dev/null and") {
+                    f.old_path = None;
+                    f.status = "added".into();
+                } else if line.contains("and /dev/null") {
+                    f.new_path = None;
+                    f.status = "deleted".into();
+                } else if f.status != "added" && f.status != "deleted" && f.status != "renamed" {
+                    f.status = "modified".into();
+                }
             }
         } else if line.starts_with("--- ") {
             let path = line[4..].trim();
@@ -234,36 +260,49 @@ fn parse_unified_diff(raw: &str) -> Vec<FileDiff> {
 
 fn synthesize_untracked(rel_path: &str, project_path: &str) -> Option<FileDiff> {
     let abs = Path::new(project_path).join(rel_path);
-    let content = std::fs::read_to_string(&abs).ok()?;
-    let lines: Vec<DiffLine> = content
-        .lines()
-        .enumerate()
-        .map(|(i, l)| DiffLine {
-            kind: "add".into(),
-            old_lineno: None,
-            new_lineno: Some(i as u32 + 1),
-            content: l.to_string(),
+    if let Ok(content) = std::fs::read_to_string(&abs) {
+        let lines: Vec<DiffLine> = content
+            .lines()
+            .enumerate()
+            .map(|(i, l)| DiffLine {
+                kind: "add".into(),
+                old_lineno: None,
+                new_lineno: Some(i as u32 + 1),
+                content: l.to_string(),
+            })
+            .collect();
+        let additions = lines.len() as u32;
+        Some(FileDiff {
+            old_path: None,
+            new_path: Some(rel_path.to_string()),
+            status: "added".into(),
+            is_binary: false,
+            additions,
+            deletions: 0,
+            hunks: if lines.is_empty() {
+                Vec::new()
+            } else {
+                vec![Hunk {
+                    header: format!("@@ -0,0 +1,{additions} @@"),
+                    old_start: 0,
+                    new_start: 1,
+                    lines,
+                }]
+            },
         })
-        .collect();
-    let additions = lines.len() as u32;
-    Some(FileDiff {
-        old_path: None,
-        new_path: Some(rel_path.to_string()),
-        status: "added".into(),
-        is_binary: false,
-        additions,
-        deletions: 0,
-        hunks: if lines.is_empty() {
-            Vec::new()
-        } else {
-            vec![Hunk {
-                header: format!("@@ -0,0 +1,{additions} @@"),
-                old_start: 0,
-                new_start: 1,
-                lines,
-            }]
-        },
-    })
+    } else if abs.is_file() {
+        Some(FileDiff {
+            old_path: None,
+            new_path: Some(rel_path.to_string()),
+            status: "added".into(),
+            is_binary: true,
+            additions: 0,
+            deletions: 0,
+            hunks: Vec::new(),
+        })
+    } else {
+        None
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -366,4 +405,330 @@ pub fn get_review_diff(
     }
 
     Ok(diffs)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Media Diff & Side-by-Side Comparison
+// ────────────────────────────────────────────────────────────────────────────
+
+pub fn media_kind_and_mime(path_str: &str) -> Option<(&'static str, &'static str)> {
+    let ext = Path::new(path_str)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())?;
+    match ext.as_str() {
+        "png" => Some(("image", "image/png")),
+        "jpg" | "jpeg" => Some(("image", "image/jpeg")),
+        "gif" => Some(("image", "image/gif")),
+        "webp" => Some(("image", "image/webp")),
+        "svg" => Some(("image", "image/svg+xml")),
+        "avif" => Some(("image", "image/avif")),
+        "bmp" => Some(("image", "image/bmp")),
+        "ico" => Some(("image", "image/x-icon")),
+        "mp4" | "m4v" => Some(("video", "video/mp4")),
+        "webm" => Some(("video", "video/webm")),
+        "mov" => Some(("video", "video/quicktime")),
+        "ogv" => Some(("video", "video/ogg")),
+        "mkv" => Some(("video", "video/x-matroska")),
+        "avi" => Some(("video", "video/x-msvideo")),
+        _ => None,
+    }
+}
+
+fn is_safe_rel_path(p: &str) -> bool {
+    if p.is_empty() {
+        return false;
+    }
+    Path::new(p).components().all(|c| {
+        matches!(
+            c,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    })
+}
+
+fn file_mtime_ms(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+}
+
+fn resolve_worktree_file(project_path: &str, rel_path: &str) -> Option<(PathBuf, u64, Option<u64>)> {
+    if !is_safe_rel_path(rel_path) {
+        return None;
+    }
+    let project_canon = std::fs::canonicalize(project_path).ok()?;
+    let abs = Path::new(project_path).join(rel_path);
+    if !abs.is_file() {
+        return None;
+    }
+    let canon = std::fs::canonicalize(&abs).ok()?;
+    if !canon.starts_with(&project_canon) {
+        return None;
+    }
+    let size = std::fs::metadata(&canon).ok()?.len();
+    let mtime = file_mtime_ms(&canon);
+    Some((canon, size, mtime))
+}
+
+fn resolve_git_blob_to_file(
+    project_path: &str,
+    rev_spec: &str,
+    rel_path: &str,
+    cache_dir: &Path,
+) -> Option<(PathBuf, u64, Option<u64>)> {
+    if !is_safe_rel_path(rel_path) {
+        return None;
+    }
+    let query = if rev_spec.is_empty() || rev_spec == ":" {
+        format!(":{}", rel_path)
+    } else {
+        format!("{}:{}", rev_spec, rel_path)
+    };
+
+    let out = git_output(project_path, &["rev-parse", &query]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() || sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let ext = Path::new(rel_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    let safe_ext: String = ext.chars().filter(|c| c.is_ascii_alphanumeric()).take(6).collect();
+    let cache_file = cache_dir.join(format!("{}.{}", sha, safe_ext));
+
+    if cache_file.is_file() {
+        if let Ok(meta) = std::fs::metadata(&cache_file) {
+            if meta.len() > 0 {
+                let canon = std::fs::canonicalize(&cache_file).unwrap_or(cache_file);
+                let mtime = file_mtime_ms(&canon);
+                return Some((canon, meta.len(), mtime));
+            }
+        }
+    }
+
+    let cat_out = git_output(project_path, &["cat-file", "-p", &sha]).ok()?;
+    if !cat_out.status.success() {
+        return None;
+    }
+    if std::fs::write(&cache_file, &cat_out.stdout).is_err() {
+        return None;
+    }
+    let canon = std::fs::canonicalize(&cache_file).unwrap_or(cache_file);
+    let mtime = file_mtime_ms(&canon);
+    Some((canon, cat_out.stdout.len() as u64, mtime))
+}
+
+pub fn get_review_media(
+    project_path: &str,
+    path: &str,
+    old_path: Option<String>,
+    new_path: Option<String>,
+    rev: Option<String>,
+    mode: Option<String>,
+) -> Result<ReviewMediaDiff, String> {
+    let target_path = new_path.as_deref().or(old_path.as_deref()).unwrap_or(path);
+    if !is_safe_rel_path(target_path) {
+        return Err("Invalid relative file path.".into());
+    }
+    let (kind, default_mime) = media_kind_and_mime(target_path)
+        .ok_or_else(|| format!("File '{target_path}' is not a recognized image or video"))?;
+
+    let file_name = Path::new(target_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| target_path.to_string());
+
+    let cache_dir = crate::chat::store::data_root().join("media_cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let mode_str = mode.as_deref().unwrap_or("head");
+    let has_old = old_path.is_some() || new_path.is_none();
+    let has_new = new_path.is_some() || old_path.is_none();
+    let old_p = old_path.as_deref().unwrap_or(path);
+    let new_p = new_path.as_deref().unwrap_or(path);
+
+    // ── 1. Resolve Before ──────────────────────────────────────────
+    let before_blob = if !has_old {
+        None
+    } else if let Some(ref r) = rev {
+        let before_rev = if r.contains("..") {
+            let mut parts = r.splitn(2, "..");
+            let first = parts.next().unwrap_or("");
+            if first.is_empty() { "HEAD".to_string() } else { first.to_string() }
+        } else {
+            format!("{r}~1")
+        };
+        resolve_git_blob_to_file(project_path, &before_rev, old_p, &cache_dir)
+    } else if mode_str == "staged" {
+        if has_head(project_path) {
+            resolve_git_blob_to_file(project_path, "HEAD", old_p, &cache_dir)
+        } else {
+            None
+        }
+    } else if mode_str == "unstaged" {
+        // Try index first (:old_p), then fallback to HEAD:old_p
+        resolve_git_blob_to_file(project_path, ":", old_p, &cache_dir)
+            .or_else(|| {
+                if has_head(project_path) {
+                    resolve_git_blob_to_file(project_path, "HEAD", old_p, &cache_dir)
+                } else {
+                    None
+                }
+            })
+    } else {
+        // mode == "head" or None
+        if has_head(project_path) {
+            resolve_git_blob_to_file(project_path, "HEAD", old_p, &cache_dir)
+        } else {
+            None
+        }
+    };
+
+    let before = before_blob.map(|(p, size, mtime)| {
+        let name = Path::new(old_p)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| old_p.to_string());
+        ReviewMediaSide {
+            path: p.to_string_lossy().into_owned(),
+            name,
+            size,
+            mtime,
+            mime: default_mime.to_string(),
+            exists: true,
+        }
+    });
+
+    // ── 2. Resolve After ───────────────────────────────────────────
+    let after_blob = if !has_new {
+        None
+    } else if let Some(ref r) = rev {
+        let after_rev = if r.contains("..") {
+            let mut parts = r.splitn(2, "..");
+            let _ = parts.next();
+            let second = parts.next().unwrap_or("");
+            if second.is_empty() { "HEAD".to_string() } else { second.to_string() }
+        } else {
+            r.clone()
+        };
+        resolve_git_blob_to_file(project_path, &after_rev, new_p, &cache_dir)
+    } else if mode_str == "staged" {
+        // Staged is in the git index
+        resolve_git_blob_to_file(project_path, ":", new_p, &cache_dir)
+    } else {
+        // Working-tree file on disk (unstaged or head with rev=None)
+        resolve_worktree_file(project_path, new_p)
+    };
+
+    let after = after_blob.map(|(p, size, mtime)| {
+        let name = Path::new(new_p)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| new_p.to_string());
+        ReviewMediaSide {
+            path: p.to_string_lossy().into_owned(),
+            name,
+            size,
+            mtime,
+            mime: default_mime.to_string(),
+            exists: true,
+        }
+    });
+
+    // If both before and after are None and has_new is true in working tree, check target_path on disk
+    let (before, after) = if before.is_none() && after.is_none() && has_new && rev.is_none() && mode_str != "staged" {
+        if let Some((canon, size, mtime)) = resolve_worktree_file(project_path, target_path) {
+            (None, Some(ReviewMediaSide {
+                path: canon.to_string_lossy().into_owned(),
+                name: file_name.clone(),
+                size,
+                mtime,
+                mime: default_mime.to_string(),
+                exists: true,
+            }))
+        } else {
+            (None, None)
+        }
+    } else {
+        (before, after)
+    };
+
+    Ok(ReviewMediaDiff {
+        kind: kind.to_string(),
+        file_name,
+        before,
+        after,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_diff_preserves_added_deleted_modified_renamed_status() {
+        let raw = "\
+diff --git a/assets/new.png b/assets/new.png
+new file mode 100644
+index 0000000..1111111
+Binary files /dev/null and b/assets/new.png differ
+diff --git a/assets/old.mp4 b/assets/old.mp4
+deleted file mode 100644
+index 2222222..0000000
+Binary files a/assets/old.mp4 and /dev/null differ
+diff --git a/assets/mod.webp b/assets/mod.webp
+index 3333333..4444444 100644
+Binary files a/assets/mod.webp and b/assets/mod.webp differ
+diff --git a/assets/from.png b/assets/to.png
+similarity index 95%
+rename from assets/from.png
+rename to assets/to.png
+index 5555555..6666666 100644
+Binary files a/assets/from.png and b/assets/to.png differ
+";
+        let files = parse_unified_diff(raw);
+        assert_eq!(files.len(), 4);
+
+        assert_eq!(files[0].status, "added");
+        assert!(files[0].is_binary);
+        assert_eq!(files[0].old_path, None);
+        assert_eq!(files[0].new_path.as_deref(), Some("assets/new.png"));
+
+        assert_eq!(files[1].status, "deleted");
+        assert!(files[1].is_binary);
+        assert_eq!(files[1].old_path.as_deref(), Some("assets/old.mp4"));
+        assert_eq!(files[1].new_path, None);
+
+        assert_eq!(files[2].status, "modified");
+        assert!(files[2].is_binary);
+        assert_eq!(files[2].old_path.as_deref(), Some("assets/mod.webp"));
+        assert_eq!(files[2].new_path.as_deref(), Some("assets/mod.webp"));
+
+        assert_eq!(files[3].status, "renamed");
+        assert!(files[3].is_binary);
+        assert_eq!(files[3].old_path.as_deref(), Some("assets/from.png"));
+        assert_eq!(files[3].new_path.as_deref(), Some("assets/to.png"));
+    }
+
+    #[test]
+    fn validates_safe_rel_paths_and_media_mimes() {
+        assert!(is_safe_rel_path("src/assets/logo.png"));
+        assert!(is_safe_rel_path("./icon.svg"));
+        assert!(!is_safe_rel_path(""));
+        assert!(!is_safe_rel_path("../secret.png"));
+        assert!(!is_safe_rel_path("assets/../../etc/passwd"));
+        assert!(!is_safe_rel_path("/etc/passwd"));
+
+        assert_eq!(media_kind_and_mime("hero.PNG"), Some(("image", "image/png")));
+        assert_eq!(media_kind_and_mime("clip.webm"), Some(("video", "video/webm")));
+        assert_eq!(media_kind_and_mime("main.rs"), None);
+    }
 }

@@ -32,6 +32,52 @@ export function basename(p: string): string {
   return p.split("/").pop() || p;
 }
 
+// ── Media file detection & size delta helpers ─────────────────────────────────
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg"]);
+const VIDEO_EXTS = new Set(["mp4", "webm", "mov", "m4v", "ogv", "mkv", "avi"]);
+
+export function isImageFile(path: string | null | undefined): boolean {
+  if (!path) return false;
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTS.has(ext);
+}
+
+export function isVideoFile(path: string | null | undefined): boolean {
+  if (!path) return false;
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return VIDEO_EXTS.has(ext);
+}
+
+export function isMediaFile(path: string | null | undefined): boolean {
+  return isImageFile(path) || isVideoFile(path);
+}
+
+export function formatMediaBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+export function formatMediaSizeDelta(beforeBytes: number, afterBytes: number): {
+  text: string;
+  delta: number;
+  percent: number;
+  isIncrease: boolean;
+} {
+  const delta = afterBytes - beforeBytes;
+  if (delta === 0) {
+    return { text: "No size change", delta: 0, percent: 0, isIncrease: false };
+  }
+  const percent = Number(((delta / Math.max(1, beforeBytes)) * 100).toFixed(1));
+  const sign = delta > 0 ? "+" : "";
+  return {
+    text: `${sign}${formatMediaBytes(delta)} (${sign}${percent}%)`,
+    delta,
+    percent,
+    isIncrease: delta > 0,
+  };
+}
+
 // ── Indexed line model for selection, inline comments & patch ops ─────────────
 export interface IndexedDiffLine {
   flatIndex: number;

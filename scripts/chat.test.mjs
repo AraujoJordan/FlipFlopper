@@ -457,6 +457,56 @@ test('diff model indexes lines and builds selected forward and reverse patches',
   assert.match(model.buildPatchForFile(renamed,hunks,null,'reverse'), /^--- a\/src\/before\.ts\n\+\+\+ b\/src\/after\.ts\n/);
 });
 
+test('diff model identifies media files and calculates comparison size deltas', async () => {
+  const model = await loadFrontend('../src/lib/diffModel.ts', {});
+  // Images
+  assert.equal(model.isImageFile('assets/hero.png'), true);
+  assert.equal(model.isImageFile('public/icons/app.JPG'), true);
+  assert.equal(model.isImageFile('images/photo.jpeg'), true);
+  assert.equal(model.isImageFile('anim.gif'), true);
+  assert.equal(model.isImageFile('banner.webp'), true);
+  assert.equal(model.isImageFile('vector.svg'), true);
+  assert.equal(model.isImageFile('icon.ico'), true);
+  assert.equal(model.isImageFile('image.avif'), true);
+  assert.equal(model.isImageFile('src/code.ts'), false);
+
+  // Videos
+  assert.equal(model.isVideoFile('demo.mp4'), true);
+  assert.equal(model.isVideoFile('recording.webm'), true);
+  assert.equal(model.isVideoFile('clip.MOV'), true);
+  assert.equal(model.isVideoFile('screencast.mkv'), true);
+  assert.equal(model.isVideoFile('demo.mp3'), false);
+
+  // Combined media
+  assert.equal(model.isMediaFile('hero.png'), true);
+  assert.equal(model.isMediaFile('demo.mp4'), true);
+  assert.equal(model.isMediaFile('package.json'), false);
+  assert.equal(model.isMediaFile(null), false);
+
+  // Formatting bytes
+  assert.equal(model.formatMediaBytes(500), '500 B');
+  assert.equal(model.formatMediaBytes(1024), '1.0 KB');
+  assert.equal(model.formatMediaBytes(1536), '1.5 KB');
+  assert.equal(model.formatMediaBytes(1048576 * 2.5), '2.50 MB');
+
+  // Size delta calculations
+  const decreased = model.formatMediaSizeDelta(1000, 800);
+  assert.equal(decreased.delta, -200);
+  assert.equal(decreased.percent, -20.0);
+  assert.equal(decreased.isIncrease, false);
+  assert.equal(decreased.text, '-200 B (-20%)');
+
+  const increased = model.formatMediaSizeDelta(1000, 1500);
+  assert.equal(increased.delta, 500);
+  assert.equal(increased.percent, 50.0);
+  assert.equal(increased.isIncrease, true);
+  assert.equal(increased.text, '+500 B (+50%)');
+
+  const unchanged = model.formatMediaSizeDelta(1000, 1000);
+  assert.equal(unchanged.delta, 0);
+  assert.equal(unchanged.text, 'No size change');
+});
+
 test('preferred targets use saved choices and retain concrete short labels', async () => {
   const module = await loadFrontend('../src/components/TargetButton.tsx', { 'solid-js':solid });
   const targets = [

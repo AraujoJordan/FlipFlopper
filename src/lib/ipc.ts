@@ -426,6 +426,41 @@ export const getReviewDiff = (
 ): Promise<FileDiff[]> =>
   invoke("get_review_diff", { projectPath, rev: rev ?? null, path: path ?? null, mode: mode ?? null });
 
+export interface ReviewMediaSide {
+  path: string;
+  name: string;
+  size: number;
+  mtime?: number | null;
+  mime: string;
+  exists: boolean;
+}
+
+export interface ReviewMediaDiff {
+  kind: "image" | "video";
+  file_name: string;
+  before: ReviewMediaSide | null;
+  after: ReviewMediaSide | null;
+}
+
+/** Return media comparison information for an image or video in the review pane.
+ *  Grants asset protocol scope to both before and after files. */
+export const getReviewMedia = (
+  projectPath: string,
+  path: string,
+  oldPath?: string | null,
+  newPath?: string | null,
+  rev?: string,
+  mode?: "staged" | "unstaged",
+): Promise<ReviewMediaDiff> =>
+  invoke("get_review_media", {
+    projectPath,
+    path,
+    oldPath: oldPath ?? null,
+    newPath: newPath ?? null,
+    rev: rev ?? null,
+    mode: mode ?? null,
+  });
+
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 export const getToolCatalog = (): Promise<ToolInfo[]> =>
