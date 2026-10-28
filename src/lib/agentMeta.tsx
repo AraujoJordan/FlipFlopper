@@ -1,9 +1,12 @@
 import { Component, createSignal, Show } from "solid-js";
+import { listAgentModels, type AgentModelChoice } from "./ipc";
+import { readPref, writePref } from "./appPrefs";
 
-// ── Model / effort options ────────────────────────────────────────────────────
-// Offered in the composer's agent menu and orchestrator steps. Ids are passed
-// to each CLI's own `--model` (and effort) flag by the chat engine.
-
+// ── Model / effort catalog ────────────────────────────────────────────────────
+// Nothing is bundled: each CLI is asked which models it offers (`list_agent_models`)
+// when the model picker opens. The last answer is persisted in preferences.json so
+// the picker shows it instantly next time and stays usable offline. Claude and
+// Cursor use their native ACP catalogs instead (see `agentTuning` in chat.ts).
 
 export interface AgentTuningOption {
   id: string;
@@ -16,85 +19,56 @@ export interface AgentTuning {
   efforts: AgentTuningOption[];
 }
 
-const GEMINI_FAMILY_MODELS: AgentTuningOption[] = [
-  { id: "gemini-3-pro-preview", label: "3 Pro" },
-  { id: "gemini-3-flash-preview", label: "3 Flash" },
-  { id: "gemini-2.5-pro", label: "2.5 Pro" },
-  { id: "gemini-2.5-flash", label: "2.5 Flash" },
-];
+interface CachedModels { models: AgentModelChoice[]; fetchedAt: number }
 
-export const AGENT_TUNING: Record<string, AgentTuning> = {
-  agy: {
-    models: GEMINI_FAMILY_MODELS,
-    efforts: [],
-  },
-  qwen: {
-    models: [
-      { id: "qwen3-coder-plus", label: "Coder Plus" },
-      { id: "qwen3-coder-flash", label: "Coder Flash" },
-      ...GEMINI_FAMILY_MODELS,
-    ],
-    efforts: [],
-  },
-  aider: {
-    models: [
-      { id: "sonnet", label: "Sonnet" },
-      { id: "opus", label: "Opus" },
-      { id: "haiku", label: "Haiku" },
-      { id: "flash", label: "Gemini Flash" },
-      { id: "deepseek", label: "DeepSeek" },
-    ],
-    efforts: [
-      { id: "low", label: "Low" },
-      { id: "medium", label: "Medium" },
-      { id: "high", label: "High" },
-    ],
-  },
-  codex: {
-    models: [
-      { id: "gpt-5.3-codex", label: "Codex 5.3" },
-      { id: "gpt-5.2-codex", label: "Codex 5.2" },
-      { id: "gpt-5.2", label: "GPT-5.2" },
-      { id: "gpt-5.1-codex-mini", label: "Codex Mini" },
-    ],
-    efforts: [
-      { id: "low", label: "Low" },
-      { id: "medium", label: "Medium" },
-      { id: "high", label: "High" },
-      { id: "xhigh", label: "Extra High" },
-    ],
-  },
-  opencode: {
-    models: [
-      { id: "opencode/claude-sonnet-5", label: "Sonnet 5" },
-      { id: "opencode/claude-opus-4-8", label: "Opus 4.8" },
-      { id: "opencode/gemini-3.5-flash", label: "Gemini 3.5 Flash" },
-      { id: "opencode/glm-5.1", label: "GLM 5.1" },
-      { id: "opencode/deepseek-v4-pro", label: "DeepSeek V4 Pro" },
-    ],
-    efforts: [],
-  },
-  grok: {
-    models: [
-      { id: "grok-build-0.1", label: "Build 0.1" },
-      { id: "grok-4.3", label: "Grok 4.3" },
-      { id: "grok-4", label: "Grok 4" },
-    ],
-    efforts: [],
-  },
-  kimi: {
-    // Kimi's `/model` is a picker-only TUI panel (no inline arg), so live
-    // sessions can't be driven — fresh step sessions get `-m` instead.
-    // Model aliases are the managed kimi-code defaults from `kimi provider list`.
-    models: [
-      { id: "kimi-code/k3", label: "K3" },
-      { id: "kimi-code/k3-256k", label: "K3 256K" },
-      { id: "kimi-code/kimi-for-coding", label: "For Coding" },
-      { id: "kimi-code/kimi-for-coding-highspeed", label: "For Coding HS" },
-    ],
-    efforts: [],
-  },
-};
+const PREF_KEY = "agentModelCatalog";
+const [catalog, setCatalog] = createSignal<Record<string, CachedModels>>({});
+const [loading, setLoading] = createSignal<Record<string, boolean>>({});
+const [errors, setErrors] = createSignal<Record<string, string>>({});
+let hydration: Promise<void> | undefined;
+
+/** Load the persisted catalog once; safe to call from several components. */
+export function hydrateAgentModels(): Promise<void> {
+  hydration ??= readPref<Record<string, CachedModels>>(PREF_KEY, {})
+    .then((saved) => { setCatalog((fresh) => ({ ...saved, ...fresh })); })
+    .catch(() => undefined);
+  return hydration;
+}
+
+/** Ask the installed CLI for its current models, then persist the answer. */
+export async function refreshAgentModels(agentId: string): Promise<void> {
+  await hydrateAgentModels();
+  if (loading()[agentId]) return;
+  setLoading((l) => ({ ...l, [agentId]: true }));
+  try {
+    const models = await listAgentModels(agentId);
+    setErrors((e) => ({ ...e, [agentId]: "" }));
+    // An empty answer (CLI without a listing command, or logged out) keeps the last good list.
+    if (models.length > 0) {
+      setCatalog((c) => ({ ...c, [agentId]: { models, fetchedAt: Date.now() } }));
+      writePref(PREF_KEY, catalog());
+    }
+  } catch (error) {
+    setErrors((e) => ({ ...e, [agentId]: String(error) }));
+  } finally {
+    setLoading((l) => ({ ...l, [agentId]: false }));
+  }
+}
+
+export const agentModelsLoading = (agentId: string) => !!loading()[agentId];
+export const agentModelsError = (agentId: string) => errors()[agentId] || null;
+
+const titleCase = (id: string) => id.charAt(0).toUpperCase() + id.slice(1);
+
+/** Models and efforts last reported by the agent's CLI. `model` selects whose efforts to offer. */
+export function discoveredTuning(agentId: string, model?: string | null): AgentTuning {
+  const models = catalog()[agentId]?.models ?? [];
+  const efforts = (models.find((m) => m.id === model) ?? models[0])?.efforts ?? [];
+  return {
+    models: models.map((m) => ({ id: m.id, label: m.label })),
+    efforts: efforts.map((id) => ({ id, label: titleCase(id) })),
+  };
+}
 
 // ── Agent visual identity (colors, letters, logo) ────────────────────────────
 // Single source of truth for how an agent is represented in the UI. Consumed

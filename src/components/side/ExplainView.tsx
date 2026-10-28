@@ -1,11 +1,11 @@
 import { Component, For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
-import { activeSession, chat } from "../../lib/chat";
+import { activeSession, agentTuning, chat } from "../../lib/chat";
+import { hydrateAgentModels } from "../../lib/agentMeta";
 import { layout } from "../../lib/layout";
 import {
   effectiveChoice, explain, explainChoice, explainIsStale, ollamaChoiceMissing, explanationFor, headlessAgents, ollamaModels,
   refreshOllamaModels, resolveProvider, setExplainChoice, type ExplainChoice,
 } from "../../lib/explain";
-import { AGENT_TUNING } from "../../lib/agentMeta";
 import { Icon } from "../shell/Icon";
 import Markdown from "../chat/Markdown";
 import { Spinner } from "../ui";
@@ -15,7 +15,7 @@ const encode = (choice: ExplainChoice) => JSON.stringify(choice);
 
 /** Model picker shared by the Explain tab and Settings. */
 export const ExplainProviderSelect: Component = () => {
-  onMount(() => void refreshOllamaModels());
+  onMount(() => { void refreshOllamaModels(); void hydrateAgentModels(); });
   const change = (value: string) => { try { setExplainChoice(JSON.parse(value) as ExplainChoice); } catch { /* ignore */ } };
   return (
     <select class="explain-select" value={encode(effectiveChoice())} onChange={(e) => change(e.currentTarget.value)} title="Model that writes the explanation" aria-label="Explanation model">
@@ -24,7 +24,7 @@ export const ExplainProviderSelect: Component = () => {
         {(agent) => (
           <optgroup label={agent.name}>
             <option value={encode({ kind: "agent", agent_id: agent.id, model: null })}>{agent.name} · default</option>
-            <For each={AGENT_TUNING[agent.id]?.models ?? []}>
+            <For each={agentTuning(agent.id)?.models ?? []}>
               {(m) => <option value={encode({ kind: "agent", agent_id: agent.id, model: m.id })}>{agent.name} · {m.label}</option>}
             </For>
           </optgroup>

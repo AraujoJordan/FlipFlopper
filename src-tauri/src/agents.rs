@@ -259,6 +259,60 @@ mod tests {
     }
 
     #[test]
+    fn parses_codex_model_catalog() {
+        let out = r#"{"models":[
+            {"slug":"b","display_name":"B","visibility":"list","priority":2,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]},
+            {"slug":"hidden","visibility":"hide","priority":1},
+            {"slug":"a","display_name":"A","visibility":"list","priority":1}]}"#;
+        let models = super::parse_codex_models(out);
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(models[1].efforts, ["low", "high"]);
+        assert!(super::parse_codex_models("not json").is_empty());
+    }
+
+    #[test]
+    fn parses_opencode_and_heading_model_lists() {
+        let models = super::parse_opencode_models("google/gemini-2.5-pro\nnoise line\nopenai/gpt-5\n");
+        assert_eq!(models.len(), 2);
+        let grok = super::parse_model_lines("Default model: x\n\nAvailable models:\n- grok-4  Grok 4\n* grok-build\n", Some("Available models:"));
+        assert_eq!((grok[0].id.as_str(), grok[0].label.as_str()), ("grok-4", "Grok 4"));
+        assert_eq!(grok[1].label, "grok-build");
+        assert!(super::parse_model_lines("You are not authenticated.", Some("Available models:")).is_empty());
+    }
+
+    #[test]
+    fn parses_agy_droid_kimi_and_qwen_model_lists() {
+        let agy = super::parse_agy_models("Fetching available models...\ngemini-4-argon-high\tGemini 4 Argon (High)\n");
+        assert_eq!((agy.len(), agy[0].id.as_str(), agy[0].label.as_str()), (1, "gemini-4-argon-high", "Gemini 4 Argon (High)"));
+
+        let help = "Options:\n  -m, --model <id>  Model\n\nAvailable Models:\n  auto                Auto Model\n  gpt-6-sol           GPT-6 Sol (default)\n\nExamples:\n  droid exec x\n";
+        let droid = super::parse_droid_models(help);
+        assert_eq!(droid.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["auto", "gpt-6-sol"]);
+        assert_eq!(droid[1].label, "GPT-6 Sol");
+        assert!(super::parse_droid_models("no models here").is_empty());
+
+        let kimi = super::parse_kimi_models(r#"{"providers":{},"models":{"kimi-code/k3":{"displayName":"K3"},"kimi-code/x":{}}}"#);
+        assert_eq!((kimi[0].id.as_str(), kimi[0].label.as_str()), ("kimi-code/k3", "K3"));
+        assert_eq!(kimi[1].label, "kimi-code/x");
+
+        let qwen = super::parse_qwen_models(r#"{"modelProviders":{"openai":[{"id":"a","name":"A"},{"id":"a"}],"anthropic":[{"id":"b"}]}}"#);
+        assert_eq!(qwen.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert!(super::parse_qwen_models("{}").is_empty());
+    }
+
+    /// Opt-in: `cargo test --lib installed_clis_list_models -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "runs the installed agent CLIs"]
+    async fn installed_clis_list_models() {
+        for id in ["codex", "opencode", "grok", "agy", "droid", "kimi", "qwen"] {
+            let installed = super::find_agent(id).and_then(super::launch_binary).is_some();
+            let models = if installed { super::fetch_agent_models(id).await } else { Ok(Vec::new()) };
+            let first: Vec<_> = models.iter().flatten().take(3).map(|m| format!("{} = {}", m.id, m.label)).collect();
+            println!("{id}: installed={installed} count={:?} first={first:?}", models.as_ref().map(Vec::len));
+        }
+    }
+
+    #[test]
     fn strips_ansi_sequences() {
         assert_eq!(strip_ansi("\u{1b}[?25lhello\u{1b}[0m"), "hello");
     }
@@ -376,6 +430,198 @@ pub async fn list_ollama_models() -> Vec<String> {
         }
         _ => Vec::new(),
     }
+}
+
+/// A model offered by an agent CLI, discovered from the CLI itself.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModelChoice {
+    pub id: String,
+    pub label: String,
+    /// Reasoning-effort levels this model supports (empty when unknown).
+    pub efforts: Vec<String>,
+}
+
+/// `codex debug models` JSON: listed (non-hidden) models in catalog order.
+fn parse_codex_models(output: &str) -> Vec<ModelChoice> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(output) else {
+        return Vec::new();
+    };
+    let mut models: Vec<(i64, ModelChoice)> = json["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"].as_str().map_or(true, |v| v == "list"))
+        .filter_map(|m| {
+            let id = m["slug"].as_str()?.to_string();
+            let label = m["display_name"].as_str().unwrap_or(&id).to_string();
+            let efforts = m["supported_reasoning_levels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e["effort"].as_str().map(str::to_string))
+                .collect();
+            Some((m["priority"].as_i64().unwrap_or(i64::MAX), ModelChoice { id, label, efforts }))
+        })
+        .collect();
+    models.sort_by_key(|(priority, _)| *priority);
+    models.into_iter().map(|(_, m)| m).collect()
+}
+
+/// `opencode models`: one `provider/model` id per line.
+fn parse_opencode_models(output: &str) -> Vec<ModelChoice> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains('/') && !l.contains(char::is_whitespace))
+        .map(|id| ModelChoice { id: id.to_string(), label: id.to_string(), efforts: Vec::new() })
+        .collect()
+}
+
+/// `agy models`: `id<TAB>label` per model; the "Fetching…" banner has no tab.
+fn parse_agy_models(output: &str) -> Vec<ModelChoice> {
+    output
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(id, label)| (id.trim(), label.trim()))
+        .filter(|(id, _)| !id.is_empty())
+        .map(|(id, label)| ModelChoice {
+            id: id.to_string(),
+            label: if label.is_empty() { id.to_string() } else { label.to_string() },
+            efforts: Vec::new(),
+        })
+        .collect()
+}
+
+/// `droid exec --help` ends with an "Available Models:" block of indented
+/// `id  Label` rows (Droid has no dedicated listing command).
+fn parse_droid_models(help: &str) -> Vec<ModelChoice> {
+    let rows = help
+        .lines()
+        .skip_while(|l| l.trim() != "Available Models:")
+        .skip(1)
+        .take_while(|l| l.starts_with(' ') && !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    parse_model_lines(&rows, None)
+        .into_iter()
+        .map(|mut m| {
+            m.label = m.label.replace(" (default)", "");
+            m
+        })
+        .collect()
+}
+
+/// `kimi provider list --json`: `models` maps the alias passed to `-m` to its metadata.
+fn parse_kimi_models(output: &str) -> Vec<ModelChoice> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(output) else {
+        return Vec::new();
+    };
+    json["models"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, m)| ModelChoice {
+            id: id.clone(),
+            label: m["displayName"].as_str().unwrap_or(id).to_string(),
+            efforts: Vec::new(),
+        })
+        .collect()
+}
+
+/// Qwen Code has no listing command; its `/model` picker is built from
+/// `modelProviders` in settings.json (`{provider: [{id, name}]}`).
+fn parse_qwen_models(settings: &str) -> Vec<ModelChoice> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(settings) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    json["modelProviders"]
+        .as_object()
+        .into_iter()
+        .flat_map(|providers| providers.values())
+        .filter_map(|models| models.as_array())
+        .flatten()
+        .filter_map(|m| {
+            let id = m["id"].as_str()?;
+            seen.insert(id.to_string()).then(|| ModelChoice {
+                id: id.to_string(),
+                label: m["name"].as_str().unwrap_or(id).to_string(),
+                efforts: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// Tolerant `id  optional label` lines, optionally after a heading such as
+/// `Available models:` (grok).
+fn parse_model_lines(output: &str, heading: Option<&str>) -> Vec<ModelChoice> {
+    let mut lines = output.lines();
+    if let Some(heading) = heading {
+        if !lines.by_ref().any(|l| l.trim().eq_ignore_ascii_case(heading)) {
+            return Vec::new();
+        }
+    }
+    lines
+        .map(|l| l.trim().trim_start_matches(['-', '*', '•']).trim())
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| {
+            let (id, rest) = l.split_once(char::is_whitespace).unwrap_or((l, ""));
+            let rest = rest.trim().trim_start_matches(['-', ':']).trim();
+            Some(ModelChoice {
+                id: id.to_string(),
+                label: if rest.is_empty() { id.to_string() } else { rest.to_string() },
+                efforts: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// Ask the installed CLI which models it currently offers. Nothing is bundled:
+/// agents without a listing source (Aider) return an empty list and the UI
+/// relies on a custom model id. Claude and Cursor use their native ACP catalogs.
+pub async fn fetch_agent_models(agent_id: &str) -> Result<Vec<ModelChoice>, String> {
+    let def = find_agent(agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
+    let args: &[&str] = match agent_id {
+        "codex" => &["debug", "models"],
+        "opencode" | "grok" | "agy" => &["models"],
+        "droid" => &["exec", "--help"],
+        "kimi" => &["provider", "list", "--json"],
+        "qwen" => {
+            let settings = dirs::home_dir().map(|h| h.join(".qwen/settings.json"));
+            return Ok(settings
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|s| parse_qwen_models(&s))
+                .unwrap_or_default());
+        }
+        _ => return Ok(Vec::new()),
+    };
+    let binary = launch_binary(def).ok_or_else(|| format!("Agent '{}' is not installed.", def.name))?;
+    let child = tokio::process::Command::new(binary)
+        .args(args)
+        .env("PATH", augmented_path_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Failed to run {}: {e}", def.name))?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output())
+        .await
+        .map_err(|_| format!("{} timed out listing models.", def.name))?
+        .map_err(|e| format!("{} could not list models: {e}", def.name))?;
+    let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() { format!("{} could not list models.", def.name) } else { stderr });
+    }
+    Ok(match agent_id {
+        "codex" => parse_codex_models(&stdout),
+        "opencode" => parse_opencode_models(&stdout),
+        "agy" => parse_agy_models(&stdout),
+        "droid" => parse_droid_models(&stdout),
+        "kimi" => parse_kimi_models(&stdout),
+        _ => parse_model_lines(&stdout, Some("Available models:")),
+    })
 }
 
 /// Interpret a completed one-shot process. Stdout is an answer only after a

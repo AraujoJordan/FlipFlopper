@@ -135,6 +135,7 @@ fn add_common_tool_paths(paths: &mut Vec<PathBuf>, seen: &mut HashSet<OsString>)
     for rel in [
         ".cargo/bin",
         ".local/bin",
+        ".kimi-code/bin",
         "go/bin",
         ".deno/bin",
         ".bun/bin",

@@ -32,7 +32,7 @@ import { notifyOnFinish } from "./settings";
 import { requestNotificationPermissionIfNeeded, sendNativeNotification } from "./native";
 import { bumpGitStatus, setStore, store } from "./store";
 import { toast, confirmDialog } from "../components/ui";
-import { AGENT_TUNING, type AgentTuning } from "./agentMeta";
+import { discoveredTuning, type AgentTuning } from "./agentMeta";
 import { layout } from "./layout";
 import { applyEntry, lastAssistant, reduceTranscript } from "./transcript";
 import type { SessionView } from "./transcript";
@@ -992,7 +992,7 @@ export async function respondToAgent(sessionId: string, request: AgentInteractio
   } catch (error) { toast(String(error), "error"); return false; }
 }
 export function agentTuning(agentId: string): AgentTuning | undefined {
-  if (agentId !== "claude" && agentId !== "cursor") return AGENT_TUNING[agentId];
+  if (agentId !== "claude" && agentId !== "cursor") return discoveredTuning(agentId, chat.composer.agentId === agentId ? chat.composer.model : null);
   const active = chat.activeId ? chat.views[chat.activeId]?.runtime : undefined;
   const runtime = active?.agent_id === agentId ? active : Object.values(chat.views).map((v) => v.runtime).find((r) => r?.agent_id === agentId && r.config_options.length > 0);
   const choices = (category: string) => {

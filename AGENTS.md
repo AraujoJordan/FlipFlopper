@@ -75,6 +75,7 @@ Currently implemented:
   model-dependent option updates. `/agent:<command>` distinguishes native
   commands from local app actions. Images up to 20 MiB use structured ACP image
   blocks when supported; other attachments remain accessible by prompt paths.
+- Headless agents' model lists are never bundled: opening the model picker runs `list_agent_models` (`agents::fetch_agent_models`: codex, opencode, grok, agy, droid, kimi, plus qwen's `modelProviders`) and persists the answer in `preferences.json`. Aider and unlisted CLIs rely on the custom model ID field.
 - `/clear` resets the session in place (empty transcript and title, new native context) and archives the previous transcript as a `(cleared)` session; typed local `/commands` run on Enter instead of being sent.
 - Sessions sidebar grouped by project; transcript with markdown, collapsible
   tool rows and inline diffs; composer with `@` mentions, `/` commands and
@@ -249,7 +250,8 @@ src/
   lib/orchestrator.ts        flow canvas on sessions (see Project Snapshot)
   lib/explain.ts             Explain tab state: provider choice, per-session text
   lib/shortcuts.ts           global shortcuts + SHORTCUT_GROUPS reference
-  lib/agentMeta.tsx          agent colors/logos and model/effort options
+  lib/agentMeta.tsx          agent colors/logos and the persisted model catalog
+                             (`refreshAgentModels` runs `list_agent_models` when the picker opens)
   lib/fileIcons.ts           compact file-category -> Material Symbol mapping
   lib/markdownLite.ts        dependency-free markdown -> HTML (escaped), with
                              shared escaping + highlight.js core/languages for

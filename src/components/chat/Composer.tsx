@@ -4,7 +4,7 @@ import {
 import {
   agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, isRunning, splitMode,
 } from "../../lib/chat";
-import { AgentLogo } from "../../lib/agentMeta";
+import { AgentLogo, agentModelsError, agentModelsLoading, hydrateAgentModels, refreshAgentModels } from "../../lib/agentMeta";
 import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMode } from "../../lib/ipc";
 import { openSide } from "../../lib/layout";
 import { registerShortcutHandler } from "../../lib/shortcuts";
@@ -373,6 +373,13 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     if (!m) return null;
     return tuning()?.models.find((x) => x.id === m)?.label ?? m;
   };
+  /** Opening the picker asks the CLI for its current models; the saved list shows meanwhile. */
+  function toggleModelMenu() {
+    const opening = !modelMenu();
+    setModelMenu(opening);
+    if (opening && !native()) void refreshAgentModels(chat.composer.agentId);
+  }
+  onMount(() => void hydrateAgentModels());
   const modeInfo = () => MODES.find((m) => m.id === chat.composer.mode) ?? MODES[1];
   /** Amber visual token while YOLO is on; the mode label itself stays. */
   const modeTint = () => (chat.composer.yolo ? "full" : chat.composer.mode);
@@ -638,7 +645,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                 )}
               </For>
             </Menu>
-            <button ref={modelAnchor} type="button" class="pill composer-model" onClick={() => setModelMenu((v) => !v)} title="Model and effort" aria-label={`Model and effort: ${modelSummary() ?? (native() ? "CLI setting" : "Default")}`} aria-haspopup="menu" aria-expanded={modelMenu()}>
+            <button ref={modelAnchor} type="button" class="pill composer-model" onClick={toggleModelMenu} title="Model and effort" aria-label={`Model and effort: ${modelSummary() ?? (native() ? "CLI setting" : "Default")}`} aria-haspopup="menu" aria-expanded={modelMenu()}>
               <span class="picker-label">{modelSummary() ?? (native() ? "CLI setting" : "Default")}</span><Icon name="chevronDown" size={11} />
             </button>
             <Menu open={modelMenu()} onClose={() => setModelMenu(false)} anchorRef={modelAnchor} align="right" width={300}>
@@ -655,12 +662,15 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                   </MenuItem>
                 )}
               </For>
-              <Show when={native()}>
-                <form class="agent-model-custom" onSubmit={(e) => { e.preventDefault(); setComposer({ model: customModel().trim() || null }); }}>
-                  <input class="ui-field" aria-label="Custom model ID" placeholder="Custom model ID" value={customModel()} onInput={(e) => setCustomModel(e.currentTarget.value)} />
-                  <button type="submit" class="ui-btn ui-btn-outline">Use</button>
-                </form>
-                <Show when={!tuning()?.models.length}><p class="agent-model-hint">The CLI’s model options load when the native session connects.</p></Show>
+              <form class="agent-model-custom" onSubmit={(e) => { e.preventDefault(); setComposer({ model: customModel().trim() || null }); }}>
+                <input class="ui-field" aria-label="Custom model ID" placeholder="Custom model ID" value={customModel()} onInput={(e) => setCustomModel(e.currentTarget.value)} />
+                <button type="submit" class="ui-btn ui-btn-outline">Use</button>
+              </form>
+              <Show when={native() && !tuning()?.models.length}><p class="agent-model-hint">The CLI’s model options load when the native session connects.</p></Show>
+              <Show when={!native()}>
+                <Show when={agentModelsLoading(chat.composer.agentId)}><p class="agent-model-hint">Fetching the latest models…</p></Show>
+                <Show when={!agentModelsLoading(chat.composer.agentId) && agentModelsError(chat.composer.agentId)}>{(error) => <p class="agent-model-hint">Couldn’t refresh models: {error()}</p>}</Show>
+                <Show when={!agentModelsLoading(chat.composer.agentId) && !agentModelsError(chat.composer.agentId) && !tuning()?.models.length}><p class="agent-model-hint">This CLI can’t list its models. Enter a model ID above.</p></Show>
               </Show>
               <Show when={tuning() && tuning()!.efforts.length > 0}>
                 <MenuDivider />

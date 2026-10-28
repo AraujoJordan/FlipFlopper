@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.20.0 - 2026-10-28
+
+### Added
+
+- **Live model lists**: opening the model picker asks the installed CLI which models it offers (`list_agent_models`) and refreshes in the background. The last answer is saved in `preferences.json`, so the picker shows it instantly and still works offline. Sources: `codex debug models` (with per-model effort levels), `opencode models`, `grok models`, `agy models`, the "Available Models" block of `droid exec --help`, `kimi provider list --json`, and `modelProviders` in Qwen's `settings.json`. Claude and Cursor keep using their native ACP catalogs.
+- The custom model ID field is available for every agent, with a hint when a CLI cannot list its models (Aider).
+
+### Changed
+
+- The bundled model and effort tables (`AGENT_TUNING`) are gone; nothing is hardcoded any more. The Explain tab's model dropdown reads the same saved lists.
+- Effort levels now come from the CLI's own catalog (Codex), so Aider no longer shows effort chips.
+- `~/.kimi-code/bin` is on the augmented PATH so GUI-launched builds find Kimi.
+
 ## 0.19.0 - 2026-10-27
 
 ### Added

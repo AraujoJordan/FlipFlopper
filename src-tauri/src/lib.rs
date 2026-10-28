@@ -1010,6 +1010,11 @@ async fn list_ollama_models() -> Vec<String> {
 }
 
 #[tauri::command]
+async fn list_agent_models(agent_id: String) -> Result<Vec<agents::ModelChoice>, String> {
+    agents::fetch_agent_models(&agent_id).await
+}
+
+#[tauri::command]
 async fn create_worktree(project_path: String, agent_id: String) -> Result<WorktreeInfo, String> {
     run_blocking(move || worktree::create_worktree(&project_path, &agent_id)).await?
 }
@@ -2060,6 +2065,7 @@ pub fn run() {
             generate_worktree_commit_message,
             chat_explain,
             list_ollama_models,
+            list_agent_models,
             // Tools
             get_tool_catalog,
             install_tool,

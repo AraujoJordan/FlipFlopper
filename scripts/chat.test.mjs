@@ -21,7 +21,7 @@ async function loadChat(overrides = {}) {
   globalThis.requestAnimationFrame = () => 1;
   globalThis.cancelAnimationFrame = () => {};
   const transcript = overrides["./transcript"] ?? await loadFrontend("../src/lib/transcript.ts", {});
-  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { AGENT_TUNING: {} }, "./store": { store: {} }, "./layout": { layout: {projectNames:{},projectOrder:[],hiddenProjects:[]} }, "./transcript": transcript, ...overrides };
+  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { discoveredTuning: () => ({ models: [], efforts: [] }) }, "./store": { store: {} }, "./layout": { layout: {projectNames:{},projectOrder:[],hiddenProjects:[]} }, "./transcript": transcript, ...overrides };
   const module = new SourceTextModule(source);
   await module.link((specifier) => {
     const names = imports.get(specifier);
@@ -889,6 +889,7 @@ async function composerFixture(activeId = 's') {
       agentTuning: () => ({ models:[], efforts:[] }), nativeCommands: () => [], contextUsage: () => undefined,
       submitPrompt: (...args) => { submissions.push(args); return new Promise((done) => { resolve=done; }); },
     },
+    '../../lib/agentMeta': { AgentLogo() {}, agentModelsLoading: () => false, agentModelsError: () => null, hydrateAgentModels() {}, refreshAgentModels() {} },
     '../../lib/store': { store: { agents:[], currentProject:null }, effectiveRoot: () => null },
     '../../lib/attachments': { attachments, setAttachments, clearAttachments: () => setAttachments([]) },
     '../../lib/shortcuts': { registerShortcutHandler: () => () => {} },
