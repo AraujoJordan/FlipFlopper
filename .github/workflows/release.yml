@@ -115,9 +115,10 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            FlipFlopper 0.21.0 introduces enhanced slash command integration, an interactive
-            MCP server & skills inspector, seamless headless skill execution, wider responsive
-            conversation columns, and queued message steering (Ctrl+Enter).
+            FlipFlopper 0.22.0 introduces visual diff and side-by-side comparison for images
+            and videos in the Changes review pane, featuring 2-up comparison, swipe sliders,
+            onion skinning, difference overlays, synchronized video playback, and 1-click chat
+            actions.
 
             Installers include the pinned Node sidecar and Claude ACP helper. Native
             Claude requires macOS 13.5+ on a Mac.

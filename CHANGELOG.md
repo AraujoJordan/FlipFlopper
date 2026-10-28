@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.22.0 - 2026-10-28
+
+### Added
+
+- **Image & video visual diff and side-by-side comparison**:
+  - The Changes review pane now supports rich inline visual inspection and side-by-side comparison ("comp") for images (PNG, JPEG, GIF, WebP, SVG, AVIF, BMP, ICO) and videos (MP4, WebM, MOV, M4V, OGV, MKV, AVI).
+  - Multiple comparison modes for images: **Side by Side (2-up)**, **Swipe slider** (interactive before/after divider), **Onion Skin** (variable opacity crossfade), **Difference** (pixel change highlight), **Before only**, and **After only**.
+  - Synchronized master video player with simultaneous play/pause, scrub slider, loop, mute, and variable speed (0.5x, 1x, 1.5x, 2x).
+  - Zoom modes (Fit, 100% Actual Size, 200% Pixel Zoom with click-to-cycle), checkerboard transparency grid toggle, and external app launch.
+  - SVG visual comparison toggle between graphical render and raw XML text hunks.
+  - Direct composer integration: 1-click **Attach** to conversation and **Ask changes** (`In `@filepath`: `) directly from the media toolbar.
+  - Dimension metadata, byte size change deltas (`formatMediaSizeDelta`), and live Git status cache-busting.
+
 ## 0.21.0 - 2026-10-28
 
 ### Added
