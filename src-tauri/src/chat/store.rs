@@ -53,6 +53,9 @@ pub struct SessionMeta {
     #[serde(default)]
     pub effort: Option<String>,
     pub mode: PermissionMode,
+    /// Auto-approve every tool request, independent of `mode` (Plan stays Plan).
+    #[serde(default)]
+    pub yolo: bool,
     /// agent id → native CLI session id, for `--resume`.
     #[serde(default)]
     pub native_ids: HashMap<String, String>,
@@ -147,7 +150,12 @@ fn read_index_strict() -> Result<Vec<SessionMeta>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(format!("Failed to read sessions: {error}")),
     };
-    serde_json::from_str(&text).map_err(|error| format!("Failed to parse sessions: {error}"))
+    let mut sessions: Vec<SessionMeta> = serde_json::from_str(&text).map_err(|error| format!("Failed to parse sessions: {error}"))?;
+    // Sessions saved while YOLO was a mode (`full`) become Auto-edit + yolo.
+    for meta in &mut sessions {
+        (meta.mode, meta.yolo) = meta.mode.with_yolo(meta.yolo);
+    }
+    Ok(sessions)
 }
 
 fn write_index(sessions: &[SessionMeta]) -> Result<(), String> {
@@ -613,7 +621,7 @@ mod tests {
         let meta = SessionMeta {
             id: id.into(), project_path: "/p".into(), cwd: "/p".into(), worktree: None,
             title: "Fix pty".into(), agent_id: "claude".into(), model: None, effort: None,
-            mode: PermissionMode::AutoEdit, title_locked: false, native_ids: HashMap::new(), acp_sessions: HashMap::new(), agent_last_entry: HashMap::new(),
+            mode: PermissionMode::AutoEdit, yolo: false, title_locked: false, native_ids: HashMap::new(), acp_sessions: HashMap::new(), agent_last_entry: HashMap::new(),
             entry_count: 2, status: "idle".into(), archived: false, pinned: false, parent_id: None,
             created_at: 1, updated_at: 2,
         };
@@ -642,7 +650,7 @@ mod tests {
         let meta = SessionMeta {
             id: id.into(), project_path: "/p".into(), cwd: "/p".into(), worktree: None,
             title: "Keep me".into(), agent_id: "claude".into(), model: None, effort: None,
-            mode: PermissionMode::AutoEdit, title_locked: false, native_ids: HashMap::new(), acp_sessions: HashMap::new(), agent_last_entry: HashMap::new(),
+            mode: PermissionMode::AutoEdit, yolo: false, title_locked: false, native_ids: HashMap::new(), acp_sessions: HashMap::new(), agent_last_entry: HashMap::new(),
             entry_count: 0, status: "idle".into(), archived: false, pinned: false, parent_id: None,
             created_at: 1, updated_at: 2,
         };

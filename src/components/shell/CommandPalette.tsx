@@ -92,7 +92,7 @@ const CommandPalette: Component = () => {
     { id: "a-plan", section: "Actions", label: "Switch to Plan mode", icon: "clipboard", run: act(() => setComposer({ mode: "plan" })) },
     { id: "a-ask", section: "Actions", label: "Switch to Ask mode", icon: "help", run: act(() => setComposer({ mode: "ask" })) },
     { id: "a-auto", section: "Actions", label: "Switch to Auto-edit mode", icon: "pencil", run: act(() => setComposer({ mode: "auto_edit" })) },
-    { id: "a-yolo", section: "Actions", label: `${chat.composer.mode === "full" ? "Turn off" : "Turn on"} YOLO mode`, icon: "zap", run: act(() => setYolo(chat.composer.mode !== "full")) },
+    { id: "a-yolo", section: "Actions", label: `${chat.composer.yolo ? "Turn off" : "Turn on"} YOLO (auto-approve)`, icon: "zap", run: act(() => setYolo(!chat.composer.yolo)) },
     { id: "a-theme", section: "Actions", label: `Change theme (now ${layout.theme})`, icon: "eye", run: act(cycleTheme) },
     ...(pendingCandidates().length > 0
       ? [{ id: "a-import", section: "Actions" as const, label: `Import ${pendingCandidates().length} CLI sessions…`, icon: "download" as IconName, run: act(() => setImportOpen(true)) }]

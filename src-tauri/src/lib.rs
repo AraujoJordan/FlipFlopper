@@ -1502,9 +1502,13 @@ fn chat_runtime_state(state: State<'_, std::sync::Arc<chat::ChatManager>>, sessi
 }
 
 #[tauri::command]
-async fn chat_set_mode(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, mode: chat::adapters::PermissionMode) -> Result<chat::ModeUpdate, String> {
+async fn chat_set_mode(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, mode: chat::adapters::PermissionMode, yolo: Option<bool>) -> Result<chat::ModeUpdate, String> {
     let manager = state.inner().clone();
-    run_blocking(move || manager.set_mode(&session_id, mode)).await?
+    run_blocking(move || {
+        // An omitted `yolo` leaves the toggle as it is.
+        let yolo = yolo.or_else(|| chat::store::get_session(&session_id).map(|m| m.yolo)).unwrap_or(false);
+        manager.set_mode(&session_id, mode, yolo)
+    }).await?
 }
 
 #[tauri::command]
@@ -1529,7 +1533,10 @@ async fn chat_update_session(
     }
     let manager = state.inner().clone();
     run_blocking(move || {
-        if let Some(mode) = patch.mode.take() { manager.set_mode(&session_id, mode)?; }
+        if patch.mode.is_some() || patch.yolo.is_some() {
+            let meta = chat::store::get_session(&session_id).ok_or("Session not found")?;
+            manager.set_mode(&session_id, patch.mode.take().unwrap_or(meta.mode), patch.yolo.take().unwrap_or(meta.yolo))?;
+        }
         chat::update_session(&session_id, patch)
     }).await?
 }

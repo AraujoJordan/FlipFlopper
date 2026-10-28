@@ -172,28 +172,39 @@ test("live requests keep progressing when an occluded webview has no paint frame
   assert.equal(chat.pendingInputCount("s"), 1);
 });
 
-test('YOLO restores Plan or Auto-edit and follows every chat agent', async () => {
+test('YOLO is a toggle on top of the mode and follows every chat agent', async () => {
   const writes = [];
   const module = await loadChat({ './appPrefs': { writePref: (...args) => writes.push(args) } });
   module.setYolo(true);
-  assert.equal(module.chat.composer.mode, 'full');
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo], ['auto_edit', true]);
   module.setYolo(false);
-  assert.equal(module.chat.composer.mode, 'auto_edit');
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo], ['auto_edit', false]);
   module.setComposer({ mode: 'plan' });
   module.setYolo(true);
-  module.setYolo(true); // Idempotence must not overwrite the return mode.
+  module.setYolo(true); // Idempotent.
   for (const agent of ['claude','codex','cursor','agy','qwen','opencode','droid','grok','kimi','aider','goose']) {
     module.setComposerAgent(agent);
-    assert.equal(module.chat.composer.mode, 'full', agent);
-    assert.equal(writes.at(-1)[1].mode, 'full');
+    assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo], ['plan', true], agent);
+    assert.equal(writes.at(-1)[1].mode, 'plan');
+    assert.equal(writes.at(-1)[1].yolo, true);
   }
   module.setYolo(false);
-  assert.equal(module.chat.composer.mode, 'plan');
-  assert.equal(writes.at(-1)[1].mode, 'plan');
-  assert.equal('yolo' in writes.at(-1)[1], false); // Existing permission schema.
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo], ['plan', false]);
+  assert.equal(writes.at(-1)[1].yolo, false);
+  module.setComposer({ mode: 'ask' }); // Changing the mode keeps whatever YOLO was.
+  module.setYolo(true); module.setComposer({ mode: 'manual' });
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo], ['manual', true]);
 });
 
-test('Shift+Tab cycles Manual, Auto-edit, Plan, Ask, skips Manual for headless agents and never enters Full', async () => {
+test('legacy Full is read as Auto-edit plus YOLO', async () => {
+  const module = await loadChat();
+  assert.deepEqual(module.splitMode('full'), { mode: 'auto_edit', yolo: true });
+  assert.deepEqual(module.splitMode('full', false), { mode: 'auto_edit', yolo: true });
+  assert.deepEqual(module.splitMode('plan', true), { mode: 'plan', yolo: true });
+  assert.deepEqual(module.splitMode('ask'), { mode: 'ask', yolo: false });
+});
+
+test('Shift+Tab cycles Manual, Auto-edit, Plan, Ask, skips Manual for headless agents and keeps YOLO', async () => {
   const module = await loadChat({ './appPrefs': { writePref() {} } });
   const seen = () => { module.cycleMode(1); return module.chat.composer.mode; };
   module.setComposerAgent('claude');
@@ -203,132 +214,158 @@ test('Shift+Tab cycles Manual, Auto-edit, Plan, Ask, skips Manual for headless a
   module.setComposerAgent('codex');
   module.setChat('composer', 'mode', 'ask');
   assert.deepEqual([seen(), seen(), seen()], ['auto_edit', 'plan', 'ask']);
-  module.setYolo(true); assert.equal(seen(), 'auto_edit'); // Full steps on from the remembered Ask.
+  module.setYolo(true); assert.equal(seen(), 'auto_edit'); // Steps on from Ask itself, no detour through a Full mode.
+  assert.equal(seen(), 'plan');
+  assert.equal(module.chat.composer.yolo, true); // Plan + YOLO.
   module.setComposerAgent('claude'); module.setComposer({ mode: 'manual' });
   module.setComposerAgent('goose'); assert.equal(module.chat.composer.mode, 'auto_edit');
 });
 
-const modeReply = (id, mode, extra = {}) => ({ session: { id, mode }, runtime: { ...runtime(), pending: [], permission_mode: mode, ...extra } });
+const modeReply = (id, mode, yolo = false, extra = {}) => ({ session: { id, mode, yolo }, runtime: { ...runtime(), pending: [], permission_mode: mode, yolo, ...extra } });
 
-test('YOLO return mode is conversation-scoped and restored Full falls back to Auto-edit', async () => {
-  const module = await loadChat({ './ipc': { chatSetMode: async (id, mode) => modeReply(id, mode) } });
-  module.setChat('sessions', [{ id: 'a', mode: 'plan' }, { id: 'b', mode: 'auto_edit' }, { id: 'restored', mode: 'full' }]);
-  module.setChat('activeId', 'a'); module.setChat('composer', 'mode', 'plan'); await module.setYolo(true);
-  module.setChat('activeId', 'b'); module.setChat('composer', 'mode', 'auto_edit'); await module.setYolo(true);
-  await module.setYolo(false); assert.equal(module.chat.composer.mode, 'auto_edit');
-  module.setChat('activeId', 'a'); module.setChat('composer', 'mode', 'full'); await module.setYolo(false);
-  assert.equal(module.chat.composer.mode, 'plan');
-  module.setChat('activeId', 'restored'); module.setChat('composer', 'mode', 'full'); await module.setYolo(false);
-  assert.equal(module.chat.composer.mode, 'auto_edit');
+test('YOLO is scoped to each conversation and never changes its mode', async () => {
+  const module = await loadChat({ './ipc': { chatSetMode: async (id, mode, yolo) => modeReply(id, mode, yolo) } });
+  module.setChat('sessions', [{ id: 'a', mode: 'plan', yolo: false }, { id: 'b', mode: 'auto_edit', yolo: false }]);
+  module.setChat('activeId', 'a'); module.setChat('composer', { mode: 'plan', yolo: false }); await module.setYolo(true);
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo], ['plan', true]);
+  module.setChat('activeId', 'b'); module.setChat('composer', { mode: 'auto_edit', yolo: false }); await module.setYolo(true);
+  await module.setYolo(false);
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo], ['auto_edit', false]);
+  assert.deepEqual(module.chat.sessions.map((s) => [s.id, s.mode, s.yolo]), [['a', 'plan', true], ['b', 'auto_edit', false]]);
 });
 
 test('YOLO converts an active native session only after acknowledgement and can be disabled live', async () => {
   let reply;
   const updates = [];
-  const module = await loadChat({ './ipc': { chatSetMode: (id, mode) => { updates.push([id, mode]); return new Promise((resolve) => { reply = () => resolve(modeReply(id, mode)); }); } } });
+  const module = await loadChat({ './ipc': { chatSetMode: (id, mode, yolo) => { updates.push([id, mode, yolo]); return new Promise((resolve) => { reply = () => resolve(modeReply(id, mode, yolo)); }); } } });
   module.setChat('activeId', 's');
-  module.setChat('sessions', [{ id:'s', mode:'auto_edit' }]);
+  module.setChat('sessions', [{ id:'s', mode:'plan', yolo:false }]);
+  module.setChat('composer', { mode:'plan', yolo:false });
   module.setChat('views', 's', { messages:[], loaded:true, running:true });
   const enabling = module.setYolo(true);
   assert.equal(module.permissionModeUpdating(),true);
-  assert.equal(module.chat.composer.mode,'auto_edit');
+  assert.equal(module.chat.composer.yolo,false);
   assert.equal(await module.setYolo(true),false); // Coalesce double-clicks.
   reply(); assert.equal(await enabling,true);
-  assert.equal(module.chat.composer.mode,'full');
-  assert.equal(module.chat.sessions[0].mode,'full');
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo],['plan',true]);
+  assert.deepEqual([module.chat.sessions[0].mode, module.chat.sessions[0].yolo],['plan',true]);
   assert.equal(module.sessionModePending(),false);
   assert.equal(module.isRunning('s'),true);
   const disabling = module.setYolo(false); reply(); await disabling;
-  assert.equal(module.chat.composer.mode,'auto_edit');
-  assert.deepEqual(updates,[['s','full'],['s','auto_edit']]);
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo],['plan',false]);
+  assert.deepEqual(updates,[['s','plan',true],['s','plan',false]]);
 });
 
 test('headless conversion is saved on the same session and honestly labels the current launch policy', async () => {
   const notices = [];
-  const module = await loadChat({ '../components/ui': { toast: (...args) => notices.push(args) }, './ipc': { chatSetMode: async (id, mode) => modeReply(id, mode, { connected:false, agent_id:'codex', permission_mode:'auto_edit' }) } });
+  const module = await loadChat({ '../components/ui': { toast: (...args) => notices.push(args) }, './ipc': { chatSetMode: async (id, mode, yolo) => modeReply(id, mode, yolo, { connected:false, agent_id:'codex', permission_mode:'auto_edit', yolo:false }) } });
   module.setChat('activeId','s'); module.setChat('sessions',[{id:'s',mode:'auto_edit'}]);
   module.setChat('views','s',{messages:[],loaded:true,running:true});
   await module.setYolo(true);
-  assert.equal(module.chat.composer.mode,'full');
-  assert.equal(module.chat.sessions[0].mode,'full');
+  assert.equal(module.chat.composer.yolo,true);
+  assert.equal(module.chat.sessions[0].yolo,true);
   assert.equal(module.sessionModePending(),true);
   assert.equal(notices.length,1);
-  module.setChat('views','s','runtime','permission_mode','full');
+  module.setChat('views','s','runtime','yolo',true);
+  assert.equal(module.sessionModePending(),false);
+  module.setChat('views','s','runtime','permission_mode','full'); // Legacy payloads still compare correctly.
+  module.setChat('views','s','runtime','yolo',false);
   assert.equal(module.sessionModePending(),false);
 });
 
 test('failed live conversion does not claim success or change the saved session', async () => {
   const notices=[];
-  const module = await loadChat({ '../components/ui': { toast: (...args)=>notices.push(args) }, './ipc': { chatSetMode: async()=>{throw new Error('CLI refused mode');}, chatRuntimeState: async()=>modeReply('s','auto_edit').runtime } });
+  const module = await loadChat({ '../components/ui': { toast: (...args)=>notices.push(args) }, './ipc': { chatSetMode: async()=>{throw new Error('CLI refused mode');}, chatRuntimeState: async()=>modeReply('s','auto_edit',false).runtime } });
   module.setChat('activeId','s'); module.setChat('sessions',[{id:'s',mode:'auto_edit'}]);
   module.setChat('views','s',{messages:[],loaded:true,running:true});
   assert.equal(await module.setYolo(true),false);
-  assert.equal(module.chat.composer.mode,'auto_edit');
-  assert.equal(module.chat.sessions[0].mode,'auto_edit');
+  assert.equal(module.chat.composer.yolo,false);
+  assert.equal(module.chat.sessions[0].yolo,undefined);
   assert.equal(module.permissionModeUpdating(),false);
   assert.match(notices[0][0],/CLI refused mode/);
 });
 
 test('finishing a mode update in another session cannot overwrite the active composer', async () => {
   let reply;
-  const module = await loadChat({ './ipc': { chatSetMode: (id, mode)=>new Promise(resolve=>{ reply=()=>resolve(modeReply(id,mode)); }) } });
+  const module = await loadChat({ './ipc': { chatSetMode: (id, mode, yolo)=>new Promise(resolve=>{ reply=()=>resolve(modeReply(id,mode,yolo)); }) } });
   module.setChat('activeId','a'); module.setChat('sessions',[{id:'a',mode:'auto_edit'},{id:'b',mode:'plan'}]);
   const pending=module.setYolo(true);
-  module.setChat('activeId','b'); module.setChat('composer','mode','plan');
+  module.setChat('activeId','b'); module.setChat('composer',{mode:'plan',yolo:false});
   reply(); await pending;
-  assert.equal(module.chat.composer.mode,'plan');
-  assert.equal(module.chat.sessions[0].mode,'full');
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo],['plan',false]);
+  assert.equal(module.chat.sessions[0].yolo,true);
 });
 
 test('a queued turn waits for conversion and uses its own session policy after switching conversations', async () => {
   let reply;
   const sent=[];
-  const sessions=[{id:'a',agent_id:'codex',mode:'auto_edit',model:'a-model'}, {id:'b',agent_id:'claude',mode:'plan'}];
+  const sessions=[{id:'a',agent_id:'codex',mode:'plan',yolo:false,model:'a-model'}, {id:'b',agent_id:'claude',mode:'plan'}];
   const module=await loadChat({ './ipc': {
-    chatSetMode:(id,mode)=>new Promise(resolve=>{reply=()=>{sessions[0].mode=mode;resolve(modeReply(id,mode));};}),
+    chatSetMode:(id,mode,yolo)=>new Promise(resolve=>{reply=()=>{sessions[0].mode=mode;sessions[0].yolo=yolo;resolve(modeReply(id,mode,yolo));};}),
     chatSend:async(args)=>{sent.push(args);return 'new-turn';},
     chatListSessions:async()=>sessions,
   } });
   module.setChat('sessions',sessions);
   module.setChat('activeId','a');
+  module.setChat('composer',{agentId:'codex',mode:'plan',yolo:false});
   module.setChat('views','a',{messages:[],loaded:true,running:false});
   module.setChat('queued','a',[{text:'Continue the task',attachments:[]}]);
   const change=module.setYolo(true);
-  module.setChat('activeId','b'); module.setChat('composer',{agentId:'claude',mode:'plan',model:'b-model'});
+  module.setChat('activeId','b'); module.setChat('composer',{agentId:'claude',mode:'plan',yolo:false,model:'b-model'});
   const next=module.sendQueuedNow('a',0);
   assert.equal(sent.length,0);
   reply(); await change; await next;
   assert.equal(sent[0].session_id,'a');
   assert.equal(sent[0].agent_id,'codex');
-  assert.equal(sent[0].mode,'full');
+  assert.deepEqual([sent[0].mode,sent[0].yolo],['plan',true]);
   assert.equal(sent[0].model,'a-model');
-  assert.equal(module.chat.composer.mode,'plan');
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo],['plan',false]);
 });
 
 test('repeated native snapshots cannot re-enable YOLO after switching it off', async () => {
   let listener;
-  const meta = { id:'s', project_path:'/fixture/project', cwd:'/fixture/project', agent_id:'claude', status:'idle', mode:'full' };
+  const meta = { id:'s', project_path:'/fixture/project', cwd:'/fixture/project', agent_id:'claude', status:'idle', mode:'auto_edit', yolo:true };
   const module = await loadChat({ './ipc': {
     chatCreateSession: async () => meta,
     onChatEntry: async (_id, callback) => { listener = callback; return () => {}; },
     chatSend: async () => 'turn', chatListSessions: async () => [meta],
-    chatSetMode: async (id, mode) => modeReply(id,mode,{current_mode:mode==='full'?'bypassPermissions':'acceptEdits'}),
+    chatSetMode: async (id, mode, yolo) => modeReply(id,mode,yolo,{current_mode:yolo?'bypassPermissions':'acceptEdits'}),
   } });
-  await module.startSessionTurn({ projectPath:meta.project_path, agentId:'claude', mode:'full', prompt:'fixture', activate:false });
+  await module.startSessionTurn({ projectPath:meta.project_path, agentId:'claude', mode:'auto_edit', yolo:true, prompt:'fixture', activate:false });
   module.setChat('activeId','s');
   const state = { ...runtime(), active_turn_id:null, pending:[], current_mode:'bypassPermissions' };
   listener(event({ type:'runtime_updated', state }));
   await new Promise((resolve) => setTimeout(resolve,70));
-  assert.equal(module.chat.composer.mode,'full');
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo],['auto_edit',true]);
   await module.setYolo(false);
-  assert.equal(module.chat.composer.mode,'auto_edit');
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo],['auto_edit',false]);
   const idleState = { ...module.chat.views.s.runtime, commands:[{name:'refreshed'}] };
   listener(event({ type:'runtime_updated', state: idleState }));
   await new Promise((resolve) => setTimeout(resolve,70));
-  assert.equal(module.chat.composer.mode,'auto_edit');
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo],['auto_edit',false]);
   listener(event({ type:'runtime_updated', state: { ...idleState, current_mode:'plan', permission_mode:'plan' } }));
   await new Promise((resolve) => setTimeout(resolve,70));
   assert.equal(module.chat.composer.mode,'plan'); // Actual native transitions still synchronize.
+  assert.equal(module.chat.composer.yolo,false);
+});
+
+test('a native plan transition keeps an enabled YOLO toggle', async () => {
+  let listener;
+  const meta = { id:'s', project_path:'/fixture/project', cwd:'/fixture/project', agent_id:'claude', status:'idle', mode:'plan', yolo:true };
+  const module = await loadChat({ './ipc': {
+    chatCreateSession: async () => meta,
+    onChatEntry: async (_id, callback) => { listener = callback; return () => {}; },
+    chatSend: async () => 'turn', chatListSessions: async () => [meta],
+  } });
+  await module.startSessionTurn({ projectPath:meta.project_path, agentId:'claude', mode:'plan', yolo:true, prompt:'fixture', activate:false });
+  module.setChat('activeId','s'); module.setChat('composer',{mode:'plan',yolo:true});
+  const base = { ...runtime(), active_turn_id:null, pending:[], current_mode:'plan', permission_mode:'plan', yolo:true };
+  listener(event({ type:'runtime_updated', state: base }));
+  await new Promise((resolve) => setTimeout(resolve,70));
+  // The approved plan hands over to implementation; the backend reports YOLO unchanged.
+  listener(event({ type:'runtime_updated', state: { ...base, current_mode:'bypassPermissions', permission_mode:'auto_edit' } }));
+  await new Promise((resolve) => setTimeout(resolve,70));
+  assert.deepEqual([module.chat.composer.mode, module.chat.composer.yolo],['auto_edit',true]);
 });
 
 // Motion uses Solid's browser condition so these lifecycle tests exercise real
@@ -848,7 +885,7 @@ async function composerFixture(activeId = 's') {
   const module = await loadFrontend('../src/components/chat/Composer.tsx', {
     'solid-js': { ...solid, createSignal: (...args) => { const signal=solid.createSignal(...args); signals.push(signal); return signal; } },
     '../../lib/chat': {
-      chat, isRunning: () => false, cycleMode() {}, modeAvailable: () => true, permissionModeUpdating: () => false, sessionModePending: () => false,
+      chat, isRunning: () => false, cycleMode() {}, modeAvailable: () => true, splitMode: (mode, yolo) => ({ mode, yolo: !!yolo }), permissionModeUpdating: () => false, sessionModePending: () => false,
       agentTuning: () => ({ models:[], efforts:[] }), nativeCommands: () => [], contextUsage: () => undefined,
       submitPrompt: (...args) => { submissions.push(args); return new Promise((done) => { resolve=done; }); },
     },

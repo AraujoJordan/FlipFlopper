@@ -543,6 +543,7 @@ pub fn import(requests: Vec<ImportRequest>) -> Vec<SessionMeta> {
             model: None,
             effort: None,
             mode: PermissionMode::AutoEdit,
+            yolo: false,
             native_ids: HashMap::from([(req.agent_id.clone(), req.native_id)]),
             acp_sessions: HashMap::new(),
             agent_last_entry: HashMap::from([(req.agent_id, count)]),
@@ -728,6 +729,7 @@ mod tests {
                 model: None,
                 effort: None,
                 mode: PermissionMode::Plan,
+                yolo: false,
                 context_from: None,
                 attachments: vec![],
             })

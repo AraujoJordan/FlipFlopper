@@ -22,6 +22,7 @@ import {
   type Attachment,
   type ChatEntry,
   type PermissionMode,
+  type StoredPermissionMode,
   type SessionMeta,
   type TurnStatus,
   type WorktreeRef,
@@ -58,6 +59,8 @@ export interface ComposerPrefs {
   model: string | null;
   effort: string | null;
   mode: PermissionMode;
+  /** Auto-approve every tool request. Independent of `mode`, so Plan + YOLO is possible. */
+  yolo: boolean;
   /** Run new sessions in an isolated git worktree. */
   worktree: boolean;
 }
@@ -89,8 +92,14 @@ const DEFAULT_COMPOSER: ComposerPrefs = {
   model: null,
   effort: null,
   mode: "auto_edit",
+  yolo: false,
   worktree: false,
 };
+
+/** Split a stored mode into the real mode plus the independent YOLO toggle.
+ *  Older data used `full` as a mode of its own. */
+export const splitMode = (mode: StoredPermissionMode, yolo?: boolean | null): { mode: PermissionMode; yolo: boolean } =>
+  mode === "full" ? { mode: "auto_edit", yolo: true } : { mode, yolo: !!yolo };
 
 export const [chat, setChat] = createStore<ChatState>({
   sessions: [],
@@ -281,7 +290,7 @@ function flushLiveEntries() {
           const oldLength = view.messages.length;
           const hadText = present && e.kind === "event" && e.event.type === "text" && lastAssistant(view)?.blocks.some((b) => b.kind === "text");
           if (e.kind === "event" && e.event.type === "runtime_updated" &&
-            (e.event.state.current_mode !== view.runtime?.current_mode || e.event.state.agent_id !== view.runtime?.agent_id || e.event.state.permission_mode !== view.runtime?.permission_mode)) modeChanges.add(e);
+            (e.event.state.current_mode !== view.runtime?.current_mode || e.event.state.agent_id !== view.runtime?.agent_id || e.event.state.permission_mode !== view.runtime?.permission_mode || !!e.event.state.yolo !== !!view.runtime?.yolo)) modeChanges.add(e);
           applyEntry(view, e);
           if (!present) continue;
           const added = view.messages[oldLength];
@@ -315,12 +324,15 @@ function flushLiveEntries() {
       // re-enable YOLO after the user has chosen the next turn's permissions.
       if (e.event.type === "runtime_updated" && e.event.state.connected && modeChanges.has(e)) {
         const nativeMode = e.event.state.current_mode;
-        const mode: PermissionMode | undefined = e.event.state.permission_mode ?? (nativeMode === "plan" ? "plan" : nativeMode === "ask" ? "ask" : nativeMode === "default" ? "manual" : nativeMode === "bypassPermissions" ? "full" : ["acceptEdits", "agent", "code"].includes(nativeMode ?? "") ? "auto_edit" : undefined);
-        // Cursor Full access uses agent mode with app-managed permission
-        // responses. Preserve that explicit policy unless a plan was approved.
-        if (mode && !permissionUpdates().has(id) && !(e.event.state.permission_mode == null && e.event.state.agent_id === "cursor" && mode === "auto_edit" && chat.composer.mode === "full")) {
-          setChat("sessions", (s) => s.id === id, "mode", mode);
-          if (chat.activeId === id) setChat("composer", "mode", mode);
+        const reported = e.event.state.permission_mode;
+        const nativeKnown = nativeMode === "plan" ? "plan" : nativeMode === "ask" ? "ask" : nativeMode === "default" ? "manual" : ["acceptEdits", "agent", "code", "bypassPermissions"].includes(nativeMode ?? "") ? "auto_edit" : undefined;
+        // Only the backend's own report carries the YOLO toggle. A bare native
+        // mode (Cursor "agent" runs YOLO with app-managed responses) must not
+        // clear it; only the bypass mode can switch it on.
+        const next = reported ? splitMode(reported, e.event.state.yolo) : nativeKnown ? { mode: nativeKnown as PermissionMode, yolo: nativeMode === "bypassPermissions" || (chat.activeId === id ? chat.composer.yolo : !!chat.sessions.find((s) => s.id === id)?.yolo) } : undefined;
+        if (next && !permissionUpdates().has(id)) {
+          setChat("sessions", (s) => s.id === id, next);
+          if (chat.activeId === id) setChat("composer", next);
         }
       }
     }
@@ -399,7 +411,7 @@ export async function initChat() {
     readPref<ComposerPrefs>(COMPOSER_KEY, DEFAULT_COMPOSER, () => DEFAULT_COMPOSER),
     readPref<string | null>(ACTIVE_KEY, null, () => null),
   ]);
-  setChat("composer", { ...DEFAULT_COMPOSER, ...composer });
+  setChat("composer", { ...DEFAULT_COMPOSER, ...composer, ...splitMode(composer.mode, composer.yolo) });
   await refreshSessions();
   setChat("ready", true);
   if (activeId && chat.sessions.some((s) => s.id === activeId)) {
@@ -433,7 +445,7 @@ export async function selectSession(id: string) {
     agentId: meta.agent_id,
     model: meta.model,
     effort: meta.effort,
-    mode: meta.mode,
+    ...splitMode(meta.mode, meta.yolo),
   });
   setStore("review", null);
   try {
@@ -473,43 +485,43 @@ export function setDraftProject(project: { path: string }) {
 
 // ── Composer preferences ─────────────────────────────────────────────────────
 
-// Remember the non-YOLO choice per conversation without adding another persisted
-// permission state. `composer.mode` and the session's existing mode stay canonical.
-const beforeYolo = new Map<string, Exclude<PermissionMode, "full">>();
-
 const [permissionUpdates, setPermissionUpdates] = createSignal<Set<string>>(new Set());
 export const permissionModeUpdating = () => permissionUpdates().has(chat.activeId ?? "new");
 export const sessionModePending = () => {
   const view = activeView();
-  return !!(view?.running && view.runtime?.permission_mode && view.runtime.permission_mode !== chat.composer.mode);
+  const running = view?.runtime?.permission_mode;
+  if (!view?.running || !running) return false;
+  const { mode, yolo } = splitMode(running, view.runtime?.yolo);
+  return mode !== chat.composer.mode || yolo !== chat.composer.yolo;
 };
 
+/** YOLO is a toggle on top of the permission mode: it keeps the mode (Plan stays Plan) and auto-approves. */
 export function setYolo(enabled: boolean) {
-  return setPermissionMode(enabled ? "full" : beforeYolo.get(chat.activeId ?? "new") ?? "auto_edit");
+  return setPermissionMode(chat.composer.mode, enabled);
 }
 
-const MODE_CYCLE: Exclude<PermissionMode, "full">[] = ["manual", "auto_edit", "plan", "ask"];
+const MODE_CYCLE: PermissionMode[] = ["manual", "auto_edit", "plan", "ask"];
 
 const isNativeAgent = (agentId: string) => agentId === "claude" || agentId === "cursor";
 
 /** Mirrors the backend's `apply_mode` id mapping so the UI can skip modes the connected CLI doesn't offer. */
-export function modeAvailable(mode: PermissionMode): boolean {
+export function modeAvailable(mode: PermissionMode, yolo = false): boolean {
   const agent = chat.composer.agentId;
   if (mode === "manual" && !isNativeAgent(agent)) return false; // headless agents can't ask mid-turn
   const offered = activeView()?.runtime?.modes;
   if (!offered?.length || !isNativeAgent(agent)) return true;
   const claude = agent === "claude";
-  const id = mode === "plan" ? "plan" : mode === "ask" ? (claude ? "default" : "ask") : mode === "manual" ? (claude ? "default" : "agent")
-    : mode === "auto_edit" ? (claude ? "acceptEdits" : "agent") : claude ? "bypassPermissions" : "agent";
+  // Plan and Ask keep their read-only native mode under YOLO; the others swap in Claude's bypass mode.
+  const id = mode === "plan" ? "plan" : mode === "ask" ? (claude ? "default" : "ask") : claude && yolo ? "bypassPermissions" : mode === "manual" ? (claude ? "default" : "agent")
+    : claude ? "acceptEdits" : "agent";
   return offered.some((m) => m.id === id);
 }
 
-/** Shift+Tab: step through the available modes. Never enters Full, which stays behind the YOLO switch. */
+/** Shift+Tab: step through the available modes. YOLO is a separate switch and carries over unchanged. */
 export function cycleMode(dir: 1 | -1 = 1) {
-  const cycle = MODE_CYCLE.filter(modeAvailable);
+  const cycle = MODE_CYCLE.filter((mode) => modeAvailable(mode, chat.composer.yolo));
   if (cycle.length === 0) return;
-  const current = chat.composer.mode === "full" ? beforeYolo.get(chat.activeId ?? "new") ?? "auto_edit" : chat.composer.mode;
-  const at = MODE_CYCLE.indexOf(current as Exclude<PermissionMode, "full">);
+  const at = MODE_CYCLE.indexOf(chat.composer.mode);
   // Step from the current position in the full order, landing on the next available mode.
   for (let i = 1; i <= MODE_CYCLE.length; i++) {
     const next = MODE_CYCLE[(at + dir * i + MODE_CYCLE.length * i) % MODE_CYCLE.length];
@@ -517,28 +529,28 @@ export function cycleMode(dir: 1 | -1 = 1) {
   }
 }
 
-export async function setPermissionMode(mode: PermissionMode): Promise<boolean> {
-  const id = chat.activeId, scope = id ?? "new", previous = chat.composer.mode;
+export async function setPermissionMode(mode: PermissionMode, yolo = chat.composer.yolo): Promise<boolean> {
+  const id = chat.activeId, scope = id ?? "new";
   if (permissionUpdates().has(scope)) return false;
-  if (mode === previous) return true;
-  const remember = () => { if (mode === "full" && previous !== "full") beforeYolo.set(scope, previous); };
+  if (mode === chat.composer.mode && yolo === chat.composer.yolo) return true;
   if (!id) {
-    remember(); setChat("composer", "mode", mode);
+    setChat("composer", { mode, yolo });
     writePref(COMPOSER_KEY, { ...chat.composer });
     return true;
   }
   setPermissionUpdates((pending) => new Set(pending).add(scope));
   try {
-    const result = await chatSetMode(id, mode);
+    const result = await chatSetMode(id, mode, yolo);
     // Native events are queued before the command acknowledgement. Reduce them
     // before installing the acknowledged snapshot, so an older queued catalog
     // cannot overwrite the newly confirmed permission policy.
     flushLiveEntries();
-    remember();
-    setChat("sessions", (session) => session.id === id, "mode", result.session.mode);
+    const saved = splitMode(result.session.mode, result.session.yolo);
+    setChat("sessions", (session) => session.id === id, saved);
     if (chat.views[id]) setChat("views", id, "runtime", result.runtime);
-    if (chat.activeId === id) setChat("composer", "mode", result.session.mode);
-    if (isRunning(id) && result.runtime.permission_mode && result.runtime.permission_mode !== mode) {
+    if (chat.activeId === id) setChat("composer", saved);
+    const running = result.runtime.permission_mode && splitMode(result.runtime.permission_mode, result.runtime.yolo);
+    if (isRunning(id) && running && (running.mode !== mode || running.yolo !== yolo)) {
       toast("Session permissions updated. This running CLI keeps its launch permissions until the next turn.", "info");
     }
     return true;
@@ -547,7 +559,7 @@ export async function setPermissionMode(mode: PermissionMode): Promise<boolean> 
     const runtime = await chatRuntimeState(id).catch(() => undefined);
     flushLiveEntries();
     if (runtime && chat.views[id]) setChat("views", id, "runtime", runtime);
-    if (runtime?.connected && runtime.permission_mode && chat.activeId === id) setChat("composer", "mode", runtime.permission_mode);
+    if (runtime?.connected && runtime.permission_mode && chat.activeId === id) setChat("composer", splitMode(runtime.permission_mode, runtime.yolo));
     return false;
   } finally {
     setPermissionUpdates((pending) => { const next = new Set(pending); next.delete(scope); return next; });
@@ -555,9 +567,9 @@ export async function setPermissionMode(mode: PermissionMode): Promise<boolean> 
 }
 
 export function setComposer(patch: Partial<ComposerPrefs>) {
-  if (patch.mode) {
-    const { mode, ...rest } = patch;
-    void setPermissionMode(mode);
+  if (patch.mode || patch.yolo !== undefined) {
+    const { mode, yolo, ...rest } = patch;
+    void setPermissionMode(mode ?? chat.composer.mode, yolo ?? chat.composer.yolo);
     patch = rest;
     if (Object.keys(patch).length === 0) return;
   }
@@ -594,7 +606,7 @@ async function sendTurn(sessionId: string, text: string, attachments: Attachment
   });
   const meta = chat.sessions.find((session) => session.id === sessionId);
   const c = chat.activeId === sessionId || !meta ? chat.composer : {
-    agentId: meta.agent_id, model: meta.model, effort: meta.effort, mode: meta.mode,
+    agentId: meta.agent_id, model: meta.model, effort: meta.effort, ...splitMode(meta.mode, meta.yolo),
   };
   try {
     await chatSend({
@@ -605,6 +617,7 @@ async function sendTurn(sessionId: string, text: string, attachments: Attachment
       model: c.model,
       effort: c.effort,
       mode: c.mode,
+      yolo: c.yolo,
       attachments,
     });
     void refreshSessions();
@@ -680,6 +693,7 @@ export async function submitPrompt(text: string, attachments: Attachment[] = [],
       model: c.model,
       effort: c.effort,
       mode: c.mode,
+      yolo: c.yolo,
       prompt,
       attachments,
       activate: true,
@@ -701,6 +715,7 @@ export interface StartTurnOptions {
   model?: string | null;
   effort?: string | null;
   mode: PermissionMode;
+  yolo?: boolean;
   prompt: string;
   parentId?: string;
   /** Carry another session's conversation into the first turn. */
@@ -724,13 +739,10 @@ export async function startSessionTurn(o: StartTurnOptions): Promise<SessionMeta
     model: o.model,
     effort: o.effort,
     mode: o.mode,
+    yolo: o.yolo,
     parent_id: o.parentId,
     title: o.title,
   });
-  if (o.activate && !chat.activeId && o.mode === "full") {
-    const previous = beforeYolo.get("new");
-    if (previous) beforeYolo.set(meta.id, previous);
-  }
   setChat("sessions", (s) => [meta, ...s]);
   setChat("views", meta.id, { messages: [], loaded: true, running: false });
   await subscribe(meta.id);
@@ -749,6 +761,7 @@ export async function startSessionTurn(o: StartTurnOptions): Promise<SessionMeta
       model: o.model,
       effort: o.effort,
       mode: o.mode,
+      yolo: o.yolo,
       context_from: o.contextFrom,
       attachments: o.attachments,
     });
@@ -847,7 +860,6 @@ export async function deleteSession(id: string) {
     return;
   }
   unsubscribe(id);
-  beforeYolo.delete(id);
   const wasActive = chat.activeId === id;
   const project = chat.sessions.find((s) => s.id === id)?.project_path;
   setChat("sessions", (s) => s.filter((x) => x.id !== id));

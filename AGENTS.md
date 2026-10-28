@@ -31,21 +31,27 @@ Currently implemented:
   (Claude-compatible schema), opencode, droid, and tolerant text parsers for
   grok, aider and goose. The shared Claude parser is retained for imports and
   Qwen; there is no Claude/Cursor headless fallback. Plandex/Cline are terminal-only.
-- Permission modes are `manual | auto_edit | plan | ask | full`. `⇧Tab` cycles the first four
-  (Manual is skipped for headless agents, which cannot ask mid-turn; Full stays behind
-  the Full access switch in Permissions) and `.composer-box[data-mode]` tints the composer per mode. Ask is
+- Permission modes are `manual | auto_edit | plan | ask`; `⇧Tab` cycles them (Manual is skipped
+  for headless agents, which cannot ask mid-turn). YOLO is not a mode but an independent
+  `yolo` flag (`SessionMeta.yolo`, `ComposerPrefs.yolo`, `RuntimeState.yolo`) that
+  auto-approves tool requests on top of any mode, so Plan + YOLO works. The composer tints
+  amber while YOLO is on (`.composer-box[data-mode]` is `full` as a visual token only).
+  Plan and Ask stay read-only under YOLO (`automatic_choice` in `acp.rs` rejects writes
+  first); in Plan mode YOLO also accepts the plan, which hands over to Auto-edit with YOLO
+  kept. Questions, forms and URLs stay interactive. Claude swaps in `bypassPermissions` only
+  for Manual/Auto-edit; headless CLIs get their bypass flag only outside Plan/Ask. The old
+  `PermissionMode::Full` survives only for old data (`with_yolo` / `splitMode` fold it into
+  Auto-edit + YOLO; `read_index` migrates saved sessions). Ask is
   read-only Q&A, enforced natively on Cursor and via auto-reject plus a prompt preamble
-  elsewhere. The Permissions menu’s Full access switch maps
-  to `full` for every chat agent. `setYolo` restores the previous non-full choice
-  per conversation (Auto-edit after reload). `chat_set_mode` applies permission
-  changes live to Claude/Cursor and resolves pending tool approvals when enabling
-  Full. Headless sessions save the change immediately but keep the running process
-  policy until the next turn; `runtime.permission_mode` drives the pending label.
+  elsewhere. `chat_set_mode(session, mode, yolo)` applies changes live to Claude/Cursor and
+  resolves pending tool approvals when enabling YOLO (never writes in Plan/Ask). Headless
+  sessions save the change immediately but keep the running process
+  policy until the next turn; `runtime.permission_mode`/`runtime.yolo` drive the pending label.
   Launch/mode operations serialize per session; live mode RPCs stay concurrent
   with streaming, cancellation and native input. Questions/forms remain interactive.
   ACP maps native modes and
   supports live permission, question, plan and elicitation cards; historical
-  requests are read-only. Full access still respects native security policies.
+  requests are read-only. YOLO still respects native security policies.
   Headless agents receive their policy at launch and cannot ask mid-turn.
   Worktree merge/removal awaits forced cancellation before touching git; ordinary
   Stop allows a brief cooperative protocol cancellation first.

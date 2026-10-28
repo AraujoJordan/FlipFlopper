@@ -31,9 +31,20 @@ pub enum PermissionMode {
     Ask,
     /// Edit files in the workspace; shell is limited by the agent's sandbox.
     AutoEdit,
-    /// Auto-approve tools using the CLI's full-access mode. Native security
-    /// policies may still reject an action.
+    /// Legacy: YOLO used to be a mode. Old sessions and transcripts still carry
+    /// it; `with_yolo` folds it into Auto-edit plus the separate `yolo` flag.
     Full,
+}
+
+impl PermissionMode {
+    /// Fold the legacy `Full` mode into (Auto-edit, yolo) so callers only see
+    /// the four real modes plus the independent auto-approve toggle.
+    pub fn with_yolo(self, yolo: bool) -> (Self, bool) {
+        match self {
+            Self::Full => (Self::AutoEdit, true),
+            mode => (mode, yolo),
+        }
+    }
 }
 
 pub struct TurnRequest<'a> {
@@ -42,6 +53,9 @@ pub struct TurnRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub mode: PermissionMode,
+    /// Auto-approve everything the CLI would ask about. Read-only modes (Plan,
+    /// Ask) keep their read-only policy; headless agents cannot ask anyway.
+    pub yolo: bool,
     pub resume_id: Option<&'a str>,
 }
 
@@ -118,6 +132,7 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
     let mut args: Vec<String> = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
     let mut stdin = None;
+    let (mode, yolo) = req.mode.with_yolo(req.yolo);
 
     match agent_id {
         "claude" | "cursor" => return Err(format!("{agent_id} requires its native ACP connection")),
@@ -128,16 +143,12 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
                 args.push("-c".into());
                 args.push(format!("model_reasoning_effort={effort}"));
             }
-            match req.mode {
-                PermissionMode::Plan | PermissionMode::Ask => {
+            match (mode, yolo) {
+                (PermissionMode::Plan | PermissionMode::Ask, _) => {
                     args.extend(["-s", "read-only"].map(String::from))
                 }
-                PermissionMode::AutoEdit | PermissionMode::Manual => {
-                    args.extend(["-s", "workspace-write"].map(String::from))
-                }
-                PermissionMode::Full => {
-                    args.push("--dangerously-bypass-approvals-and-sandbox".into())
-                }
+                (_, true) => args.push("--dangerously-bypass-approvals-and-sandbox".into()),
+                _ => args.extend(["-s", "workspace-write"].map(String::from)),
             }
             if let Some(id) = req.resume_id {
                 args.extend(["resume", id].map(String::from));
@@ -149,15 +160,13 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
             args.extend(["--output-format", "stream-json"].map(String::from));
             push_opt(&mut args, "--model", req.model);
             push_opt(&mut args, "--effort", req.effort);
-            match req.mode {
-                PermissionMode::Plan | PermissionMode::Ask => {
+            match (mode, yolo) {
+                (PermissionMode::Plan | PermissionMode::Ask, _) => {
                     args.extend(["--mode", "plan"].map(String::from))
                 }
-                PermissionMode::Manual => {}
-                PermissionMode::AutoEdit => {
-                    args.extend(["--mode", "accept-edits"].map(String::from))
-                }
-                PermissionMode::Full => args.push("--dangerously-skip-permissions".into()),
+                (_, true) => args.push("--dangerously-skip-permissions".into()),
+                (PermissionMode::Manual, _) => {}
+                _ => args.extend(["--mode", "accept-edits"].map(String::from)),
             }
             push_opt(&mut args, "--conversation", req.resume_id);
             // `-p` swallows the next token as its prompt, so attach it.
@@ -166,15 +175,13 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
         "qwen" => {
             args.extend(["-o", "stream-json"].map(String::from));
             push_opt(&mut args, "-m", req.model);
-            match req.mode {
-                PermissionMode::Plan | PermissionMode::Ask => {
+            match (mode, yolo) {
+                (PermissionMode::Plan | PermissionMode::Ask, _) => {
                     args.extend(["--approval-mode", "plan"].map(String::from))
                 }
-                PermissionMode::Manual => {}
-                PermissionMode::AutoEdit => {
-                    args.extend(["--approval-mode", "auto-edit"].map(String::from))
-                }
-                PermissionMode::Full => args.push("--yolo".into()),
+                (_, true) => args.push("--yolo".into()),
+                (PermissionMode::Manual, _) => {}
+                _ => args.extend(["--approval-mode", "auto-edit"].map(String::from)),
             }
             push_opt(&mut args, "-r", req.resume_id);
             args.push("-p".into());
@@ -184,12 +191,12 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
             args.extend(["run", "--format", "json"].map(String::from));
             push_opt(&mut args, "-m", req.model);
             push_opt(&mut args, "--variant", req.effort);
-            match req.mode {
-                PermissionMode::Plan | PermissionMode::Ask => {
+            match (mode, yolo) {
+                (PermissionMode::Plan | PermissionMode::Ask, _) => {
                     args.extend(["--agent", "plan"].map(String::from))
                 }
-                PermissionMode::AutoEdit | PermissionMode::Manual => {}
-                PermissionMode::Full => args.push("--auto".into()),
+                (_, true) => args.push("--auto".into()),
+                _ => {}
             }
             push_opt(&mut args, "-s", req.resume_id);
             args.push(argv_prompt(with_plan_preamble(req.prompt, req.mode)));
@@ -198,10 +205,11 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
             args.extend(["exec", "-o", "stream-json"].map(String::from));
             push_opt(&mut args, "-m", req.model);
             push_opt(&mut args, "-r", req.effort);
-            match req.mode {
-                PermissionMode::Plan | PermissionMode::Ask | PermissionMode::Manual => {}
-                PermissionMode::AutoEdit => args.extend(["--auto", "medium"].map(String::from)),
-                PermissionMode::Full => args.push("--skip-permissions-unsafe".into()),
+            match (mode, yolo) {
+                (PermissionMode::Plan | PermissionMode::Ask, _) => {}
+                (_, true) => args.push("--skip-permissions-unsafe".into()),
+                (PermissionMode::Manual, _) => {}
+                _ => args.extend(["--auto", "medium"].map(String::from)),
             }
             push_opt(&mut args, "-s", req.resume_id);
             args.push(argv_prompt(with_plan_preamble(req.prompt, req.mode)));
@@ -209,7 +217,7 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
         "grok" => {
             args.extend(["--output-format", "streaming-json"].map(String::from));
             push_opt(&mut args, "-m", req.model);
-            if req.mode == PermissionMode::Full {
+            if yolo && !matches!(mode, PermissionMode::Plan | PermissionMode::Ask) {
                 args.push("--always-approve".into());
             }
             args.push("-p".into());
@@ -227,14 +235,14 @@ pub fn build_invocation(agent_id: &str, req: &TurnRequest) -> Result<Invocation,
         "aider" => {
             args.extend(["--no-pretty", "--no-stream", "--no-auto-commits"].map(String::from));
             push_opt(&mut args, "--model", req.model);
-            if !matches!(req.mode, PermissionMode::Plan | PermissionMode::Ask | PermissionMode::Manual) {
+            if !matches!(mode, PermissionMode::Plan | PermissionMode::Ask) && (yolo || mode != PermissionMode::Manual) {
                 args.push("--yes-always".into());
             }
             args.push("--message".into());
             args.push(with_plan_preamble(req.prompt, req.mode));
         }
         "goose" => {
-            if req.mode == PermissionMode::Full {
+            if yolo && !matches!(mode, PermissionMode::Plan | PermissionMode::Ask) {
                 env.push(("GOOSE_MODE".into(), "auto".into()));
             }
             args.extend(["run", "-t"].map(String::from));
@@ -269,14 +277,19 @@ mod tests {
             model: Some("m1"),
             effort: None,
             mode,
+            yolo: false,
             resume_id: resume,
         }
+    }
+
+    fn yolo_req(mode: PermissionMode) -> TurnRequest<'static> {
+        TurnRequest { yolo: true, ..req(mode, None) }
     }
 
     #[test]
     fn native_agents_cannot_fall_back_to_headless() {
         for agent in ["claude", "cursor"] {
-            assert!(build_invocation(agent, &req(PermissionMode::Full, Some("abc"))).unwrap_err().contains("native ACP"));
+            assert!(build_invocation(agent, &yolo_req(PermissionMode::Full)).unwrap_err().contains("native ACP"));
         }
     }
 
@@ -291,12 +304,12 @@ mod tests {
             ("grok", "--always-approve"),
             ("aider", "--yes-always"),
         ] {
-            let inv = build_invocation(agent, &req(PermissionMode::Full, None)).unwrap();
+            let inv = build_invocation(agent, &yolo_req(PermissionMode::AutoEdit)).unwrap();
             assert!(inv.args.iter().any(|arg| arg == flag), "{agent}: {:?}", inv.args);
         }
-        let goose = build_invocation("goose", &req(PermissionMode::Full, None)).unwrap();
+        let goose = build_invocation("goose", &yolo_req(PermissionMode::AutoEdit)).unwrap();
         assert!(goose.env.contains(&("GOOSE_MODE".into(), "auto".into())));
-        let kimi = build_invocation("kimi", &req(PermissionMode::Full, None)).unwrap();
+        let kimi = build_invocation("kimi", &yolo_req(PermissionMode::AutoEdit)).unwrap();
         assert!(kimi.args.iter().any(|arg| arg == "-p"));
         assert!(!kimi.args.iter().any(|arg| arg == "--yolo" || arg == "--auto"));
     }
@@ -324,6 +337,31 @@ mod tests {
     fn plan_preamble_only_in_plan_mode() {
         assert!(with_plan_preamble("x", PermissionMode::Plan).contains("Plan mode"));
         assert_eq!(with_plan_preamble("x", PermissionMode::Full), "x");
+    }
+
+    #[test]
+    fn yolo_never_lifts_a_read_only_mode() {
+        for mode in [PermissionMode::Plan, PermissionMode::Ask] {
+            let codex = build_invocation("codex", &yolo_req(mode)).unwrap();
+            assert!(codex.args.windows(2).any(|w| w == ["-s", "read-only"]), "{:?}", codex.args);
+            assert!(!codex.args.iter().any(|a| a.contains("dangerously")));
+            let qwen = build_invocation("qwen", &yolo_req(mode)).unwrap();
+            assert!(qwen.args.windows(2).any(|w| w == ["--approval-mode", "plan"]));
+            assert!(!qwen.args.iter().any(|a| a == "--yolo"));
+            let opencode = build_invocation("opencode", &yolo_req(mode)).unwrap();
+            assert!(opencode.args.windows(2).any(|w| w == ["--agent", "plan"]));
+            assert!(!opencode.args.iter().any(|a| a == "--auto"));
+            assert!(!build_invocation("grok", &yolo_req(mode)).unwrap().args.iter().any(|a| a == "--always-approve"));
+            assert!(build_invocation("goose", &yolo_req(mode)).unwrap().env.is_empty());
+        }
+    }
+
+    #[test]
+    fn legacy_full_mode_is_yolo_with_auto_edit() {
+        assert_eq!(PermissionMode::Full.with_yolo(false), (PermissionMode::AutoEdit, true));
+        assert_eq!(PermissionMode::Plan.with_yolo(true), (PermissionMode::Plan, true));
+        let legacy = build_invocation("codex", &req(PermissionMode::Full, None)).unwrap();
+        assert!(legacy.args.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
     }
 
     #[test]

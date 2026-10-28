@@ -432,6 +432,7 @@ async function fireStep(nodeId: string, edgeId: string | null) {
       model: node.model,
       effort: node.effort,
       mode: untrack(() => chat.composer.mode),
+      yolo: untrack(() => chat.composer.yolo),
       prompt: node.prompt,
       parentId: parent?.sessionId ?? undefined,
       contextFrom: edge?.carry && parent?.sessionId ? parent.sessionId : undefined,

@@ -35,6 +35,7 @@ struct Running {
     cancelled: Arc<AtomicBool>,
     agent_id: String,
     mode: PermissionMode,
+    yolo: bool,
     turn_id: String,
 }
 
@@ -72,6 +73,8 @@ pub struct NewSession {
     pub effort: Option<String>,
     pub mode: PermissionMode,
     #[serde(default)]
+    pub yolo: bool,
+    #[serde(default)]
     pub parent_id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
@@ -89,6 +92,7 @@ pub struct SessionPatch {
     #[serde(default, deserialize_with = "double_option")]
     pub effort: Option<Option<String>>,
     pub mode: Option<PermissionMode>,
+    pub yolo: Option<bool>,
     /// Directory agents run in (reset to the project root after a worktree is
     /// merged or discarded).
     pub cwd: Option<String>,
@@ -118,6 +122,8 @@ pub struct SendArgs {
     #[serde(default)]
     pub effort: Option<String>,
     pub mode: PermissionMode,
+    #[serde(default)]
+    pub yolo: bool,
     /// On a session's first turn, seed the prompt with a digest of this other
     /// session's conversation (used by orchestrator steps that "carry context").
     #[serde(default)]
@@ -161,7 +167,8 @@ fn emit_stream_event(app: &Emitter, session_id: &str, event: ChatEvent, append_f
     }
 }
 
-pub fn create_session(args: NewSession) -> Result<SessionMeta, String> {
+pub fn create_session(mut args: NewSession) -> Result<SessionMeta, String> {
+    (args.mode, args.yolo) = args.mode.with_yolo(args.yolo);
     if !adapters::supports_chat(&args.agent_id) {
         return Err(format!("{} can't run as a chat session yet", args.agent_id));
     }
@@ -178,6 +185,7 @@ pub fn create_session(args: NewSession) -> Result<SessionMeta, String> {
         model: args.model,
         effort: args.effort,
         mode: args.mode,
+        yolo: args.yolo,
         native_ids: HashMap::new(),
         acp_sessions: HashMap::new(),
         agent_last_entry: HashMap::new(),
@@ -217,6 +225,9 @@ pub fn update_session(id: &str, patch: SessionPatch) -> Result<SessionMeta, Stri
         if let Some(mode) = patch.mode {
             m.mode = mode;
         }
+        if let Some(yolo) = patch.yolo {
+            m.yolo = yolo;
+        }
         if let Some(cwd) = patch.cwd {
             m.cwd = cwd;
         }
@@ -238,22 +249,24 @@ impl ChatManager {
                 state.agent_id = run.agent_id.clone();
                 state.active_turn_id = Some(run.turn_id.clone());
                 state.permission_mode = Some(run.mode);
+                state.yolo = run.yolo;
             }
         }
         state
     }
 
-    pub fn set_mode(&self, session_id: &str, mode: PermissionMode) -> Result<ModeUpdate, String> {
+    pub fn set_mode(&self, session_id: &str, mode: PermissionMode, yolo: bool) -> Result<ModeUpdate, String> {
+        let (mode, yolo) = mode.with_yolo(yolo);
         let operation = self.session_operation(session_id);
         let _change = operation.lock().unwrap();
         let meta = store::get_session(session_id).ok_or("Session not found")?;
         // Native connections change in place, including an outstanding prompt.
         // Headless processes retain their launch policy; the saved session
         // changes now and the next process receives it without a silent restart.
-        if self.native.set_mode(session_id, &meta.agent_id, mode)? {
-            if let Some(run) = self.running.lock().unwrap().get_mut(session_id) { run.mode = mode; }
+        if self.native.set_mode(session_id, &meta.agent_id, mode, yolo)? {
+            if let Some(run) = self.running.lock().unwrap().get_mut(session_id) { run.mode = mode; run.yolo = yolo; }
         }
-        let session = store::update_session(session_id, |meta| meta.mode = mode)?.ok_or("Session was removed while changing permissions")?;
+        let session = store::update_session(session_id, |meta| { meta.mode = mode; meta.yolo = yolo; })?.ok_or("Session was removed while changing permissions")?;
         Ok(ModeUpdate { session, runtime: self.runtime_state(session_id) })
     }
 
@@ -331,7 +344,8 @@ impl ChatManager {
 
     /// Start one turn. Returns the turn id once the process is spawned; events
     /// stream afterwards on `chat://{session_id}`.
-    pub fn send(self: &Arc<Self>, app: Emitter, args: SendArgs) -> Result<String, String> {
+    pub fn send(self: &Arc<Self>, app: Emitter, mut args: SendArgs) -> Result<String, String> {
+        (args.mode, args.yolo) = args.mode.with_yolo(args.yolo);
         let operation = self.session_operation(&args.session_id);
         let _launch = operation.lock().unwrap();
         if self.is_running(&args.session_id) {
@@ -401,6 +415,7 @@ impl ChatManager {
                 model: args.model.as_deref(),
                 effort: args.effort.as_deref(),
                 mode: args.mode,
+                yolo: args.yolo,
                 resume_id: resume_id.as_deref(),
             },
         )?;
@@ -435,7 +450,7 @@ impl ChatManager {
         let cancelled = Arc::new(AtomicBool::new(false));
         self.running.lock().unwrap().insert(
             meta.id.clone(),
-            Running { pid: child.id(), cancelled: cancelled.clone(), agent_id: args.agent_id.clone(), mode: args.mode, turn_id: turn_id.clone() },
+            Running { pid: child.id(), cancelled: cancelled.clone(), agent_id: args.agent_id.clone(), mode: args.mode, yolo: args.yolo, turn_id: turn_id.clone() },
         );
 
         let session_id = meta.id.clone();
@@ -446,6 +461,7 @@ impl ChatManager {
             m.model = args.model.clone();
             m.effort = args.effort.clone();
             m.mode = args.mode;
+            m.yolo = args.yolo;
             if m.title.is_empty() {
                 m.title = first_line(&prompt, 60);
             }
@@ -639,7 +655,7 @@ impl ChatManager {
         {
             let mut running = self.running.lock().unwrap();
             if running.contains_key(&meta.id) { return Err("This session is already running a turn".into()); }
-            running.insert(meta.id.clone(), Running { pid: 0, cancelled: cancelled.clone(), agent_id: args.agent_id.clone(), mode: args.mode, turn_id: turn_id.clone() });
+            running.insert(meta.id.clone(), Running { pid: 0, cancelled: cancelled.clone(), agent_id: args.agent_id.clone(), mode: args.mode, yolo: args.yolo, turn_id: turn_id.clone() });
         }
         let prepared = (|| {
             let connection = self.native.prepare(&meta, &args.agent_id, &binary, args.recover_context, &cancelled)?;
@@ -651,7 +667,7 @@ impl ChatManager {
                 m.acp_sessions.insert(args.agent_id.clone(), acp::Binding { session_id: native_id.clone(), cwd: meta.cwd.clone() });
                 m.native_ids.insert(args.agent_id.clone(), native_id.clone());
             })?;
-            connection.configure(args.model.clone(), args.effort.clone(), args.mode)?;
+            connection.configure(args.model.clone(), args.effort.clone(), args.mode, args.yolo)?;
             if cancelled.load(Ordering::SeqCst) { connection.close(); return Err("Turn cancelled before it started".into()); }
             Ok::<_,String>((connection, native_id))
         })();
@@ -661,7 +677,7 @@ impl ChatManager {
         };
         if let Err(error) = store::update_session(&meta.id, |m| {
             m.status = "running".into(); m.agent_id = args.agent_id.clone();
-            m.model = args.model.clone(); m.effort = args.effort.clone(); m.mode = args.mode;
+            m.model = args.model.clone(); m.effort = args.effort.clone(); m.mode = args.mode; m.yolo = args.yolo;
             if m.title.is_empty() { m.title = first_line(&prompt, 60); }
         }) { self.running.lock().unwrap().remove(&meta.id); return Err(error); }
         let preamble = (|| -> Result<(), String> {
@@ -842,15 +858,19 @@ mod tests {
         let data = std::env::temp_dir().join(format!("ff-live-mode-{}", Uuid::new_v4()));
         let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
         std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
-        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "codex".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, parent_id: None, title: None }).unwrap();
+        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "codex".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: None }).unwrap();
         let manager = ChatManager::default();
         let cancelled = Arc::new(AtomicBool::new(false));
-        manager.running.lock().unwrap().insert(meta.id.clone(), Running { pid: 12345, cancelled: cancelled.clone(), agent_id: "codex".into(), mode: PermissionMode::AutoEdit, turn_id: "same-turn".into() });
-        let updated = manager.set_mode(&meta.id, PermissionMode::Full).unwrap();
+        manager.running.lock().unwrap().insert(meta.id.clone(), Running { pid: 12345, cancelled: cancelled.clone(), agent_id: "codex".into(), mode: PermissionMode::AutoEdit, yolo: false, turn_id: "same-turn".into() });
+        let updated = manager.set_mode(&meta.id, PermissionMode::Plan, true).unwrap();
         assert_eq!(updated.session.id, meta.id);
-        assert_eq!(updated.session.mode, PermissionMode::Full);
-        assert_eq!(store::get_session(&meta.id).unwrap().mode, PermissionMode::Full);
+        // YOLO is saved next to the mode, not instead of it.
+        assert_eq!((updated.session.mode, updated.session.yolo), (PermissionMode::Plan, true));
+        let saved = store::get_session(&meta.id).unwrap();
+        assert_eq!((saved.mode, saved.yolo), (PermissionMode::Plan, true));
+        // The running headless process keeps its launch policy.
         assert_eq!(updated.runtime.permission_mode, Some(PermissionMode::AutoEdit));
+        assert!(!updated.runtime.yolo);
         assert_eq!(updated.runtime.active_turn_id.as_deref(), Some("same-turn"));
         assert_eq!(manager.running.lock().unwrap()[&meta.id].pid, 12345);
         assert!(!cancelled.load(Ordering::SeqCst));
@@ -866,7 +886,7 @@ mod tests {
         let data=std::env::temp_dir().join(format!("ff-recovery-{}",Uuid::new_v4()));
         let previous=std::env::var_os("FLIPFLOPPER_DATA_DIR");
         std::env::set_var("FLIPFLOPPER_DATA_DIR",&data);
-        let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,parent_id:None,title:None}).unwrap();
+        let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,yolo: false,parent_id:None,title:None}).unwrap();
         store::update_session(&meta.id,|m|m.status="running".into()).unwrap();
         let started=Entry::Event {event:ChatEvent::TurnStarted {turn_id:"interrupted".into(),agent_id:"claude".into()},ts:1};
         store::append_entry(&meta.id,&started).unwrap();
@@ -891,7 +911,7 @@ mod tests {
         let previous=std::env::var_os("FLIPFLOPPER_DATA_DIR");
         std::env::set_var("FLIPFLOPPER_DATA_DIR",&data);
         let manager=ChatManager::default();
-        let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,parent_id:None,title:Some("Fix bug".into())}).unwrap();
+        let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,yolo: false,parent_id:None,title:Some("Fix bug".into())}).unwrap();
         store::append_entry(&meta.id,&Entry::User {text:"hi".into(),agent_id:"claude".into(),ts:1,attachments:vec![]}).unwrap();
         store::update_session(&meta.id,|m|{m.native_ids.insert("claude".into(),"native-1".into());m.entry_count=1;}).unwrap();
 
@@ -906,7 +926,7 @@ mod tests {
         // Nothing to archive the second time.
         assert!(manager.clear_session(&meta.id).unwrap().archived.is_none());
 
-        manager.running.lock().unwrap().insert(meta.id.clone(),Running {pid:0,cancelled:Arc::new(AtomicBool::new(false)),agent_id:"claude".into(),mode:PermissionMode::AutoEdit,turn_id:"t".into()});
+        manager.running.lock().unwrap().insert(meta.id.clone(),Running {pid:0,cancelled:Arc::new(AtomicBool::new(false)),agent_id:"claude".into(),mode:PermissionMode::AutoEdit,yolo:false,turn_id:"t".into()});
         assert!(manager.clear_session(&meta.id).is_err());
 
         match previous {Some(value)=>std::env::set_var("FLIPFLOPPER_DATA_DIR",value),None=>std::env::remove_var("FLIPFLOPPER_DATA_DIR")}
@@ -1045,6 +1065,7 @@ mod tests {
             model: None,
             effort: None,
             mode: PermissionMode::AutoEdit,
+            yolo: false,
             parent_id: None,
             title: None,
         })
@@ -1062,6 +1083,7 @@ mod tests {
                         model: None,
                         effort: None,
                         mode,
+                        yolo: false,
                         context_from: None,
                         attachments: vec![],
                     },
@@ -1143,7 +1165,7 @@ mod tests {
         let manager = Arc::new(ChatManager::default());
         let meta = create_session(NewSession {
             project_path: repo.to_str().unwrap().into(), cwd: None, worktree: None, agent_id: "claude".into(),
-            model: None, effort: None, mode: PermissionMode::AutoEdit, parent_id: None, title: None,
+            model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: None,
         })
         .unwrap();
         let attachment = Attachment {
@@ -1155,7 +1177,7 @@ mod tests {
             .send(emit, SendArgs {
                 recover_context: false, session_id: meta.id.clone(),
                 prompt: "What is the vault code in the attached file? Answer with only the code.".into(),
-                agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::Plan,
+                agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::Plan, yolo: false,
                 context_from: None, attachments: vec![attachment.clone()],
             })
             .unwrap();

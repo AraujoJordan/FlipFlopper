@@ -19,6 +19,9 @@ pub(super) struct Live {
     pub(super) state: RuntimeState,
     pub(super) current: Option<Current>,
     pub(super) mode: PermissionMode,
+    /// Client-side auto-approval; the native mode only changes where the CLI
+    /// has a matching bypass mode and the user is not planning or asking.
+    pub(super) yolo: bool,
     pub(super) pending: HashMap<String, Pending>,
     pub(super) defaults: Vec<Value>,
     pub(super) tools: HashMap<String, Value>,
@@ -34,6 +37,7 @@ impl Live {
             state: RuntimeState { agent_id, ..Default::default() },
             current: None,
             mode: PermissionMode::AutoEdit,
+            yolo: false,
             pending: HashMap::new(),
             defaults: Vec::new(),
             tools: HashMap::new(),
@@ -88,6 +92,7 @@ impl Live {
     pub(super) fn snapshot(&self) -> RuntimeState {
         let mut s = self.state.clone();
         s.permission_mode = Some(self.mode);
+        s.yolo = self.yolo;
         s.active_turn_id = self.current.as_ref().map(|c| c.turn_id.clone());
         s.pending = self.pending.values().map(|p| p.request.clone()).collect();
         s.pending.sort_by(|a, b| a.id.cmp(&b.id));
@@ -190,11 +195,16 @@ impl Live {
             }
             "current_mode_update" => {
                 self.state.current_mode = u["currentModeId"].as_str().map(String::from);
+                // YOLO is a user-owned toggle: only an explicit bypass mode turns
+                // it on, and a native mode change never turns it off.
                 self.mode = match self.state.current_mode.as_deref() {
                     Some("plan") => PermissionMode::Plan,
                     Some("ask") => PermissionMode::Ask,
-                    Some("bypassPermissions") => PermissionMode::Full,
-                    Some("agent" | "code") if matches!(self.mode, PermissionMode::Full | PermissionMode::Manual) => self.mode,
+                    Some("bypassPermissions") => {
+                        self.yolo = true;
+                        if matches!(self.mode, PermissionMode::Manual | PermissionMode::AutoEdit) { self.mode } else { PermissionMode::AutoEdit }
+                    }
+                    Some("agent" | "code") if self.mode == PermissionMode::Manual => self.mode,
                     Some("default") if self.mode == PermissionMode::Ask => PermissionMode::Ask,
                     Some("default") => PermissionMode::Manual,
                     Some("acceptEdits" | "agent" | "code") => PermissionMode::AutoEdit,

@@ -19,6 +19,9 @@ pub struct RuntimeState {
     /// session policy when a headless process cannot change after launch.
     #[serde(default)]
     pub permission_mode: Option<super::adapters::PermissionMode>,
+    /// Auto-approve toggle, independent of `permission_mode`.
+    #[serde(default)]
+    pub yolo: bool,
     pub commands: Vec<Value>,
     pub pending: Vec<Interaction>,
 }

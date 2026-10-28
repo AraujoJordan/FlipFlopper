@@ -1,7 +1,7 @@
 import { Component, For, Show, createSignal, onMount } from "solid-js";
 import { ExplainProviderSelect } from "./side/ExplainView";
 import { getVersion } from "@tauri-apps/api/app";
-import { chat, setComposer } from "../lib/chat";
+import { chat, setComposer, setYolo } from "../lib/chat";
 import { layout, resetZoom, setTheme, setMotion, stepZoom, ZOOM_MAX, ZOOM_MIN, type MotionPref, type ThemePref } from "../lib/layout";
 import { notifyOnFinish, setNotifyOnFinish } from "../lib/settings";
 import { SHORTCUT_GROUPS } from "../lib/shortcuts";
@@ -37,7 +37,6 @@ const MODES: { id: PermissionMode; label: string; hint: string }[] = [
   { id: "auto_edit", label: "Auto-edit", hint: "Edits files without asking" },
   { id: "plan", label: "Plan", hint: "Read-only; proposes a plan" },
   { id: "ask", label: "Ask", hint: "Read-only Q&A; no edits or plan" },
-  { id: "full", label: "Full access", hint: "Allows tools; native security policies still apply" },
 ];
 
 const Row: Component<{ title: string; hint?: string; children: any }> = (props) => (
@@ -158,6 +157,13 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
                         {m.label}
                       </button>
                     )}
+                  </For>
+                </div>
+              </Row>
+              <Row title="YOLO (auto-approve)" hint="Auto-approves every tool request on top of the permission mode. Plan and Ask stay read-only; native security policies still apply.">
+                <div class="seg">
+                  <For each={[{ on: false, label: "Off" }, { on: true, label: "On" }]}>
+                    {(o) => <button class="seg-btn" aria-pressed={chat.composer.yolo === o.on} classList={{ "seg-on": chat.composer.yolo === o.on }} onClick={() => void setYolo(o.on)}>{o.label}</button>}
                   </For>
                 </div>
               </Row>

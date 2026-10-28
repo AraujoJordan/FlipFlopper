@@ -586,7 +586,9 @@ export const onPreviewUrl = (sessionId: string, cb: (url: string) => void): Prom
 
 // ── Chat sessions ────────────────────────────────────────────────────────────
 
-export type PermissionMode = "manual" | "auto_edit" | "plan" | "ask" | "full";
+export type PermissionMode = "manual" | "auto_edit" | "plan" | "ask";
+/** Persisted data from before YOLO became a separate toggle may still say `full`. */
+export type StoredPermissionMode = PermissionMode | "full";
 export type ToolKind = "read" | "edit" | "write" | "bash" | "search" | "web" | "todo" | "other";
 export type TurnStatus = "done" | "error" | "cancelled";
 
@@ -629,7 +631,9 @@ export interface AgentRuntimeState {
   capabilities: Record<string, unknown> | null; config_options: AgentOption[];
   modes: { id: string; name: string; description?: string }[];
   current_mode: string | null; commands: { name: string; description: string }[]; pending: AgentInteraction[];
-  permission_mode?: PermissionMode | null;
+  permission_mode?: StoredPermissionMode | null;
+  /** Auto-approve toggle, independent of `permission_mode`. */
+  yolo?: boolean;
 }
 export interface AgentRuntimeInfo { available: boolean; detail: string; protocol: string; node_version: string | null; helper_version: string | null }
 
@@ -687,6 +691,8 @@ export interface SessionMeta {
   model: string | null;
   effort: string | null;
   mode: PermissionMode;
+  /** Auto-approve every tool request; independent of `mode`. */
+  yolo?: boolean;
   native_ids: Record<string, string>;
   acp_sessions?: Record<string, { session_id: string; cwd: string }>;
   entry_count: number;
@@ -707,6 +713,7 @@ export interface NewSessionArgs {
   model?: string | null;
   effort?: string | null;
   mode: PermissionMode;
+  yolo?: boolean;
   parent_id?: string;
   title?: string;
 }
@@ -720,6 +727,7 @@ export interface SessionPatch {
   model?: string | null;
   effort?: string | null;
   mode?: PermissionMode;
+  yolo?: boolean;
   cwd?: string;
   /** `null` detaches the session from its worktree. */
   worktree?: WorktreeRef | null;
@@ -733,6 +741,7 @@ export interface SendArgs {
   model?: string | null;
   effort?: string | null;
   mode: PermissionMode;
+  yolo?: boolean;
   /** First turn only: seed the prompt with another session's conversation. */
   context_from?: string;
   attachments?: Attachment[];
@@ -841,8 +850,8 @@ export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenF
 
 export const chatDetachNative = (sessionId: string): Promise<void> => invoke("chat_detach_native", { sessionId });
 export const chatRuntimeState = (sessionId: string): Promise<AgentRuntimeState> => invoke("chat_runtime_state", { sessionId });
-export const chatSetMode = (sessionId: string, mode: PermissionMode): Promise<{ session: SessionMeta; runtime: AgentRuntimeState }> =>
-  invoke("chat_set_mode", { sessionId, mode });
+export const chatSetMode = (sessionId: string, mode: PermissionMode, yolo: boolean): Promise<{ session: SessionMeta; runtime: AgentRuntimeState }> =>
+  invoke("chat_set_mode", { sessionId, mode, yolo });
 export const chatRespond = (sessionId: string, turnId: string, requestId: string, response: InteractionResponse): Promise<void> =>
   invoke("chat_respond", { sessionId, turnId, requestId, response });
 export const agentRuntimeInfo = (agentId: string): Promise<AgentRuntimeInfo> => invoke("agent_runtime_info", { agentId });

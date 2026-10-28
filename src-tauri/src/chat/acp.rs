@@ -158,12 +158,14 @@ pub enum Message {
 enum CommandMessage {
     SetMode {
         mode: PermissionMode,
+        yolo: bool,
         done: mpsc::SyncSender<Result<(), String>>,
     },
     Configure {
         model: Option<String>,
         effort: Option<String>,
         mode: PermissionMode,
+        yolo: bool,
         done: mpsc::SyncSender<Result<(), String>>,
     },
     Prompt {
@@ -290,6 +292,7 @@ impl Connection {
         model: Option<String>,
         effort: Option<String>,
         mode: PermissionMode,
+        yolo: bool,
     ) -> Result<(), String> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.sender
@@ -297,6 +300,7 @@ impl Connection {
                 model,
                 effort,
                 mode,
+                yolo,
                 done: tx,
             })
             .map_err(|_| "Agent connection closed")?;
@@ -313,9 +317,9 @@ impl Connection {
             }
         }
     }
-    pub fn set_mode(&self, mode: PermissionMode) -> Result<(), String> {
+    pub fn set_mode(&self, mode: PermissionMode, yolo: bool) -> Result<(), String> {
         let (tx, rx) = mpsc::sync_channel(1);
-        self.sender.send(CommandMessage::SetMode { mode, done: tx })
+        self.sender.send(CommandMessage::SetMode { mode, yolo, done: tx })
             .map_err(|_| "Agent connection closed")?;
         rx.recv_timeout(RPC_TIMEOUT + Duration::from_secs(5))
             .map_err(|_| "Permission change timed out; check the agent's current mode before retrying".to_string())?
@@ -347,7 +351,7 @@ pub struct Pool {
     shutting_down: AtomicBool,
 }
 impl Pool {
-    pub fn set_mode(&self, session: &str, agent: &str, mode: PermissionMode) -> Result<bool, String> {
+    pub fn set_mode(&self, session: &str, agent: &str, mode: PermissionMode, yolo: bool) -> Result<bool, String> {
         let connection = {
             let pool = self.connections.lock().unwrap();
             pool.iter().find(|(key, c)| key.starts_with(&format!("{session}:")) && c.busy.load(Ordering::SeqCst))
@@ -355,7 +359,7 @@ impl Pool {
                 .or_else(|| pool.get(&format!("{session}:{agent}")).cloned())
                 .filter(|c| c.snapshot().connected)
         };
-        if let Some(c) = connection { c.set_mode(mode)?; Ok(true) } else { Ok(false) }
+        if let Some(c) = connection { c.set_mode(mode, yolo)?; Ok(true) } else { Ok(false) }
     }
     pub fn prepare(
         &self,
@@ -829,17 +833,18 @@ async fn run_agent(
             _ => return Ok(()),
         };
         match command {
-            CommandMessage::SetMode { mode, done } => {
-                let r = set_mode(&foreground, &cx, mode).await;
+            CommandMessage::SetMode { mode, yolo, done } => {
+                let r = set_mode(&foreground, &cx, mode, yolo).await;
                 let _ = done.send(r);
             }
             CommandMessage::Configure {
                 model,
                 effort,
                 mode,
+                yolo,
                 done,
             } => {
-                let r = configure(&foreground, &cx, model, effort, mode).await;
+                let r = configure(&foreground, &cx, model, effort, mode, yolo).await;
                 let _ = done.send(r);
             }
             CommandMessage::Prompt {
@@ -911,10 +916,10 @@ async fn run_agent(
                         },
                         _=tick.tick()=>foreground.live.lock().unwrap().flush(),
                         command=rx.recv()=>match command {
-                            Some(CommandMessage::SetMode { mode, done }) => {
+                            Some(CommandMessage::SetMode { mode, yolo, done }) => {
                                 let worker = foreground.clone();
                                 let connection = cx.clone();
-                                cx.spawn(async move { let r = set_mode(&worker, &connection, mode).await; let _ = done.send(r); Ok(()) })?;
+                                cx.spawn(async move { let r = set_mode(&worker, &connection, mode, yolo).await; let _ = done.send(r); Ok(()) })?;
                             }
                             Some(CommandMessage::Configure { done, .. }) => { let _ = done.send(Err("Cannot change model configuration during a turn".into())); }
                             Some(CommandMessage::Prompt { events, .. }) => { let _ = events.send(Message::Finished(Err("A turn is already running".into()))); }
@@ -970,11 +975,12 @@ fn acp_error(e: impl ToString) -> agent_client_protocol::Error {
     agent_client_protocol::Error::new(-32000, e.to_string())
 }
 
-async fn set_mode(c: &Connection, cx: &ConnectionTo<Agent>, mode: PermissionMode) -> Result<(), String> {
-    apply_mode(c, cx, mode, None).await.map(|_| ())
+async fn set_mode(c: &Connection, cx: &ConnectionTo<Agent>, mode: PermissionMode, yolo: bool) -> Result<(), String> {
+    apply_mode(c, cx, mode, yolo, None).await.map(|_| ())
 }
 
-async fn apply_mode(c: &Connection, cx: &ConnectionTo<Agent>, mode: PermissionMode, expected: Option<PermissionMode>) -> Result<bool, String> {
+async fn apply_mode(c: &Connection, cx: &ConnectionTo<Agent>, mode: PermissionMode, yolo: bool, expected: Option<PermissionMode>) -> Result<bool, String> {
+    let (mode, yolo) = mode.with_yolo(yolo);
     let _change = c.mode_lock.lock().await;
     if expected.is_some_and(|expected| c.live.lock().unwrap().mode != expected) { return Ok(false); }
     let snapshot = c.snapshot();
@@ -982,12 +988,15 @@ async fn apply_mode(c: &Connection, cx: &ConnectionTo<Agent>, mode: PermissionMo
         .native_session_id
         .clone()
         .ok_or("Native session missing")?;
-    let mode_id = match (snapshot.agent_id.as_str(), mode) {
-        (_, PermissionMode::Plan) => "plan",
-        ("claude", PermissionMode::Manual | PermissionMode::Ask) => "default",
-        ("cursor", PermissionMode::Ask) => "ask",
-        ("claude", PermissionMode::AutoEdit) => "acceptEdits",
-        ("claude", PermissionMode::Full) => "bypassPermissions",
+    // Plan and Ask keep their native read-only mode even with YOLO; YOLO then
+    // auto-approves on the client. Only Manual/Auto-edit swap in a bypass mode.
+    let mode_id = match (snapshot.agent_id.as_str(), mode, yolo) {
+        (_, PermissionMode::Plan, _) => "plan",
+        ("claude", PermissionMode::Ask, _) => "default",
+        ("cursor", PermissionMode::Ask, _) => "ask",
+        ("claude", _, true) => "bypassPermissions",
+        ("claude", PermissionMode::Manual, _) => "default",
+        ("claude", _, _) => "acceptEdits",
         _ => "agent",
     };
     if !snapshot.modes.is_empty() && !snapshot.modes.iter().any(|m| m["id"] == mode_id) {
@@ -1003,10 +1012,13 @@ async fn apply_mode(c: &Connection, cx: &ConnectionTo<Agent>, mode: PermissionMo
     let mut live = c.live.lock().unwrap();
     if c.closing.load(Ordering::SeqCst) || c.cancelled.load(Ordering::SeqCst) { return Err("Agent turn is closing".into()); }
     live.mode = mode;
+    live.yolo = yolo;
     live.state.current_mode = Some(mode_id.into());
-    if mode == PermissionMode::Full {
+    if yolo {
         let approvals: Vec<_> = live.pending.iter().filter_map(|(id, pending)| {
             if pending.request.kind != InteractionKind::Permission { return None; }
+            let tool_kind = pending.request.payload["toolCall"]["kind"].as_str().unwrap_or("");
+            if automatic_choice(mode, yolo, tool_kind) != Some("allow_once") { return None; }
             let option = pending.request.payload["options"].as_array()?.iter().find(|option| option["kind"] == "allow_once")?;
             let wire = pending.request.respond(&InteractionResponse::Permission { option_id: Some(option["optionId"].as_str()?.into()) }).ok()?;
             Some((id.clone(), wire))
@@ -1023,8 +1035,9 @@ async fn configure(
     model: Option<String>,
     effort: Option<String>,
     mode: PermissionMode,
+    yolo: bool,
 ) -> Result<(), String> {
-    set_mode(c, cx, mode).await?;
+    set_mode(c, cx, mode, yolo).await?;
     let id = c.snapshot().native_session_id.ok_or("Native session missing")?;
     for (category, value) in [("model", model), ("thought_level", effort)] {
         let explicit = value.as_ref().is_some_and(|v| !v.is_empty());
@@ -1101,6 +1114,23 @@ fn option_contains(options: &Value, value: &str) -> bool {
     })
 }
 
+/// Client-side answer to a tool permission request, if any. Read-only modes
+/// refuse writes even with YOLO; YOLO approves whatever remains.
+fn automatic_choice(mode: PermissionMode, yolo: bool, tool_kind: &str) -> Option<&'static str> {
+    let blocked = match mode {
+        PermissionMode::Plan => matches!(tool_kind, "edit" | "delete" | "move"),
+        PermissionMode::Ask => matches!(tool_kind, "edit" | "delete" | "move" | "execute"),
+        _ => false,
+    };
+    if blocked {
+        Some("reject_once")
+    } else if yolo {
+        Some("allow_once")
+    } else {
+        None
+    }
+}
+
 fn handle_request(
     c: &Arc<Connection>,
     cx: &ConnectionTo<Agent>,
@@ -1155,17 +1185,7 @@ fn handle_request(
     if kind == InteractionKind::Permission {
         let tool_kind = request.params["toolCall"]["kind"].as_str().unwrap_or("");
         let options = request.params["options"].as_array();
-        let automatic = if live.mode == PermissionMode::Full {
-            Some("allow_once")
-        } else if (live.mode == PermissionMode::Plan
-            && matches!(tool_kind, "edit" | "delete" | "move"))
-            || (live.mode == PermissionMode::Ask
-                && matches!(tool_kind, "edit" | "delete" | "move" | "execute"))
-        {
-            Some("reject_once")
-        } else {
-            None
-        };
+        let automatic = automatic_choice(live.mode, live.yolo, tool_kind);
         if let Some(choice) = automatic {
             if let Some(option) = options.and_then(|o| o.iter().find(|o| o["kind"] == choice)) {
                 return responder.respond(
@@ -1208,6 +1228,11 @@ fn handle_request(
         request: interaction.clone(),
     });
     live.publish();
+    // Planning with YOLO approves the plan itself, so it flows straight into the
+    // implementation. Outside Plan mode, plans, questions and forms stay manual.
+    if kind == InteractionKind::Plan && live.yolo && live.mode == PermissionMode::Plan {
+        live.resolve(&id, "approved", Some(json!({"outcome":{"outcome":"accepted"}})));
+    }
     drop(live);
     let worker = c.clone();
     let connection = cx.clone();
@@ -1218,7 +1243,8 @@ fn handle_request(
             _=cancellation.cancelled()=>{worker.live.lock().unwrap().resolve(&id,"cancelled",None);interaction.cancelled()},
         };
         if kind==InteractionKind::Plan && wire["outcome"]["outcome"]=="accepted" {
-            match apply_mode(&worker,&connection,PermissionMode::AutoEdit,Some(PermissionMode::Plan)).await {
+            let yolo = worker.live.lock().unwrap().yolo;
+            match apply_mode(&worker,&connection,PermissionMode::AutoEdit,yolo,Some(PermissionMode::Plan)).await {
                 Err(e) => return responder.respond_with_error(acp_error(e)),
                 Ok(true) => { let _=store::update_session(&worker.session_id,|m|m.mode=PermissionMode::AutoEdit); }
                 Ok(false) => {}
@@ -1349,13 +1375,14 @@ mod tests {
             Some("model-b".into()),
             Some("high".into()),
             PermissionMode::Plan,
+            false,
         )
         .unwrap();
         let (first, _) = run(&c, "stderr");
         assert_eq!(first["turns"], 1);
         assert_eq!(first["model"], "model-b");
         assert_eq!(first["effort"], "high");
-        c.configure(None, None, PermissionMode::AutoEdit).unwrap();
+        c.configure(None, None, PermissionMode::AutoEdit, false).unwrap();
         let (second, _) = run(&c, "next");
         assert_eq!(second["turns"], 2);
         assert_eq!(second["model"], "model-a");
@@ -1366,13 +1393,14 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(json!({"value":"no-effort","name":"No effort selector"}));
-        c.configure(Some("no-effort".into()), None, PermissionMode::AutoEdit)
+        c.configure(Some("no-effort".into()), None, PermissionMode::AutoEdit, false)
             .unwrap();
         assert!(c
             .configure(
                 Some("no-effort".into()),
                 Some("high".into()),
-                PermissionMode::AutoEdit
+                PermissionMode::AutoEdit,
+                false
             )
             .is_err());
         assert_eq!(
@@ -1383,7 +1411,7 @@ mod tests {
     #[test]
     fn sdk_interactions_are_nonblocking_validated_and_expire() {
         let c = fixture(None);
-        c.configure(None, None, PermissionMode::AutoEdit).unwrap();
+        c.configure(None, None, PermissionMode::AutoEdit, false).unwrap();
         let (value, count) = run(&c, "interactions");
         assert_eq!(count, 5);
         let replies = value["replies"].as_array().unwrap();
@@ -1398,27 +1426,63 @@ mod tests {
     #[test]
     fn cursor_authenticates_only_when_the_protocol_requires_it() {
         let c = fixture_agent(None, "cursor", true);
-        c.configure(None, None, PermissionMode::AutoEdit).unwrap();
+        c.configure(None, None, PermissionMode::AutoEdit, false).unwrap();
         assert_eq!(run(&c, "authenticated").0["turns"], 1);
     }
     #[test]
     fn yolo_auto_approves_tools_for_both_native_agents_and_can_be_disabled() {
         for agent in ["claude", "cursor"] {
             let c = fixture_agent(None, agent, false);
-            c.configure(None, None, PermissionMode::Full).unwrap();
+            c.configure(None, None, PermissionMode::AutoEdit, true).unwrap();
             assert_eq!(c.snapshot().current_mode.as_deref(), Some(if agent == "claude" { "bypassPermissions" } else { "agent" }));
             let (result, interactions) = run(&c, "interactions");
             assert_eq!(interactions, 4, "{agent}: questions, forms, plans and URLs must remain interactive");
             assert_eq!(result["replies"][0]["outcome"]["optionId"], "once");
-            c.configure(None, None, PermissionMode::AutoEdit).unwrap();
+            c.configure(None, None, PermissionMode::AutoEdit, false).unwrap();
             assert_eq!(run(&c, "waiting").1, 1, "{agent}: tool approvals must return when YOLO is off");
         }
+    }
+    #[test]
+    fn yolo_with_plan_keeps_planning_and_approves_the_plan_itself() {
+        for agent in ["claude", "cursor"] {
+            let c = fixture_agent(None, agent, false);
+            c.configure(None, None, PermissionMode::Plan, true).unwrap();
+            let snap = c.snapshot();
+            assert_eq!((snap.permission_mode, snap.yolo, snap.current_mode.as_deref()), (Some(PermissionMode::Plan), true, Some("plan")));
+            let rx = c.prompt(Uuid::new_v4().to_string(), "interactions".into(), vec![]).unwrap();
+            let (mut text, mut manual, mut plans) = (String::new(), 0, 0);
+            loop {
+                match rx.recv_timeout(Duration::from_secs(15)).expect("ACP turn stalled") {
+                    Message::Event(ChatEvent::Text { delta }) => text.push_str(&delta),
+                    Message::Event(ChatEvent::InteractionRequested { request }) if request.kind == InteractionKind::Plan => plans += 1,
+                    Message::Event(ChatEvent::InteractionRequested { request }) => { manual += 1; answer(&c, &request); }
+                    Message::Finished(r) => { assert_eq!(r.unwrap(), TurnStatus::Done); break; }
+                    _ => {}
+                }
+            }
+            let result: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(result["replies"][0]["outcome"]["optionId"], "once", "{agent}: non-edit tools are approved in Plan");
+            assert_eq!(result["replies"][3]["outcome"]["outcome"], "accepted", "{agent}: YOLO approves the plan");
+            assert_eq!((plans, manual), (1, 3), "{agent}: forms, questions and URLs still ask");
+            let snap = c.snapshot();
+            assert_eq!((snap.permission_mode, snap.yolo), (Some(PermissionMode::AutoEdit), true), "{agent}: implementation starts with YOLO kept");
+            assert!(snap.pending.is_empty());
+        }
+    }
+    #[test]
+    fn yolo_never_approves_writes_while_planning_or_asking() {
+        assert_eq!(automatic_choice(PermissionMode::Plan, true, "edit"), Some("reject_once"));
+        assert_eq!(automatic_choice(PermissionMode::Plan, true, "execute"), Some("allow_once"));
+        assert_eq!(automatic_choice(PermissionMode::Ask, true, "execute"), Some("reject_once"));
+        assert_eq!(automatic_choice(PermissionMode::Ask, true, "fetch"), Some("allow_once"));
+        assert_eq!(automatic_choice(PermissionMode::AutoEdit, true, "edit"), Some("allow_once"));
+        assert_eq!(automatic_choice(PermissionMode::Manual, false, "edit"), None);
     }
     #[test]
     fn live_yolo_unblocks_existing_approval_without_restarting_or_resetting_tuning() {
         for agent in ["claude", "cursor"] {
             let c = fixture_agent(None, agent, false);
-            c.configure(Some("model-b".into()), Some("high".into()), PermissionMode::AutoEdit).unwrap();
+            c.configure(Some("model-b".into()), Some("high".into()), PermissionMode::AutoEdit, false).unwrap();
             let rx = c.prompt("live-mode-turn".into(), "waiting".into(), vec![]).unwrap();
             loop {
                 if let Message::Event(ChatEvent::InteractionRequested { request }) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
@@ -1427,17 +1491,17 @@ mod tests {
                 }
             }
             assert_eq!(c.snapshot().active_turn_id.as_deref(), Some("live-mode-turn"));
-            c.set_mode(PermissionMode::Full).unwrap();
+            c.set_mode(PermissionMode::AutoEdit, true).unwrap();
             let (result, interactions) = collect(&c, rx);
             assert_eq!(interactions, 0);
             assert_eq!(result["turns"], 1);
             assert_eq!(result["model"], "model-b");
             assert_eq!(result["effort"], "high");
             assert!(c.snapshot().pending.is_empty());
-            assert_eq!(c.snapshot().permission_mode, Some(PermissionMode::Full));
+            assert_eq!((c.snapshot().permission_mode, c.snapshot().yolo), (Some(PermissionMode::AutoEdit), true));
             assert_eq!(run(&c, "interactions").1, 4);
-            assert_eq!(c.snapshot().permission_mode, Some(PermissionMode::Full), "Approving a plan must preserve an explicit YOLO policy");
-            c.set_mode(PermissionMode::AutoEdit).unwrap();
+            assert!(c.snapshot().yolo, "Approving a plan must preserve an explicit YOLO policy");
+            c.set_mode(PermissionMode::AutoEdit, false).unwrap();
             assert_eq!(run(&c, "waiting").1, 1);
         }
     }
@@ -1445,7 +1509,7 @@ mod tests {
     #[test]
     fn disabling_live_yolo_preserves_non_permission_input_and_future_approvals() {
         let c = fixture(None);
-        c.configure(None, None, PermissionMode::AutoEdit).unwrap();
+        c.configure(None, None, PermissionMode::AutoEdit, false).unwrap();
         let rx = c.prompt("interactive".into(), "interactions".into(), vec![]).unwrap();
         loop {
             if let Message::Event(ChatEvent::InteractionRequested { request }) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
@@ -1453,14 +1517,14 @@ mod tests {
                 break;
             }
         }
-        c.set_mode(PermissionMode::Full).unwrap();
+        c.set_mode(PermissionMode::AutoEdit, true).unwrap();
         let form = loop {
             if let Message::Event(ChatEvent::InteractionRequested { request }) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
                 assert_eq!(request.kind, InteractionKind::Form);
                 break request;
             }
         };
-        c.set_mode(PermissionMode::AutoEdit).unwrap();
+        c.set_mode(PermissionMode::AutoEdit, false).unwrap();
         assert!(c.snapshot().pending.iter().any(|request| request.id == form.id));
         answer(&c, &form);
         collect(&c, rx);
@@ -1470,13 +1534,13 @@ mod tests {
     #[test]
     fn unavailable_live_mode_keeps_the_current_request_and_policy() {
         let c = fixture(None);
-        c.configure(None, None, PermissionMode::AutoEdit).unwrap();
+        c.configure(None, None, PermissionMode::AutoEdit, false).unwrap();
         c.live.lock().unwrap().state.modes.retain(|mode| mode["id"] != "bypassPermissions");
         let rx = c.prompt("rejected-mode".into(), "waiting".into(), vec![]).unwrap();
         let approval = loop {
             if let Message::Event(ChatEvent::InteractionRequested { request }) = rx.recv_timeout(Duration::from_secs(10)).unwrap() { break request; }
         };
-        assert!(c.set_mode(PermissionMode::Full).unwrap_err().contains("does not offer"));
+        assert!(c.set_mode(PermissionMode::AutoEdit, true).unwrap_err().contains("does not offer"));
         assert_eq!(c.snapshot().permission_mode, Some(PermissionMode::AutoEdit));
         assert_eq!(c.snapshot().pending.len(), 1);
         answer(&c, &approval);
@@ -1766,7 +1830,7 @@ mod tests {
             Fixture(c)
         };
         let c = connect(None);
-        c.configure(None, None, PermissionMode::AutoEdit).unwrap();
+        c.configure(None, None, PermissionMode::AutoEdit, false).unwrap();
         let native = c.snapshot().native_session_id.unwrap();
         let prompt = |c: &Connection| {
             let rx = c
@@ -1804,7 +1868,7 @@ mod tests {
             resumed.snapshot().native_session_id.as_deref(),
             Some(native.as_str())
         );
-        resumed.configure(None, None, PermissionMode::Plan).unwrap();
+        resumed.configure(None, None, PermissionMode::Plan, false).unwrap();
         prompt(&resumed);
         resumed.close();
         let _ = std::fs::remove_dir_all(&cwd);

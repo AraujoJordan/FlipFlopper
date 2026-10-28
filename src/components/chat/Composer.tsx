@@ -2,7 +2,7 @@ import {
   Component, For, Show, batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from "solid-js";
 import {
-  agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, isRunning,
+  agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, isRunning, splitMode,
 } from "../../lib/chat";
 import { AgentLogo } from "../../lib/agentMeta";
 import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMode } from "../../lib/ipc";
@@ -24,7 +24,6 @@ const MODES: { id: PermissionMode; label: string; icon: IconName; hint: string }
   { id: "auto_edit", label: "Auto-edit", icon: "pencil", hint: "Edits workspace files; asks when the CLI requires command approval." },
   { id: "plan", label: "Plan", icon: "clipboard", hint: "Read-only. Investigates and proposes a plan; changes nothing." },
   { id: "ask", label: "Ask", icon: "help", hint: "Read-only Q&A. Answers questions; no edits and no plan." },
-  { id: "full", label: "Full access", icon: "zap", hint: "Allows tool requests. Native CLI and system policies still apply." },
 ];
 
 interface SlashItem {
@@ -264,7 +263,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
       sendBtn: sendControl,
       text: text || `${files.length} attachment${files.length === 1 ? "" : "s"}`,
       attachmentsCount: files.length,
-      mode: chat.composer.mode,
+      // YOLO owns the amber accent; the launch flight only needs one visual token.
+      mode: chat.composer.yolo ? "full" : chat.composer.mode,
     });
     const source = draftKey();
     let target = source;
@@ -374,6 +374,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     return tuning()?.models.find((x) => x.id === m)?.label ?? m;
   };
   const modeInfo = () => MODES.find((m) => m.id === chat.composer.mode) ?? MODES[1];
+  /** Amber visual token while YOLO is on; the mode label itself stays. */
+  const modeTint = () => (chat.composer.yolo ? "full" : chat.composer.mode);
 
   function chooseMode(mode: PermissionMode) {
     setModeMenu(false);
@@ -403,7 +405,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   }));
   onCleanup(() => { cancelMotion(composerBox); cancelMotion(sendControl); cancelMotion(sendingStatus); cancelMotion(textarea); });
   useValueMotion(() => agentAnchor, () => chat.composer.agentId, true);
-  useValueMotion(() => modeAnchor, () => chat.composer.mode);
+  useValueMotion(() => modeAnchor, () => `${chat.composer.mode}:${chat.composer.yolo}`);
   useValueMotion(() => modelAnchor, modelSummary);
   useValueMotion(() => composerElement?.querySelector<HTMLElement>(".composer-context .pill") ?? undefined, () => chat.sessions.find((s) => s.id === chat.activeId)?.worktree?.branch);
   useListMotion(() => composerElement, () => attachments().map((a) => a.path).join("|"), ".attach-chip");
@@ -448,7 +450,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           </button>
         </Show>
       </div>
-      <div ref={composerBox} class="composer-box" data-mode={chat.composer.mode} classList={{ "composer-box-full": chat.composer.mode === "full" }}>
+      <div ref={composerBox} class="composer-box" data-mode={modeTint()} classList={{ "composer-box-full": chat.composer.yolo }}>
         <Show when={suggestionsPresent()}>
           <div ref={suggestions} class="mention-menu" role="listbox">
             <For each={items()}>
@@ -542,28 +544,29 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
               ref={modeAnchor}
               type="button"
               class="pill"
-              aria-label={`Permissions: ${modeInfo().label}`}
+              aria-label={`Permissions: ${modeInfo().label}${chat.composer.yolo ? ", YOLO auto-approve on" : ""}`}
               aria-haspopup="menu" aria-expanded={modeMenu()}
               aria-describedby={sessionModePending() ? "session-permission-status" : undefined}
-              data-mode={chat.composer.mode}
-              classList={{ "pill-full": chat.composer.mode === "full" }}
+              data-mode={modeTint()}
+              classList={{ "pill-full": chat.composer.yolo }}
               disabled={permissionModeUpdating()}
               onClick={() => setModeMenu((v) => !v)}
               title={permissionModeUpdating() ? "Updating session permissions…" : "Session permissions (⇧Tab)"}
             >
               <Icon name={modeInfo().icon} size={13} />
               {modeInfo().label}
+              <Show when={chat.composer.yolo}><Icon name="zap" size={12} /></Show>
               <Icon name="chevronDown" size={11} />
             </button>
             <Menu open={modeMenu()} onClose={() => setModeMenu(false)} anchorRef={modeAnchor} width={320}>
               <MenuLabel>Permissions</MenuLabel>
-              <For each={MODES.filter((m) => m.id !== "full")}>
+              <For each={MODES}>
                 {(m) => (
-                  <MenuItem disabled={!modeAvailable(m.id)} onSelect={() => void chooseMode(m.id)}>
+                  <MenuItem disabled={!modeAvailable(m.id, chat.composer.yolo)} onSelect={() => void chooseMode(m.id)}>
                     <Icon name={m.icon} size={16} />
                     <span style={{ display: "flex", "flex-direction": "column", gap: "2px", flex: 1 }}>
                       <span style={{ "font-weight": 500 }}>{m.label}</span>
-                      <span style={{ "font-size": "12px", color: "var(--fg-subtle)" }}>{!modeAvailable(m.id) ? (m.id === "manual" && !native() ? "This agent can't ask mid-turn." : "Not offered by this CLI version.") : m.hint}</span>
+                      <span style={{ "font-size": "12px", color: "var(--fg-subtle)" }}>{!modeAvailable(m.id, chat.composer.yolo) ? (m.id === "manual" && !native() ? "This agent can't ask mid-turn." : "Not offered by this CLI version.") : m.hint}</span>
                     </span>
                     <Show when={chat.composer.mode === m.id}><Icon name="check" size={14} /></Show>
                   </MenuItem>
@@ -573,23 +576,23 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
               <button
                 type="button"
                 class="full-access-toggle"
-                classList={{ "full-access-on": chat.composer.mode === "full" }}
+                classList={{ "full-access-on": chat.composer.yolo }}
                 role="switch"
-                aria-label="Full access"
-                aria-checked={chat.composer.mode === "full"}
+                aria-label="YOLO: auto-approve everything"
+                aria-checked={chat.composer.yolo}
                 disabled={permissionModeUpdating()}
                 aria-busy={permissionModeUpdating()}
                 title={permissionModeUpdating() ? "Updating session permissions…" : sessionModePending()
                   ? "Session updated. This running CLI keeps its launch permissions until the next turn."
-                  : "Full access: auto-approve tools for this session. Applies live to Claude/Cursor. CLI and system policies still apply."}
-                onClick={() => setYolo(chat.composer.mode !== "full")}
+                  : "YOLO: auto-approve tool requests for this session, on top of the mode above. Plan and Ask stay read-only. Applies live to Claude/Cursor. CLI and system policies still apply."}
+                onClick={() => setYolo(!chat.composer.yolo)}
               >
                 <Icon name="zap" size={13} />
-                <span class="permission-description"><strong>Full access</strong><small>Auto-approve tools. CLI and system policies still apply.</small></span>
+                <span class="permission-description"><strong>YOLO</strong><small>Auto-approve everything, in any mode. Plan and Ask stay read-only; CLI and system policies still apply.</small></span>
                 <span class="full-access-track" aria-hidden="true"><span /></span>
               </button>
             </Menu>
-            <Show when={sessionModePending()}><span id="session-permission-status" class="pill pill-static" role="status" title={`Current task: ${MODES.find((mode) => mode.id === chat.views[chat.activeId!]?.runtime?.permission_mode)?.label ?? "previous permissions"}. Session permissions apply next turn.`}>Next turn</span></Show>
+            <Show when={sessionModePending()}><span id="session-permission-status" class="pill pill-static" role="status" title={`Current task: ${MODES.find((mode) => mode.id === splitMode(chat.views[chat.activeId!]?.runtime?.permission_mode ?? "auto_edit").mode)?.label ?? "previous permissions"}${chat.views[chat.activeId!]?.runtime?.yolo ? " + YOLO" : ""}. Session permissions apply next turn.`}>Next turn</span></Show>
           </div>
 
           <div class="composer-bar-right">

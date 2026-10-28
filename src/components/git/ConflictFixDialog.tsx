@@ -63,6 +63,7 @@ export const ConflictFixDialogHost: Component = () => {
         agentId: agent.id,
         // Resolving conflicts means editing files; never escalate to Full on the user's behalf.
         mode: chat.composer.mode === "plan" || chat.composer.mode === "ask" ? "auto_edit" : chat.composer.mode,
+        yolo: chat.composer.yolo,
         prompt: buildConflictPrompt(s.files, s.context),
         title: "Resolve merge conflicts",
         activate: true,

@@ -142,7 +142,7 @@ const App: Component = () => {
       case "menu-focus-prompt": runAction("focus-prompt"); return;
       case "menu-command-palette": togglePalette(); return;
       case "menu-stop-turn": cancelTurn(); return;
-      case "menu-full-access": setYolo(chat.composer.mode !== "full"); return;
+      case "menu-full-access": setYolo(!chat.composer.yolo); return;
       case "menu-prev-session": cycleSession(-1); return;
       case "menu-next-session": cycleSession(1); return;
       case "menu-toggle-sidebar": toggleSidebar(); return;
@@ -172,7 +172,7 @@ const App: Component = () => {
       hasProject: !!store.currentProject,
       hasSession: !!chat.activeId,
       running: chat.activeId ? isRunning(chat.activeId) : false,
-      fullAccess: chat.composer.mode === "full",
+      fullAccess: chat.composer.yolo,
       sidebarOpen: layout.sidebarOpen,
       sidePaneOpen: layout.sideOpen,
       sideTab: layout.sideTab,
@@ -324,7 +324,7 @@ const App: Component = () => {
 
   return (
     <div ref={rootElement} class="app-root" style={{ "--panel-inset": `${PANEL_INSET}px`, "--panel-gap": `${PANEL_GAP}px`, "--native-controls-width": `${88 / layout.zoom}px`, "--native-title-height": `${32 / layout.zoom}px` }}
-      classList={{ "app-full-access": chat.composer.mode === "full", "app-sidebar-closed": !layout.sidebarOpen, "app-macos": macDesktop, "app-native-fullscreen": nativeFullscreen(), "app-sidebar-docked": layout.sidebarOpen && !sidebarIsOverlay() }}
+      classList={{ "app-full-access": chat.composer.yolo, "app-sidebar-closed": !layout.sidebarOpen, "app-macos": macDesktop, "app-native-fullscreen": nativeFullscreen(), "app-sidebar-docked": layout.sidebarOpen && !sidebarIsOverlay() }}
       onMouseDown={(event) => { void handleWindowHeaderMouseDown(event).catch((error) => toast(String(error), "error")); }}
       onDblClick={(event) => { void handleWindowHeaderDoubleClick(event).catch((error) => toast(String(error), "error")); }}>
       <Show when={layout.sidebarOpen && sidebarIsOverlay() && !(layout.sideOpen && paneIsOverlay())}><div class="sidebar-scrim" onClick={toggleSidebar} aria-hidden="true" /></Show>
