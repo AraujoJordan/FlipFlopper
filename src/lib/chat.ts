@@ -1034,7 +1034,14 @@ export function contextUsage(): { used: number; size: number; cost: number | nul
   }
   return undefined;
 }
-export function nativeCommands(): { name: string; description: string }[] {
-  const runtime = chat.activeId ? chat.views[chat.activeId]?.runtime : undefined;
-  return runtime?.agent_id === chat.composer.agentId ? runtime.commands : [];
+export function nativeCommands(): { name: string; description: string; input?: { hint?: string } | null }[] {
+  const agentId = chat.composer.agentId;
+  const active = chat.activeId ? chat.views[chat.activeId]?.runtime : undefined;
+  const runtime =
+    active?.agent_id === agentId && active.commands.length > 0
+      ? active
+      : Object.values(chat.views)
+          .map((v) => v.runtime)
+          .find((r) => r?.agent_id === agentId && r.commands.length > 0);
+  return runtime?.commands ?? [];
 }

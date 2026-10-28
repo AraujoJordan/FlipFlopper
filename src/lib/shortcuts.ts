@@ -13,7 +13,7 @@ import { closeReview, store } from "./store";
 // are what Windows/Linux (and focused-webview edge cases) use.
 
 export type ShortcutAction =
-  | "focus-prompt" | "shortcut-help" | "open-project" | "new-project" | "open-settings";
+  | "focus-prompt" | "shortcut-help" | "open-project" | "new-project" | "open-settings" | "open-mcp" | "open-skills";
 
 const actionHandlers = new Map<ShortcutAction, (payload?: string) => void>();
 

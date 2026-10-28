@@ -36,6 +36,16 @@ export interface PromptSkill {
   description: string | null;
 }
 
+export interface McpServerInfo {
+  name: string;
+  transport: "stdio" | "http" | "sse" | string;
+  target: string;
+  source: string;
+  scope: "project" | "user" | string;
+  agents: string[];
+  enabled: boolean;
+}
+
 export interface StatusEntry {
   path: string;
   orig_path: string | null;
@@ -244,6 +254,9 @@ export const searchPromptFiles = (
 
 export const listPromptSkills = (projectPath: string | null): Promise<PromptSkill[]> =>
   invoke("list_prompt_skills", { projectPath });
+
+export const listMcpServers = (projectPath: string | null): Promise<McpServerInfo[]> =>
+  invoke("list_mcp_servers", { projectPath });
 
 export const pickProjectFolder = (): Promise<string | null> =>
   invoke("pick_project_folder");
@@ -632,7 +645,7 @@ export interface AgentRuntimeState {
   connected: boolean; active_turn_id?: string | null; agent_id: string; native_session_id: string | null; agent_version: string | null;
   capabilities: Record<string, unknown> | null; config_options: AgentOption[];
   modes: { id: string; name: string; description?: string }[];
-  current_mode: string | null; commands: { name: string; description: string }[]; pending: AgentInteraction[];
+  current_mode: string | null; commands: { name: string; description: string; input?: { hint?: string } | null }[]; pending: AgentInteraction[];
   permission_mode?: StoredPermissionMode | null;
   /** Auto-approve toggle, independent of `permission_mode`. */
   yolo?: boolean;

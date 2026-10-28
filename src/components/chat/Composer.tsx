@@ -5,11 +5,11 @@ import {
   agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, sendQueuedNow, isRunning, splitMode,
 } from "../../lib/chat";
 import { AgentLogo, agentModelsError, agentModelsLoading, hydrateAgentModels, refreshAgentModels } from "../../lib/agentMeta";
-import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMode } from "../../lib/ipc";
+import { listMcpServers, listPromptSkills, openAttachment, searchPromptFiles, type FileEntry, type McpServerInfo, type PermissionMode, type PromptSkill } from "../../lib/ipc";
 import { openSide } from "../../lib/layout";
-import { registerShortcutHandler } from "../../lib/shortcuts";
+import { registerShortcutHandler, runAction } from "../../lib/shortcuts";
 import { effectiveRoot, setStore, store } from "../../lib/store";
-import { Menu, MenuDivider, MenuItem, MenuLabel, Spinner, animateElement, cancelMotion, startPromptLaunch, useValueMotion, useListMotion, usePresence, useSelectionMotion, toast } from "../ui";
+import { Menu, MenuDivider, MenuItem, MenuLabel, Presence, Spinner, animateElement, cancelMotion, startPromptLaunch, useValueMotion, useListMotion, usePresence, useSelectionMotion, toast } from "../ui";
 import { Icon, type IconName } from "../shell/Icon";
 import { getFileIcon } from "../../lib/fileIcons";
 import {
@@ -29,17 +29,36 @@ const MODES: { id: PermissionMode; label: string; icon: IconName; hint: string }
 interface SlashItem {
   name: string;
   detail: string;
+  hint?: string;
+  badge?: string;
+  icon?: IconName;
+  aliases?: string[];
+  acceptsArgs?: boolean;
   /** Inserted into the prompt instead of running an action. */
   prompt?: string;
-  run?: () => void;
+  run?: (arg?: string) => void;
 }
 
 interface MenuEntry {
   label: string;
   detail?: string;
+  hint?: string;
+  badge?: string;
   icon?: IconName;
   apply: () => void;
 }
+
+const DEFAULT_CLAUDE_COMMANDS: { name: string; description: string; input?: { hint?: string } | null }[] = [
+  { name: "mcp", description: "Show MCP servers and their status, or reconnect, enable, or disable a server", input: { hint: "[reconnect|enable|disable] [server|all]" } },
+  { name: "compact", description: "Clear conversation history but keep a summary in context", input: { hint: "[instructions]" } },
+  { name: "usage", description: "Show current plan usage limits and rate status" },
+  { name: "init", description: "Initialize a new CLAUDE.md file with codebase documentation" },
+  { name: "review", description: "Review a pull request or current changes for issues" },
+  { name: "pr-comments", description: "Get comments from a GitHub pull request" },
+  { name: "security-review", description: "Complete a security review of the pending changes on the current branch" },
+  { name: "doctor", description: "Diagnose and verify your Claude Code installation and settings" },
+  { name: "remote-control", description: "Continue this session from claude.ai/code or the Claude mobile app; `off` disconnects", input: { hint: "[session name | off]" } },
+];
 
 const draftKey = () => chat.activeId ?? "new";
 const drafts = new Map<string, string>();
@@ -74,6 +93,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   const [modelMenu, setModelMenu] = createSignal(false);
   const [modeMenu, setModeMenu] = createSignal(false);
   const [plusMenu, setPlusMenu] = createSignal(false);
+  const [inspectorTab, setInspectorTab] = createSignal<"mcp" | "skills" | "commands" | null>(null);
+  const [inspectorQuery, setInspectorQuery] = createSignal("");
   let plusAnchor: HTMLButtonElement | undefined;
   let agentAnchor: HTMLButtonElement | undefined;
   let modelAnchor: HTMLButtonElement | undefined;
@@ -81,13 +102,33 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   let composerBox: HTMLDivElement | undefined;
   let sendControl: HTMLDivElement | undefined;
   let sendingStatus: HTMLSpanElement | undefined;
+  let inspectorSearchRef: HTMLInputElement | undefined;
   let draftMove: { from: string; to: string } | undefined;
 
   const running = () => (chat.activeId ? isRunning(chat.activeId) : false);
-  const canCompact = () => !running() && !submitting() && nativeCommands().some((c) => c.name === "compact");
+  const effectiveNativeCommands = createMemo(() => {
+    const reported = nativeCommands();
+    if (chat.composer.agentId !== "claude") return reported;
+    const seen = new Set(reported.map((c) => c.name));
+    return [...reported, ...DEFAULT_CLAUDE_COMMANDS.filter((c) => !seen.has(c.name))];
+  });
+  const canCompact = () => !running() && !submitting() && effectiveNativeCommands().some((c) => c.name === "compact");
   const compactNow = () => { if (canCompact()) void submitPrompt("/agent:compact"); };
   const fmtTokens = (n: number) => n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n);
   const projectRoot = () => effectiveRoot();
+
+  function openInspector(tab: "mcp" | "skills" | "commands", initialQuery = "") {
+    batch(() => {
+      setInspectorTab(tab);
+      setInspectorQuery(initialQuery);
+    });
+    queueMicrotask(() => inspectorSearchRef?.focus());
+  }
+
+  function closeInspector() {
+    setInspectorTab(null);
+    queueMicrotask(() => textarea?.focus());
+  }
 
   // ── Drafts follow the session ──
   let lastKey = draftKey();
@@ -126,8 +167,10 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   });
 
   onMount(() => {
-    const off = registerShortcutHandler("focus-prompt", () => textarea?.focus());
-    onCleanup(off);
+    const offFocus = registerShortcutHandler("focus-prompt", () => textarea?.focus());
+    const offMcp = registerShortcutHandler("open-mcp", (q) => openInspector("mcp", q ?? ""));
+    const offSkills = registerShortcutHandler("open-skills", (q) => openInspector("skills", q ?? ""));
+    onCleanup(() => { offFocus(); offMcp(); offSkills(); });
     textarea?.focus();
   });
 
@@ -154,30 +197,165 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     },
     (k) => searchPromptFiles(k.root, k.query, 8).catch(() => [] as FileEntry[]),
   );
-  const [skills] = createResource(() => store.currentProject?.path ?? null, (p) => listPromptSkills(p).catch(() => []));
+  const resourceTrigger = () => {
+    const root = projectRoot() ?? store.currentProject?.path ?? null;
+    if (root) return root;
+    return token()?.kind === "slash" || inspectorTab() !== null ? "" : null;
+  };
+  const [skills, { refetch: refetchSkills }] = createResource(
+    resourceTrigger,
+    (p) => listPromptSkills(p || null).catch(() => [] as PromptSkill[]),
+  );
+  const [mcpServers, { refetch: refetchMcp }] = createResource(
+    resourceTrigger,
+    (p) => listMcpServers(p || null).catch(() => [] as McpServerInfo[]),
+  );
 
-  const slashCommands = createMemo<SlashItem[]>(() => [
-    { name: "review", detail: "Open the Changes pane", run: () => openSide("changes") },
-    { name: "plan", detail: "Switch to Plan mode", run: () => setComposer({ mode: "plan" }) },
-    { name: "ask", detail: "Switch to Ask mode", run: () => setComposer({ mode: "ask" }) },
-    { name: "edit", detail: "Switch to Auto-edit mode", run: () => setComposer({ mode: "auto_edit" }) },
-    ...(modeAvailable("manual") ? [{ name: "manual", detail: "Switch to Manual mode", run: () => setComposer({ mode: "manual" }) }] : []),
-    { name: "new", detail: "Start a new session", run: () => startNewSession() },
-    { name: "clear", detail: "Clear the conversation and start with fresh context", run: () => clearConversation() },
-    { name: "terminal", detail: "Open the terminal pane", run: () => openSide("terminal") },
-    {
-      name: "commit",
-      detail: "Ask the agent to commit the current changes",
-      prompt: "Review the uncommitted changes in the working tree and commit them with a clear, conventional commit message. Do not push.",
-    },
-    {
-      name: "test",
-      detail: "Ask the agent to run the project's tests",
-      prompt: "Run the project's test suite, then summarize failures and fix them if the cause is clear.",
-    },
-    ...nativeCommands().map((c) => ({ name: `agent:${c.name}`, detail: `Agent · ${c.description}`, prompt: `/agent:${c.name} ` })),
-    ...((chat.composer.agentId === "claude" || chat.composer.agentId === "cursor") ? [] : skills() ?? []).map((s) => ({ name: s.name, detail: s.description || `${s.source} skill`, prompt: `/${s.name} ` })),
-  ]);
+  const slashCommands = createMemo<SlashItem[]>(() => {
+    const nativeCmds = effectiveNativeCommands();
+    const nativeNames = new Set(nativeCmds.map((c) => c.name.toLowerCase()));
+    const usage = contextUsage();
+    const usageDetail = usage
+      ? `Check usage limits · Session: ${fmtTokens(usage.used)} / ${fmtTokens(usage.size)}${usage.cost != null ? ` · $${usage.cost.toFixed(2)}` : ""}`
+      : "Check current plan usage limits and session token usage";
+    return [
+      {
+        name: "mcp",
+        detail: "Inspect configured MCP servers & manage connections",
+        hint: "[reconnect|enable|disable] [server|all]",
+        icon: "layers",
+        badge: "MCP",
+        aliases: ["servers", "mcp-servers"],
+        acceptsArgs: true,
+        run: (arg?: string) => {
+          const a = arg?.trim() ?? "";
+          if (a && chat.composer.agentId === "claude" && /^(reconnect|enable|disable)\b/i.test(a)) {
+            if (!running() && !submitting()) void submitPrompt(`/agent:mcp ${a}`);
+            return;
+          }
+          openInspector("mcp", a);
+        },
+      },
+      {
+        name: "skills",
+        detail: "Browse & search available skills and custom commands",
+        hint: "[filter]",
+        icon: "sparkle",
+        badge: "Skills",
+        aliases: ["skill", "commands"],
+        acceptsArgs: true,
+        run: (arg?: string) => openInspector("skills", arg?.trim() ?? ""),
+      },
+      ...(nativeNames.has("compact")
+        ? [{
+            name: "compact",
+            detail: "Compact conversation history into a summary to free up context",
+            hint: "[instructions]",
+            icon: "fit" as IconName,
+            badge: "Agent",
+            acceptsArgs: true,
+            run: (arg?: string) => {
+              if (!running() && !submitting()) {
+                const a = arg?.trim();
+                void submitPrompt(a ? `/agent:compact ${a}` : "/agent:compact");
+              }
+            },
+          }]
+        : []),
+      {
+        name: "usage",
+        detail: usageDetail,
+        icon: "table",
+        badge: chat.composer.agentId === "claude" ? "Agent" : "App",
+        aliases: ["cost", "tokens", "context"],
+        run: () => {
+          if (chat.composer.agentId === "claude" && !running() && !submitting()) {
+            void submitPrompt("/agent:usage");
+            return;
+          }
+          const u = contextUsage();
+          toast(
+            u
+              ? `Context usage: ${fmtTokens(u.used)} / ${fmtTokens(u.size)} tokens (${Math.round((u.used / Math.max(1, u.size)) * 100)}%)${u.cost != null ? ` · $${u.cost.toFixed(2)}` : ""}`
+              : "No context usage reported for this session yet.",
+            "info",
+          );
+        },
+      },
+      { name: "review", detail: "Open the Changes pane", icon: "diff", badge: "App", aliases: ["changes", "diff", "status"], run: () => openSide("changes") },
+      { name: "preview", detail: "Open the Preview pane", icon: "globe", badge: "App", run: () => openSide("preview") },
+      { name: "terminal", detail: "Open the terminal pane", icon: "terminal", badge: "App", aliases: ["shell", "bash"], run: () => openSide("terminal") },
+      { name: "flow", detail: "Open the multi-agent Flow canvas", icon: "flow", badge: "App", run: () => openSide("flow") },
+      { name: "explain", detail: "Open the Explain pane", icon: "document", badge: "App", run: () => openSide("explain") },
+      { name: "plan", detail: "Switch to Plan mode", icon: "clipboard", badge: "Mode", run: () => setComposer({ mode: "plan" }) },
+      { name: "ask", detail: "Switch to Ask mode", icon: "help", badge: "Mode", run: () => setComposer({ mode: "ask" }) },
+      { name: "edit", detail: "Switch to Auto-edit mode", icon: "pencil", badge: "Mode", aliases: ["auto", "auto_edit"], run: () => setComposer({ mode: "auto_edit" }) },
+      ...(modeAvailable("manual") ? [{ name: "manual", detail: "Switch to Manual mode", icon: "shield" as IconName, badge: "Mode", run: () => setComposer({ mode: "manual" }) }] : []),
+      {
+        name: "yolo",
+        detail: `${chat.composer.yolo ? "Turn off" : "Turn on"} YOLO auto-approve (now ${chat.composer.yolo ? "on" : "off"})`,
+        hint: "[on|off]",
+        icon: "zap",
+        badge: "Mode",
+        acceptsArgs: true,
+        run: (arg?: string) => {
+          const a = arg?.trim().toLowerCase();
+          setYolo(a === "on" || a === "true" || a === "1" ? true : a === "off" || a === "false" || a === "0" ? false : !chat.composer.yolo);
+        },
+      },
+      {
+        name: "model",
+        detail: "Open the model picker or switch model",
+        hint: "[model-id]",
+        icon: "sparkle",
+        badge: "App",
+        aliases: ["models"],
+        acceptsArgs: true,
+        run: (arg?: string) => {
+          const a = arg?.trim();
+          if (a) setComposer({ model: a === "default" ? null : a });
+          else toggleModelMenu();
+        },
+      },
+      { name: "new", detail: "Start a new session", icon: "plus", badge: "App", run: () => startNewSession() },
+      { name: "clear", detail: "Clear the conversation and start with fresh context", icon: "refresh", badge: "App", aliases: ["reset"], run: () => clearConversation() },
+      { name: "settings", detail: "Open FlipFlopper settings", icon: "settings", badge: "App", aliases: ["config", "preferences"], run: () => runAction("open-settings") },
+      { name: "help", detail: "Show keyboard shortcuts and commands reference", icon: "help", badge: "App", aliases: ["shortcuts"], run: () => runAction("shortcut-help") },
+      {
+        name: "commit",
+        detail: "Ask the agent to commit the current changes",
+        icon: "commit",
+        badge: "Prompt",
+        prompt: "Review the uncommitted changes in the working tree and commit them with a clear, conventional commit message. Do not push.",
+      },
+      {
+        name: "test",
+        detail: "Ask the agent to run the project's tests",
+        icon: "fileCheck",
+        badge: "Prompt",
+        prompt: "Run the project's test suite, then summarize failures and fix them if the cause is clear.",
+      },
+      ...nativeCmds.map((c): SlashItem => ({
+        name: `agent:${c.name}`,
+        detail: `Agent · ${c.description}`,
+        hint: c.input?.hint || undefined,
+        icon: c.name === "mcp" || c.name.startsWith("mcp:") ? "layers" : c.name === "compact" ? "fit" : "terminal",
+        badge: "Agent",
+        aliases: [c.name],
+        prompt: `/agent:${c.name} `,
+      })),
+      ...(skills() ?? [])
+        .filter((s) => !nativeNames.has(s.name.toLowerCase()))
+        .map((s): SlashItem => ({
+          name: s.name,
+          detail: s.description || `${s.source} skill`,
+          icon: "sparkle",
+          badge: s.source === "project" ? "Project skill" : `${s.source} skill`,
+          aliases: ["skill", "skills", s.source],
+          prompt: `/${s.name} `,
+        })),
+    ];
+  });
 
   const items = createMemo<MenuEntry[]>(() => {
     const t = token();
@@ -190,26 +368,52 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
         apply: () => replaceToken(`@${f.name}${f.is_dir ? "/" : " "}`),
       }));
     }
-    const q = t.query.toLowerCase();
-    return slashCommands()
-      .filter((c) => !q || c.name.toLowerCase().includes(q))
-      .slice(0, 8)
-      .map((c) => ({
-        label: `/${c.name}`,
-        detail: c.detail,
-        apply: () => {
-          if (c.run) {
-            replaceToken("");
-            c.run();
-          } else {
-            replaceToken(c.prompt ?? `/${c.name} `);
-          }
-        },
-      }));
+    const q = t.query.trim().toLowerCase();
+    const score = (c: SlashItem): number => {
+      if (!q) return 1;
+      const name = c.name.toLowerCase();
+      const bare = name.replace(/^agent:/, "");
+      const aliases = (c.aliases ?? []).map((a) => a.toLowerCase());
+      if (name === q) return 100;
+      if (bare === q) return 96;
+      if (aliases.includes(q) && c.run) return 94;
+      if (name.startsWith(q)) return 85;
+      if (bare.startsWith(q)) return 80;
+      if (aliases.some((a) => a.startsWith(q)) && c.run) return 75;
+      if (name.includes(q)) return 60;
+      if (aliases.some((a) => a.includes(q))) return 50;
+      if (c.detail.toLowerCase().includes(q)) return 30;
+      return 0;
+    };
+    const ranked = q
+      ? slashCommands()
+          .map((c, idx) => ({ c, s: score(c), idx }))
+          .filter((x) => x.s > 0)
+          .sort((a, b) => b.s - a.s || a.idx - b.idx)
+          .map((x) => x.c)
+      : slashCommands();
+    return ranked.slice(0, 24).map((c) => ({
+      label: `/${c.name}`,
+      detail: c.detail,
+      hint: c.hint,
+      badge: c.badge,
+      icon: c.icon,
+      apply: () => {
+        if (c.run) {
+          replaceToken("");
+          c.run();
+        } else {
+          replaceToken(c.prompt ?? `/${c.name} `);
+        }
+      },
+    }));
   });
   const menuOpen = () => items().length > 0;
 
   createEffect(on(tokenKey, () => setSelected(0)));
+  createEffect(on(selected, () => {
+    queueMicrotask(() => suggestions?.querySelector(".mention-item-active")?.scrollIntoView({ block: "nearest" }));
+  }, { defer: true }));
 
   function replaceToken(text: string) {
     const t = token();
@@ -234,12 +438,47 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     queueMicrotask(() => { textarea?.focus(); textarea?.setSelectionRange(np, np); setCaret(np); resize(); });
   }
 
+  function insertSlashTrigger() {
+    setValue("/");
+    setDismissedKey(null);
+    queueMicrotask(() => { textarea?.focus(); textarea?.setSelectionRange(1, 1); setCaret(1); resize(); });
+  }
+
+  function insertCommandPrompt(promptText: string) {
+    closeInspector();
+    setValue(promptText);
+    setDismissedKey(null);
+    const pos = promptText.length;
+    queueMicrotask(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(pos, pos);
+      setCaret(pos);
+      resize();
+    });
+  }
+
   function clearConversation() {
     batch(() => { setValue(""); clearAttachments(); setCaret(0); setHistoryIndex(null); });
     drafts.delete(draftKey());
     attachmentDrafts.delete(draftKey());
     queueMicrotask(resize);
     if (chat.activeId) void clearSession(chat.activeId);
+  }
+
+  function matchTypedSlashCommand(text: string): { item: SlashItem; arg: string } | undefined {
+    if (!text.startsWith("/") || text.includes("\n")) return undefined;
+    const body = text.slice(1).trim();
+    if (!body) return undefined;
+    const space = body.search(/\s/);
+    const cmd = (space < 0 ? body : body.slice(0, space)).toLowerCase();
+    const arg = space < 0 ? "" : body.slice(space + 1).trim();
+    const item = slashCommands().find(
+      (c) =>
+        c.run &&
+        (c.name.toLowerCase() === cmd || c.aliases?.some((a) => a.toLowerCase() === cmd)) &&
+        (!arg || c.acceptsArgs),
+    );
+    return item ? { item, arg } : undefined;
   }
 
   // ── Sending ──
@@ -249,11 +488,11 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     const text = original.trim();
     const files = [...attachments()];
     // A typed `/command` behaves like picking it from the menu.
-    const typed = files.length === 0 && /^\/\S+$/.test(text) ? slashCommands().find((c) => c.run && `/${c.name}` === text) : undefined;
-    if (typed?.run) {
+    const typed = files.length === 0 ? matchTypedSlashCommand(text) : undefined;
+    if (typed?.item.run) {
       batch(() => { setValue(""); setCaret(0); setDismissedKey(null); });
       queueMicrotask(resize);
-      typed.run();
+      typed.item.run(typed.arg);
       return;
     }
     if (!text && files.length === 0) return;
@@ -484,7 +723,9 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                 >
                   <Icon name={item.icon ?? "sparkle"} size={14} />
                   <span class="mention-label">{item.label}</span>
+                  <Show when={item.hint}><span class="mention-hint">{item.hint}</span></Show>
                   <span class="mention-detail">{item.detail}</span>
+                  <Show when={item.badge}><span class="mention-badge">{item.badge}</span></Show>
                 </button>
               )}
             </For>
@@ -512,8 +753,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                 ? "Queue a follow-up, or Ctrl+Enter to send queued now…"
                 : "Queue a follow-up, or Ctrl+Enter to steer…")
               : chat.activeId
-                ? "Reply, or @ to mention a file…"
-                : "Describe a task or ask a question"
+                ? "Reply, @ to mention a file, or / for commands…"
+                : "Describe a task, @ to mention a file, or / for commands…"
           }
           value={value()}
           spellcheck={false}
@@ -557,7 +798,17 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                 <Icon name="eye" size={15} /> <span style={{ flex: 1 }}>Paste image from clipboard</span>
               </MenuItem>
               <MenuItem onSelect={() => { setPlusMenu(false); insertMentionTrigger(); }}>
-                <Icon name="at" size={15} /> <span style={{ flex: 1 }}>Mention a file</span>
+                <Icon name="at" size={15} /> <span style={{ flex: 1 }}>Mention a file (@)</span>
+              </MenuItem>
+              <MenuItem onSelect={() => { setPlusMenu(false); insertSlashTrigger(); }}>
+                <Icon name="terminal" size={15} /> <span style={{ flex: 1 }}>Slash command or skill (/)</span>
+              </MenuItem>
+              <MenuDivider />
+              <MenuItem onSelect={() => { setPlusMenu(false); openInspector("skills"); }}>
+                <Icon name="sparkle" size={15} /> <span style={{ flex: 1 }}>Browse skills & commands…</span>
+              </MenuItem>
+              <MenuItem onSelect={() => { setPlusMenu(false); openInspector("mcp"); }}>
+                <Icon name="layers" size={15} /> <span style={{ flex: 1 }}>Inspect MCP servers…</span>
               </MenuItem>
             </Menu>
             <button
@@ -729,6 +980,324 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           </div>
         </div>
       </div>
+
+      <Presence when={inspectorTab() !== null}>
+        <div class="overlay-backdrop-in cmd-inspector-backdrop" onClick={closeInspector}>
+          <div
+            class="overlay-pop-in cmd-inspector"
+            role="dialog"
+            aria-label="Commands, skills and MCP servers"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Escape") {
+                e.preventDefault();
+                closeInspector();
+              }
+            }}
+          >
+            <div class="cmd-inspector-head">
+              <div class="cmd-inspector-tabs" role="tablist">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={inspectorTab() === "mcp"}
+                  class="chip"
+                  classList={{ "chip-on": inspectorTab() === "mcp" }}
+                  onClick={() => setInspectorTab("mcp")}
+                >
+                  <Icon name="layers" size={13} /> MCP Servers ({(mcpServers() ?? []).length})
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={inspectorTab() === "skills"}
+                  class="chip"
+                  classList={{ "chip-on": inspectorTab() === "skills" }}
+                  onClick={() => setInspectorTab("skills")}
+                >
+                  <Icon name="sparkle" size={13} /> Skills ({(skills() ?? []).length})
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={inspectorTab() === "commands"}
+                  class="chip"
+                  classList={{ "chip-on": inspectorTab() === "commands" }}
+                  onClick={() => setInspectorTab("commands")}
+                >
+                  <Icon name="terminal" size={13} /> Commands ({slashCommands().filter((c) => !c.badge?.endsWith("skill")).length})
+                </button>
+              </div>
+              <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
+                <button
+                  type="button"
+                  class="icon-btn"
+                  title="Refresh"
+                  aria-label="Refresh list"
+                  onClick={() => {
+                    void refetchSkills();
+                    void refetchMcp();
+                  }}
+                >
+                  <Icon name="refresh" size={14} />
+                </button>
+                <button
+                  type="button"
+                  class="icon-btn"
+                  title="Close"
+                  aria-label="Close inspector"
+                  onClick={closeInspector}
+                >
+                  <Icon name="x" size={14} />
+                </button>
+              </div>
+            </div>
+
+            <div class="cmd-inspector-search">
+              <Icon name="search" size={15} />
+              <input
+                ref={inspectorSearchRef}
+                placeholder={
+                  inspectorTab() === "mcp"
+                    ? "Filter MCP servers by name, source, agent or command…"
+                    : inspectorTab() === "skills"
+                      ? "Filter skills by name, source or description…"
+                      : "Filter slash commands…"
+                }
+                value={inspectorQuery()}
+                onInput={(e) => setInspectorQuery(e.currentTarget.value)}
+                spellcheck={false}
+              />
+              <Show when={inspectorQuery()}>
+                <button type="button" class="icon-btn" onClick={() => setInspectorQuery("")} aria-label="Clear filter">
+                  <Icon name="x" size={13} />
+                </button>
+              </Show>
+            </div>
+
+            <div class="cmd-inspector-body">
+              <Show when={inspectorTab() === "mcp"}>
+                <Show when={chat.composer.agentId === "claude"}>
+                  <div class="cmd-inspector-row" style={{ background: "var(--surface-1)" }}>
+                    <div class="cmd-inspector-row-main">
+                      <div class="cmd-inspector-row-title">
+                        <Icon name="layers" size={14} />
+                        <span>Claude Code Live MCP Control</span>
+                      </div>
+                      <div class="cmd-inspector-row-desc">
+                        Query live connection status or reconnect MCP servers inside the active Claude session.
+                      </div>
+                    </div>
+                    <div class="cmd-inspector-actions">
+                      <button
+                        type="button"
+                        class="ui-btn ui-btn-outline"
+                        disabled={running() || submitting()}
+                        onClick={() => { closeInspector(); void submitPrompt("/agent:mcp"); }}
+                      >
+                        Live status
+                      </button>
+                      <button
+                        type="button"
+                        class="ui-btn ui-btn-outline"
+                        disabled={running() || submitting()}
+                        onClick={() => { closeInspector(); void submitPrompt("/agent:mcp reconnect all"); }}
+                      >
+                        Reconnect all
+                      </button>
+                    </div>
+                  </div>
+                </Show>
+
+                <Show
+                  when={(() => {
+                    const q = inspectorQuery().trim().toLowerCase();
+                    return (mcpServers() ?? []).filter(
+                      (s) =>
+                        !q ||
+                        s.name.toLowerCase().includes(q) ||
+                        s.source.toLowerCase().includes(q) ||
+                        s.target.toLowerCase().includes(q) ||
+                        s.agents.some((a) => a.toLowerCase().includes(q)),
+                    );
+                  })().length > 0}
+                  fallback={
+                    <div class="palette-empty">
+                      No MCP servers found{inspectorQuery() ? " matching filter" : " in project (.mcp.json) or user CLI configs"}.
+                    </div>
+                  }
+                >
+                  <For
+                    each={(() => {
+                      const q = inspectorQuery().trim().toLowerCase();
+                      return (mcpServers() ?? []).filter(
+                        (s) =>
+                          !q ||
+                          s.name.toLowerCase().includes(q) ||
+                          s.source.toLowerCase().includes(q) ||
+                          s.target.toLowerCase().includes(q) ||
+                          s.agents.some((a) => a.toLowerCase().includes(q)),
+                      );
+                    })()}
+                  >
+                    {(s) => {
+                      const activeForAgent = () => s.agents.includes(chat.composer.agentId);
+                      return (
+                        <div class="cmd-inspector-row">
+                          <div class="cmd-inspector-row-main">
+                            <div class="cmd-inspector-row-title">
+                              <span>{s.name}</span>
+                              <span class="mention-badge">{s.transport}</span>
+                              <span class="mention-badge">{s.scope}</span>
+                              <Show when={activeForAgent()}>
+                                <span class="mention-badge" style={{ color: "var(--accent)", "border-color": "var(--accent)" }}>
+                                  Active agent
+                                </span>
+                              </Show>
+                              <Show when={!s.enabled}>
+                                <span class="mention-badge" style={{ color: "var(--status-del)" }}>Disabled</span>
+                              </Show>
+                            </div>
+                            <div class="cmd-inspector-row-desc">{s.source} · Agents: {s.agents.join(", ")}</div>
+                            <Show when={s.target}>
+                              <div class="cmd-inspector-target" title={s.target}>{s.target}</div>
+                            </Show>
+                          </div>
+                          <Show when={chat.composer.agentId === "claude" && s.agents.includes("claude")}>
+                            <div class="cmd-inspector-actions">
+                              <button
+                                type="button"
+                                class="ui-btn ui-btn-outline"
+                                disabled={running() || submitting()}
+                                onClick={() => { closeInspector(); void submitPrompt(`/agent:mcp reconnect ${s.name}`); }}
+                              >
+                                Reconnect
+                              </button>
+                            </div>
+                          </Show>
+                        </div>
+                      );
+                    }}
+                  </For>
+                </Show>
+              </Show>
+
+              <Show when={inspectorTab() === "skills"}>
+                <Show
+                  when={(() => {
+                    const q = inspectorQuery().trim().toLowerCase();
+                    return (skills() ?? []).filter(
+                      (s) =>
+                        !q ||
+                        s.name.toLowerCase().includes(q) ||
+                        s.source.toLowerCase().includes(q) ||
+                        (s.description ?? "").toLowerCase().includes(q),
+                    );
+                  })().length > 0}
+                  fallback={
+                    <div class="palette-empty">
+                      No skills found{inspectorQuery() ? " matching filter" : " in project or user agent directories"}.
+                    </div>
+                  }
+                >
+                  <For
+                    each={(() => {
+                      const q = inspectorQuery().trim().toLowerCase();
+                      return (skills() ?? []).filter(
+                        (s) =>
+                          !q ||
+                          s.name.toLowerCase().includes(q) ||
+                          s.source.toLowerCase().includes(q) ||
+                          (s.description ?? "").toLowerCase().includes(q),
+                      );
+                    })()}
+                  >
+                    {(s) => (
+                      <div class="cmd-inspector-row">
+                        <div class="cmd-inspector-row-main">
+                          <div class="cmd-inspector-row-title">
+                            <span>/{s.name}</span>
+                            <span class="mention-badge">{s.source}</span>
+                          </div>
+                          <Show when={s.description}>
+                            <div class="cmd-inspector-row-desc">{s.description}</div>
+                          </Show>
+                        </div>
+                        <div class="cmd-inspector-actions">
+                          <Show when={s.path}>
+                            <button
+                              type="button"
+                              class="ui-btn ui-btn-outline"
+                              title={s.path}
+                              onClick={() => void openAttachment(s.path).catch((e) => toast(String(e), "error"))}
+                            >
+                              Open file
+                            </button>
+                          </Show>
+                          <button
+                            type="button"
+                            class="ui-btn ui-btn-outline"
+                            onClick={() => insertCommandPrompt(`/${s.name} `)}
+                          >
+                            Use
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </Show>
+              </Show>
+
+              <Show when={inspectorTab() === "commands"}>
+                <For
+                  each={(() => {
+                    const q = inspectorQuery().trim().toLowerCase();
+                    return slashCommands()
+                      .filter((c) => !c.badge?.endsWith("skill"))
+                      .filter(
+                        (c) =>
+                          !q ||
+                          c.name.toLowerCase().includes(q) ||
+                          c.detail.toLowerCase().includes(q) ||
+                          (c.aliases ?? []).some((a) => a.toLowerCase().includes(q)),
+                      );
+                  })()}
+                >
+                  {(c) => (
+                    <div class="cmd-inspector-row">
+                      <div class="cmd-inspector-row-main">
+                        <div class="cmd-inspector-row-title">
+                          <span>/{c.name}</span>
+                          <Show when={c.hint}><span class="mention-hint">{c.hint}</span></Show>
+                          <Show when={c.badge}><span class="mention-badge">{c.badge}</span></Show>
+                        </div>
+                        <div class="cmd-inspector-row-desc">{c.detail}</div>
+                      </div>
+                      <div class="cmd-inspector-actions">
+                        <button
+                          type="button"
+                          class="ui-btn ui-btn-outline"
+                          onClick={() => {
+                            if (c.run) {
+                              closeInspector();
+                              c.run();
+                            } else {
+                              insertCommandPrompt(c.prompt ?? `/${c.name} `);
+                            }
+                          }}
+                        >
+                          {c.run ? "Run" : "Insert"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </div>
+          </div>
+        </div>
+      </Presence>
     </div>
   );
 };

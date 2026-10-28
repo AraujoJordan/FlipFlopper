@@ -866,9 +866,14 @@ async fn run_agent(
                 let image_supported =
                     foreground.snapshot().capabilities["promptCapabilities"]["image"] == true;
                 // Claude has no native Ask mode; steer it through the prompt.
+                // Keep native slash commands (`/mcp`, `/compact`, `/usage`, etc.) at the
+                // start of the prompt so the ACP adapter recognizes them.
                 let text = {
                     let snap = foreground.snapshot();
-                    if snap.permission_mode == Some(PermissionMode::Ask) && snap.current_mode.as_deref() != Some("ask") {
+                    if snap.permission_mode == Some(PermissionMode::Ask)
+                        && snap.current_mode.as_deref() != Some("ask")
+                        && !prompt.trim_start().starts_with('/')
+                    {
                         super::adapters::ask_preamble(&prompt)
                     } else {
                         prompt.to_string()

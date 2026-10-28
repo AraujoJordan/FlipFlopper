@@ -25,12 +25,28 @@ pub struct FileEntry {
     pub is_dir: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillEntry {
     pub name: String,
     pub path: String,
     pub source: String,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerInfo {
+    pub name: String,
+    /// "stdio" | "http" | "sse"
+    pub transport: String,
+    /// Command + args summary (for stdio) or URL (for http/sse). Never includes env/header values.
+    pub target: String,
+    /// Human-readable config source, e.g. "Project (.mcp.json)", "Claude (~/.claude/mcp.json)".
+    pub source: String,
+    /// "project" | "user"
+    pub scope: String,
+    /// Agents that read this config ("claude", "codex", "agy", "cursor", "opencode", "kimi", "qwen").
+    pub agents: Vec<String>,
+    pub enabled: bool,
 }
 
 // ────────────────────────────────────────────────
@@ -818,35 +834,87 @@ pub(crate) fn codex_home_dir() -> Option<PathBuf> {
 }
 
 // ────────────────────────────────────────────────
-// Prompt skill autocomplete
+// Prompt skill & MCP server discovery
 // ────────────────────────────────────────────────
 
-/// Discover local and user-installed Codex/agent skills for `/skill` prompt autocomplete.
+/// Discover local and user-installed skills and custom slash commands across all supported agents.
 pub fn list_skills(project_path: Option<&str>) -> Vec<SkillEntry> {
-    let mut roots: Vec<(PathBuf, String)> = Vec::new();
+    let home = home_dir();
+    let codex_home = codex_home_dir();
+    list_skills_with_homes(project_path, home.as_deref(), codex_home.as_deref())
+}
 
-    if let Some(project_path) = project_path {
+fn list_skills_with_homes(
+    project_path: Option<&str>,
+    home: Option<&Path>,
+    codex_home: Option<&Path>,
+) -> Vec<SkillEntry> {
+    // (directory, source_label, is_markdown_commands_dir)
+    let mut roots: Vec<(PathBuf, String, bool)> = Vec::new();
+
+    if let Some(project_path) = project_path.filter(|p| !p.trim().is_empty()) {
         let project = PathBuf::from(project_path);
-        roots.push((project.join(".codex").join("skills"), "project".to_string()));
+        for sub in [
+            ".agents/skills",
+            ".agent/skills",
+            ".claude/skills",
+            ".codex/skills",
+            ".cursor/skills",
+            ".gemini/skills",
+            ".opencode/skills",
+            ".kimi/skills",
+            ".qwen/skills",
+        ] {
+            roots.push((project.join(sub), "project".to_string(), false));
+        }
+        for sub in [
+            ".claude/commands",
+            ".cursor/commands",
+            ".opencode/commands",
+            ".opencode/command",
+        ] {
+            roots.push((project.join(sub), "project".to_string(), true));
+        }
+    }
+
+    if let Some(home) = home {
+        roots.push((home.join(".agents").join("skills"), "agents".to_string(), false));
+        roots.push((home.join(".claude").join("skills"), "claude".to_string(), false));
+        roots.push((home.join(".claude").join("commands"), "claude".to_string(), true));
+        if let Some(codex_home) = codex_home {
+            roots.push((codex_home.join("skills"), "codex".to_string(), false));
+        }
+        roots.push((home.join(".cursor").join("skills"), "cursor".to_string(), false));
+        roots.push((home.join(".cursor").join("commands"), "cursor".to_string(), true));
+        roots.push((home.join(".gemini").join("skills"), "agy".to_string(), false));
         roots.push((
-            project.join(".agents").join("skills"),
-            "project".to_string(),
+            home.join(".gemini").join("antigravity").join("skills"),
+            "agy".to_string(),
+            false,
         ));
-    }
-
-    if let Some(codex_home) = codex_home_dir() {
-        roots.push((codex_home.join("skills"), "codex".to_string()));
-    }
-
-    if let Some(home) = home_dir() {
-        roots.push((home.join(".agents").join("skills"), "agents".to_string()));
+        roots.push((
+            home.join(".gemini")
+                .join("antigravity-cli")
+                .join("builtin")
+                .join("skills"),
+            "agy".to_string(),
+            false,
+        ));
+        let opencode_cfg = home.join(".config").join("opencode");
+        roots.push((opencode_cfg.join("skills"), "opencode".to_string(), false));
+        roots.push((opencode_cfg.join("commands"), "opencode".to_string(), true));
+        roots.push((opencode_cfg.join("command"), "opencode".to_string(), true));
+        roots.push((home.join(".kimi").join("skills"), "kimi".to_string(), false));
+        roots.push((home.join(".qwen").join("skills"), "qwen".to_string(), false));
+    } else if let Some(codex_home) = codex_home {
+        roots.push((codex_home.join("skills"), "codex".to_string(), false));
     }
 
     let mut entries = Vec::new();
     let mut seen_roots = HashSet::new();
     let mut seen_names = HashSet::new();
 
-    for (root, source) in roots {
+    for (root, source, is_commands_dir) in roots {
         if !root.is_dir() {
             continue;
         }
@@ -854,7 +922,7 @@ pub fn list_skills(project_path: Option<&str>) -> Vec<SkillEntry> {
         if !seen_roots.insert(root_key) {
             continue;
         }
-        collect_skills_from_root(&root, &source, &mut entries, &mut seen_names);
+        collect_skills_from_root(&root, &source, is_commands_dir, &mut entries, &mut seen_names);
     }
 
     entries.sort_by(|a, b| {
@@ -869,12 +937,18 @@ pub fn list_skills(project_path: Option<&str>) -> Vec<SkillEntry> {
 fn collect_skills_from_root(
     root: &Path,
     source: &str,
+    is_commands_dir: bool,
     entries: &mut Vec<SkillEntry>,
     seen_names: &mut HashSet<String>,
 ) {
     let walker = WalkBuilder::new(root)
         .hidden(false)
+        .follow_links(true)
         .max_depth(Some(5))
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            !matches!(name.as_ref(), ".staging" | ".git" | "node_modules" | ".tmp")
+        })
         .build();
 
     for result in walker {
@@ -882,15 +956,37 @@ fn collect_skills_from_root(
             continue;
         };
         let path = entry.path();
-        if !path.is_file() || path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
+        if !path.is_file() {
             continue;
         }
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let fallback_name = if is_commands_dir {
+            if !file_name.ends_with(".md")
+                || file_name.eq_ignore_ascii_case("README.md")
+                || file_name == "SKILL.md"
+            {
+                continue;
+            }
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let stem = rel.with_extension("");
+            let parts: Vec<String> = stem
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(String::from))
+                .collect();
+            if parts.is_empty() {
+                continue;
+            }
+            parts.join(":")
+        } else {
+            if file_name != "SKILL.md" {
+                continue;
+            }
+            path.parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "skill".to_string())
+        };
 
-        let fallback_name = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "skill".to_string());
         let (name, description) = read_skill_metadata(path, &fallback_name);
         let dedupe_key = name.to_lowercase();
         if !seen_names.insert(dedupe_key) {
@@ -899,7 +995,7 @@ fn collect_skills_from_root(
 
         entries.push(SkillEntry {
             name,
-            path: path.parent().unwrap_or(path).to_string_lossy().to_string(),
+            path: path.to_string_lossy().to_string(),
             source: source.to_string(),
             description,
         });
@@ -911,49 +1007,63 @@ fn read_skill_metadata(skill_md: &Path, fallback_name: &str) -> (String, Option<
     let mut name = fallback_name.to_string();
     let mut description = None;
 
-    let mut lines = content.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        return (name, description);
+    let mut lines = content.lines().peekable();
+    let has_frontmatter = lines.peek().map(|l| l.trim()) == Some("---");
+    if has_frontmatter {
+        lines.next();
+        let frontmatter: Vec<&str> = lines
+            .by_ref()
+            .take_while(|line| {
+                let t = line.trim();
+                t != "---" && t != "..."
+            })
+            .collect();
+
+        let mut index = 0;
+        while index < frontmatter.len() {
+            let line = frontmatter[index].trim();
+            if let Some(raw) = line.strip_prefix("name:") {
+                let parsed = clean_yaml_scalar(raw);
+                if !parsed.is_empty() {
+                    name = parsed;
+                }
+            } else if let Some(raw) = line.strip_prefix("description:") {
+                let parsed = clean_yaml_scalar(raw);
+                if matches!(parsed.as_str(), ">" | "|" | ">-" | "|-" | ">+" | "|+" | "") {
+                    let mut folded = Vec::new();
+                    index += 1;
+                    while index < frontmatter.len() {
+                        let next = frontmatter[index];
+                        if !next.starts_with(' ') && !next.starts_with('\t') {
+                            index -= 1;
+                            break;
+                        }
+                        let trimmed = next.trim();
+                        if !trimmed.is_empty() {
+                            folded.push(trimmed);
+                        }
+                        index += 1;
+                    }
+                    if !folded.is_empty() {
+                        description = Some(folded.join(" "));
+                    }
+                } else {
+                    description = Some(parsed);
+                }
+            }
+            index += 1;
+        }
     }
 
-    let frontmatter: Vec<&str> = lines
-        .by_ref()
-        .take_while(|line| line.trim() != "---")
-        .collect();
-
-    let mut index = 0;
-    while index < frontmatter.len() {
-        let line = frontmatter[index].trim();
-        if let Some(raw) = line.strip_prefix("name:") {
-            let parsed = clean_yaml_scalar(raw);
-            if !parsed.is_empty() {
-                name = parsed;
-            }
-        } else if let Some(raw) = line.strip_prefix("description:") {
-            let parsed = clean_yaml_scalar(raw);
-            if parsed == ">" || parsed == "|" {
-                let mut folded = Vec::new();
-                index += 1;
-                while index < frontmatter.len() {
-                    let next = frontmatter[index];
-                    if !next.starts_with(' ') && !next.starts_with('\t') {
-                        index -= 1;
-                        break;
-                    }
-                    let trimmed = next.trim();
-                    if !trimmed.is_empty() {
-                        folded.push(trimmed);
-                    }
-                    index += 1;
-                }
-                if !folded.is_empty() {
-                    description = Some(folded.join(" "));
-                }
-            } else if !parsed.is_empty() {
-                description = Some(parsed);
+    if description.is_none() {
+        for line in lines {
+            let trimmed = line.trim().trim_start_matches('#').trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("```") && !trimmed.starts_with("<!--") {
+                let summary: String = trimmed.chars().take(140).collect();
+                description = Some(summary);
+                break;
             }
         }
-        index += 1;
     }
 
     (name, description)
@@ -965,6 +1075,405 @@ fn clean_yaml_scalar(raw: &str) -> String {
         .trim_matches('\'')
         .trim()
         .to_string()
+}
+
+/// If `prompt` starts with `/<skill-name>` matching a discovered skill, return a
+/// reference note pointing the agent to the skill's markdown file.
+pub fn resolve_skill_note(project_path: Option<&str>, prompt: &str) -> Option<String> {
+    let trimmed = prompt.trim_start();
+    let rest = trimmed.strip_prefix('/')?;
+    let cmd = rest.split_whitespace().next().unwrap_or("");
+    if cmd.is_empty() {
+        return None;
+    }
+    let lookup = cmd.strip_prefix("agent:").unwrap_or(cmd);
+    let skill = list_skills(project_path)
+        .into_iter()
+        .find(|s| s.name.eq_ignore_ascii_case(lookup))?;
+    Some(format!(
+        "\n\n[Skill `{}` — read and follow instructions in: {}]",
+        skill.name, skill.path
+    ))
+}
+
+/// Discover configured MCP servers across project and user agent config files.
+/// Never returns environment variable values, auth headers, or URL query tokens.
+pub fn list_mcp_servers(project_path: Option<&str>) -> Vec<McpServerInfo> {
+    let home = home_dir();
+    let codex_home = codex_home_dir();
+    list_mcp_servers_with_homes(project_path, home.as_deref(), codex_home.as_deref())
+}
+
+fn list_mcp_servers_with_homes(
+    project_path: Option<&str>,
+    home: Option<&Path>,
+    codex_home: Option<&Path>,
+) -> Vec<McpServerInfo> {
+    let mut out = Vec::new();
+
+    if let Some(project_path) = project_path.filter(|p| !p.trim().is_empty()) {
+        let project = PathBuf::from(project_path);
+        collect_json_mcp(
+            &project.join(".mcp.json"),
+            "mcpServers",
+            None,
+            "Project (.mcp.json)",
+            "project",
+            &["claude", "cursor", "agy", "kimi", "qwen"],
+            &mut out,
+        );
+        collect_json_mcp(
+            &project.join(".claude").join("mcp.json"),
+            "mcpServers",
+            None,
+            "Project (.claude/mcp.json)",
+            "project",
+            &["claude"],
+            &mut out,
+        );
+        collect_json_mcp(
+            &project.join(".cursor").join("mcp.json"),
+            "mcpServers",
+            None,
+            "Project (.cursor/mcp.json)",
+            "project",
+            &["cursor"],
+            &mut out,
+        );
+        collect_json_mcp(
+            &project.join(".gemini").join("settings.json"),
+            "mcpServers",
+            None,
+            "Project (.gemini/settings.json)",
+            "project",
+            &["agy"],
+            &mut out,
+        );
+        collect_json_mcp(
+            &project.join("opencode.json"),
+            "mcp",
+            None,
+            "Project (opencode.json)",
+            "project",
+            &["opencode"],
+            &mut out,
+        );
+        collect_json_mcp(
+            &project.join(".opencode").join("opencode.json"),
+            "mcp",
+            None,
+            "Project (.opencode/opencode.json)",
+            "project",
+            &["opencode"],
+            &mut out,
+        );
+        collect_toml_mcp(
+            &project.join(".codex").join("config.toml"),
+            "Project (.codex/config.toml)",
+            "project",
+            &["codex"],
+            &mut out,
+        );
+        if let Some(home) = home {
+            collect_json_mcp(
+                &home.join(".claude.json"),
+                "mcpServers",
+                Some(project_path),
+                "Claude project (~/.claude.json)",
+                "project",
+                &["claude"],
+                &mut out,
+            );
+        }
+    }
+
+    if let Some(home) = home {
+        collect_json_mcp(
+            &home.join(".claude.json"),
+            "mcpServers",
+            None,
+            "Claude (~/.claude.json)",
+            "user",
+            &["claude"],
+            &mut out,
+        );
+        collect_json_mcp(
+            &home.join(".claude").join("mcp.json"),
+            "mcpServers",
+            None,
+            "Claude (~/.claude/mcp.json)",
+            "user",
+            &["claude"],
+        &mut out,
+        );
+        collect_json_mcp(
+            &home.join(".cursor").join("mcp.json"),
+            "mcpServers",
+            None,
+            "Cursor (~/.cursor/mcp.json)",
+            "user",
+            &["cursor"],
+            &mut out,
+        );
+        if let Some(codex_home) = codex_home {
+            collect_toml_mcp(
+                &codex_home.join("config.toml"),
+                "Codex (~/.codex/config.toml)",
+                "user",
+                &["codex"],
+                &mut out,
+            );
+        }
+        for (rel, label) in [
+            (
+                home.join(".gemini").join("config").join("mcp_config.json"),
+                "AGY (~/.gemini/config/mcp_config.json)",
+            ),
+            (
+                home.join(".gemini")
+                    .join("antigravity")
+                    .join("mcp_config.json"),
+                "AGY (~/.gemini/antigravity/mcp_config.json)",
+            ),
+            (
+                home.join(".gemini").join("settings.json"),
+                "Gemini (~/.gemini/settings.json)",
+            ),
+        ] {
+            collect_json_mcp(&rel, "mcpServers", None, label, "user", &["agy"], &mut out);
+        }
+        collect_json_mcp(
+            &home.join(".config").join("opencode").join("opencode.json"),
+            "mcp",
+            None,
+            "OpenCode (~/.config/opencode/opencode.json)",
+            "user",
+            &["opencode"],
+            &mut out,
+        );
+        collect_json_mcp(
+            &home.join(".kimi").join("mcp.json"),
+            "mcpServers",
+            None,
+            "Kimi (~/.kimi/mcp.json)",
+            "user",
+            &["kimi"],
+            &mut out,
+        );
+        collect_json_mcp(
+            &home.join(".qwen").join("settings.json"),
+            "mcpServers",
+            None,
+            "Qwen (~/.qwen/settings.json)",
+            "user",
+            &["qwen"],
+            &mut out,
+        );
+    } else if let Some(codex_home) = codex_home {
+        collect_toml_mcp(
+            &codex_home.join("config.toml"),
+            "Codex (~/.codex/config.toml)",
+            "user",
+            &["codex"],
+            &mut out,
+        );
+    }
+
+    out
+}
+
+fn sanitize_mcp_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
+    match without_fragment.split_once('?') {
+        Some((base, _)) => format!("{base}?…"),
+        None => without_fragment.to_string(),
+    }
+}
+
+fn collect_json_mcp(
+    path: &Path,
+    key: &str,
+    nested_project: Option<&str>,
+    source: &str,
+    scope: &str,
+    agents: &[&str],
+    out: &mut Vec<McpServerInfo>,
+) {
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    let map = if let Some(proj) = nested_project {
+        root.get("projects")
+            .and_then(|p| p.get(proj))
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_object())
+    } else {
+        root.get(key).and_then(|v| v.as_object())
+    };
+    let Some(servers) = map else {
+        return;
+    };
+    let mut names: Vec<&String> = servers.keys().collect();
+    names.sort();
+    for name in names {
+        let Some(cfg) = servers.get(name).and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let enabled = cfg.get("disabled").and_then(|v| v.as_bool()) != Some(true)
+            && cfg.get("enabled").and_then(|v| v.as_bool()) != Some(false);
+        let raw_url = cfg
+            .get("url")
+            .or_else(|| cfg.get("serverUrl"))
+            .or_else(|| cfg.get("httpUrl"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let (transport, target) = if let Some(u) = raw_url {
+            let kind = match cfg.get("type").and_then(|v| v.as_str()) {
+                Some("sse") => "sse",
+                _ => "http",
+            };
+            (kind.to_string(), sanitize_mcp_url(u))
+        } else if let Some(cmd) = cfg.get("command").and_then(|v| v.as_str()) {
+            let args: Vec<&str> = cfg
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
+                .unwrap_or_default();
+            let full = if args.is_empty() {
+                cmd.trim().to_string()
+            } else {
+                format!("{} {}", cmd.trim(), args.join(" "))
+            };
+            ("stdio".to_string(), full)
+        } else if let Some(cmd_arr) = cfg.get("command").and_then(|v| v.as_array()) {
+            let parts: Vec<&str> = cmd_arr.iter().filter_map(|x| x.as_str()).collect();
+            ("stdio".to_string(), parts.join(" "))
+        } else {
+            (
+                cfg.get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("stdio")
+                    .to_string(),
+                String::new(),
+            )
+        };
+        out.push(McpServerInfo {
+            name: name.clone(),
+            transport,
+            target,
+            source: source.to_string(),
+            scope: scope.to_string(),
+            agents: agents.iter().map(|s| (*s).to_string()).collect(),
+            enabled,
+        });
+    }
+}
+
+fn collect_toml_mcp(
+    path: &Path,
+    source: &str,
+    scope: &str,
+    agents: &[&str],
+    out: &mut Vec<McpServerInfo>,
+) {
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+    let mut current_name: Option<String> = None;
+    let mut command = String::new();
+    let mut args: Vec<String> = Vec::new();
+    let mut url = String::new();
+    let mut enabled = true;
+
+    let flush = |name: Option<String>,
+                 cmd: &str,
+                 args: &[String],
+                 url: &str,
+                 enabled: bool,
+                 out: &mut Vec<McpServerInfo>| {
+        let Some(name) = name else {
+            return;
+        };
+        let (transport, target) = if !url.is_empty() {
+            ("http".to_string(), sanitize_mcp_url(url))
+        } else if !cmd.is_empty() {
+            let full = if args.is_empty() {
+                cmd.to_string()
+            } else {
+                format!("{cmd} {}", args.join(" "))
+            };
+            ("stdio".to_string(), full)
+        } else {
+            ("stdio".to_string(), String::new())
+        };
+        out.push(McpServerInfo {
+            name,
+            transport,
+            target,
+            source: source.to_string(),
+            scope: scope.to_string(),
+            agents: agents.iter().map(|s| (*s).to_string()).collect(),
+            enabled,
+        });
+    };
+
+    for raw_line in content.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            flush(
+                current_name.take(),
+                &command,
+                &args,
+                &url,
+                enabled,
+                out,
+            );
+            command.clear();
+            args.clear();
+            url.clear();
+            enabled = true;
+            let header = line[1..line.len() - 1].trim();
+            if let Some(rest) = header.strip_prefix("mcp_servers.") {
+                let unquoted = rest.trim().trim_matches('"').trim_matches('\'');
+                if !unquoted.is_empty() && !unquoted.contains('.') {
+                    current_name = Some(unquoted.to_string());
+                }
+            }
+            continue;
+        }
+        if current_name.is_none() {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let val = v.trim();
+        match key {
+            "command" => command = clean_yaml_scalar(val),
+            "url" | "http_url" => url = clean_yaml_scalar(val),
+            "enabled" => enabled = val != "false",
+            "disabled" => enabled = val != "true",
+            "args" if val.starts_with('[') && val.ends_with(']') => {
+                let inner = &val[1..val.len() - 1];
+                args = inner
+                    .split(',')
+                    .map(clean_yaml_scalar)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    flush(current_name.take(), &command, &args, &url, enabled, out);
 }
 
 // ────────────────────────────────────────────────
@@ -1359,5 +1868,143 @@ mod create_project_tests {
             );
         }
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn discovers_skills_and_markdown_commands_across_agents_while_skipping_staging() {
+        let root = temp_parent();
+        let proj = root.join("proj");
+        let home = root.join("home");
+        let codex = home.join(".codex");
+
+        // Project skill + custom command
+        fs::create_dir_all(proj.join(".agents/skills/deploy")).unwrap();
+        fs::write(
+            proj.join(".agents/skills/deploy/SKILL.md"),
+            "---\nname: deploy\ndescription: Deploy the service\n---\nBody",
+        )
+        .unwrap();
+        fs::create_dir_all(proj.join(".claude/commands/ops")).unwrap();
+        fs::write(
+            proj.join(".claude/commands/ops/rollback.md"),
+            "# Rollback\nRevert the latest deployment safely.",
+        )
+        .unwrap();
+
+        // Claude synced skill + ignored .staging duplicate
+        fs::create_dir_all(home.join(".claude/skills/synced/bucket/pdf")).unwrap();
+        fs::write(
+            home.join(".claude/skills/synced/bucket/pdf/SKILL.md"),
+            "---\nname: pdf\ndescription: >\n  Read and process\n  PDF files\n---\n",
+        )
+        .unwrap();
+        fs::create_dir_all(home.join(".claude/skills/synced/.staging/bucket/staged-only")).unwrap();
+        fs::write(
+            home.join(".claude/skills/synced/.staging/bucket/staged-only/SKILL.md"),
+            "---\nname: staged-only\ndescription: Should be skipped\n---\n",
+        )
+        .unwrap();
+
+        // AGY builtin skill + Codex skill
+        fs::create_dir_all(home.join(".gemini/antigravity-cli/builtin/skills/guide")).unwrap();
+        fs::write(
+            home.join(".gemini/antigravity-cli/builtin/skills/guide/SKILL.md"),
+            "---\nname: agy-guide\ndescription: AGY reference\n---\n",
+        )
+        .unwrap();
+        fs::create_dir_all(codex.join("skills/.system/imagegen")).unwrap();
+        fs::write(
+            codex.join("skills/.system/imagegen/SKILL.md"),
+            "---\nname: imagegen\ndescription: Generate images\n---\n",
+        )
+        .unwrap();
+
+        let skills = list_skills_with_homes(
+            Some(proj.to_str().unwrap()),
+            Some(&home),
+            Some(&codex),
+        );
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["agy-guide", "deploy", "imagegen", "ops:rollback", "pdf"]
+        );
+        let pdf = skills.iter().find(|s| s.name == "pdf").unwrap();
+        assert_eq!(pdf.source, "claude");
+        assert_eq!(pdf.description.as_deref(), Some("Read and process PDF files"));
+        assert!(pdf.path.ends_with("SKILL.md"));
+
+        let rollback = skills.iter().find(|s| s.name == "ops:rollback").unwrap();
+        assert_eq!(rollback.source, "project");
+        assert_eq!(rollback.description.as_deref(), Some("Rollback"));
+
+        let note = resolve_skill_note(Some(proj.to_str().unwrap()), "/deploy --prod").unwrap();
+        assert!(note.contains("[Skill `deploy`"));
+        assert!(note.contains("SKILL.md"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_mcp_servers_and_redacts_query_secrets() {
+        let root = temp_parent();
+        let proj = root.join("proj");
+        let home = root.join("home");
+        let codex = home.join(".codex");
+        fs::create_dir_all(&proj).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".gemini/config")).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+
+        fs::write(
+            proj.join(".mcp.json"),
+            r#"{"mcpServers":{"remote-api":{"type":"http","url":"https://mcp.example.com/sse?token=secret123#frag","headers":{"Authorization":"Bearer secret"}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.join(".claude/mcp.json"),
+            r#"{"mcpServers":{"local-fs":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/tmp"],"env":{"API_KEY":"dont-leak"}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            codex.join("config.toml"),
+            "[mcp_servers.termux]\ncommand = \"node\"\nargs = [\"/path/termux.js\"]\n[mcp_servers.termux.env]\nSECRET = \"hidden\"\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".gemini/config/mcp_config.json"),
+            r#"{"mcpServers":{"disabled-srv":{"command":"echo","disabled":true}}}"#,
+        )
+        .unwrap();
+
+        let servers = list_mcp_servers_with_homes(
+            Some(proj.to_str().unwrap()),
+            Some(&home),
+            Some(&codex),
+        );
+        assert_eq!(servers.len(), 4);
+        let remote = servers.iter().find(|s| s.name == "remote-api").unwrap();
+        assert_eq!(remote.transport, "http");
+        assert_eq!(remote.target, "https://mcp.example.com/sse?…");
+        assert_eq!(remote.scope, "project");
+        assert!(remote.enabled);
+
+        let local = servers.iter().find(|s| s.name == "local-fs").unwrap();
+        assert_eq!(local.transport, "stdio");
+        assert_eq!(
+            local.target,
+            "npx -y @modelcontextprotocol/server-filesystem /tmp"
+        );
+        assert!(!format!("{servers:?}").contains("dont-leak"));
+        assert!(!format!("{servers:?}").contains("secret123"));
+
+        let termux = servers.iter().find(|s| s.name == "termux").unwrap();
+        assert_eq!(termux.target, "node /path/termux.js");
+        assert_eq!(termux.agents, vec!["codex".to_string()]);
+
+        let disabled = servers.iter().find(|s| s.name == "disabled-srv").unwrap();
+        assert!(!disabled.enabled);
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

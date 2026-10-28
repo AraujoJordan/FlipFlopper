@@ -151,6 +151,9 @@ test("model, effort and command pickers use the active provider catalog", async 
   assert.equal(chat.agentTuning("claude").efforts[0].id, "native-effort");
   assert.equal(chat.agentTuning("cursor").models.length, 0);
   assert.equal(chat.nativeCommands()[0].name, "native-command");
+  // New-session screen (activeId = null) reuses discovered commands for the same agent.
+  chat.setChat("activeId", null);
+  assert.equal(chat.nativeCommands()[0].name, "native-command");
   chat.setChat("composer", "agentId", "cursor");
   assert.equal(chat.nativeCommands().length, 0);
 });
@@ -880,25 +883,33 @@ async function composerFixture(activeId = 's') {
     sessions: [{id:'s'}, {id:'other'}], queued: {},
   });
   const [attachments, setAttachments] = solid.createSignal([]);
-  const signals = [], nodes = [], submissions = [], queuedSends = [], animations = [], launches = [], rollbacks = [];
+  const signals = [], nodes = [], submissions = [], queuedSends = [], animations = [], launches = [], rollbacks = [], yoloCalls = [], sideTabs = [];
   let resolve, dispose;
   const module = await loadFrontend('../src/components/chat/Composer.tsx', {
     'solid-js': { ...solid, createSignal: (...args) => { const signal=solid.createSignal(...args); signals.push(signal); return signal; } },
     '../../lib/chat': {
       chat, isRunning: () => false, cycleMode() {}, modeAvailable: () => true, splitMode: (mode, yolo) => ({ mode, yolo: !!yolo }), permissionModeUpdating: () => false, sessionModePending: () => false,
+      setYolo: (v) => { yoloCalls.push(v); setChat('composer', 'yolo', v); },
       agentTuning: () => ({ models:[], efforts:[] }), nativeCommands: () => [], contextUsage: () => undefined,
       submitPrompt: (...args) => { submissions.push(args); return new Promise((done) => { resolve=done; }); },
       sendQueuedNow: (...args) => { queuedSends.push(args); return Promise.resolve(); },
     },
+    '../../lib/ipc': {
+      listPromptSkills: async () => [{ name: 'pdf', path: '/fixture/pdf/SKILL.md', source: 'claude', description: 'Read PDFs' }],
+      listMcpServers: async () => [{ name: 'termux', transport: 'stdio', target: 'node termux.js', source: 'Claude', scope: 'user', agents: ['claude'], enabled: true }],
+      searchPromptFiles: async () => [],
+      openAttachment: async () => {},
+    },
+    '../../lib/layout': { openSide: (tab) => sideTabs.push(tab) },
     '../../lib/agentMeta': { AgentLogo() {}, agentModelsLoading: () => false, agentModelsError: () => null, hydrateAgentModels() {}, refreshAgentModels() {} },
     '../../lib/store': { store: { agents:[], currentProject:null }, effectiveRoot: () => null },
     '../../lib/attachments': { attachments, setAttachments, clearAttachments: () => setAttachments([]) },
-    '../../lib/shortcuts': { registerShortcutHandler: () => () => {} },
+    '../../lib/shortcuts': { registerShortcutHandler: () => () => {}, runAction() {} },
     '../ui': {
       animateElement: (...args) => { animations.push(args); return Promise.resolve(); },
       startPromptLaunch: (opts) => { launches.push(opts); return { rollback: (target) => rollbacks.push(target), cancel() {} }; },
       cancelMotion() {}, useValueMotion() {}, useListMotion() {}, useSelectionMotion() {},
-      usePresence: () => () => false, toast() {},
+      usePresence: () => () => false, Presence: (props) => props.children, toast() {},
     },
   });
   const previousReact = globalThis.React;
@@ -907,8 +918,8 @@ async function composerFixture(activeId = 's') {
   finally { globalThis.React=previousReact; }
   const input = nodes.find((node) => node.tag === 'textarea').props;
   return {
-    chat, setChat, attachments, setAttachments, submissions, queuedSends, animations, launches, rollbacks, dispose,
-    value: signals[0][0], submitting: signals[1][0],
+    chat, setChat, attachments, setAttachments, submissions, queuedSends, animations, launches, rollbacks, yoloCalls, sideTabs, dispose,
+    value: signals[0][0], submitting: signals[1][0], inspectorTab: signals[11][0], inspectorQuery: signals[12][0],
     type: (value) => input.onInput({currentTarget:{value,selectionStart:value.length}}),
     send: () => input.onKeyDown({key:'Enter',preventDefault(){}}),
     steer: () => input.onKeyDown({key:'Enter',ctrlKey:true,preventDefault(){}}),
@@ -1003,6 +1014,44 @@ test('Ctrl+Enter force-sends a queued message when the composer is empty or stee
     assert.equal(f.submissions[0][0],'Steer directly');
     assert.equal(f.submissions[0][3],true);
     await f.finish(true);
+  } finally { f.dispose(); }
+});
+
+test('/mcp, /skills, /compact and /yolo slash commands work with and without arguments', async () => {
+  const f = await composerFixture('s');
+  try {
+    // `/mcp` opens the MCP inspector modal without sending a chat turn.
+    f.type('/mcp');
+    f.send();
+    assert.equal(f.value(), '');
+    assert.equal(f.inspectorTab(), 'mcp');
+    assert.equal(f.submissions.length, 0);
+
+    // `/mcp reconnect all` on Claude routes directly to `/agent:mcp reconnect all`.
+    f.type('/mcp reconnect all');
+    f.send();
+    assert.equal(f.submissions.length, 1);
+    assert.equal(f.submissions[0][0], '/agent:mcp reconnect all');
+
+    // `/skills pdf` opens the Skills browser filtered by "pdf".
+    f.type('/skills pdf');
+    f.send();
+    assert.equal(f.inspectorTab(), 'skills');
+    assert.equal(f.inspectorQuery(), 'pdf');
+
+    // `/compact` routes to `/agent:compact` even before the first native turn connects.
+    f.type('/compact focus on auth');
+    f.send();
+    assert.equal(f.submissions.length, 2);
+    assert.equal(f.submissions[1][0], '/agent:compact focus on auth');
+
+    // `/yolo on` and `/changes` alias work as local commands.
+    f.type('/yolo on');
+    f.send();
+    assert.deepEqual(f.yoloCalls, [true]);
+    f.type('/changes');
+    f.send();
+    assert.deepEqual(f.sideTabs, ['changes']);
   } finally { f.dispose(); }
 });
 

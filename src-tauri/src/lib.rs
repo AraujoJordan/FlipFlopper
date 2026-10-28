@@ -19,7 +19,7 @@ use tauri_plugin_window_state::StateFlags;
 
 use agents::AgentInfo;
 use git::{CommitEntry, CommitResult, PullOutcome, StatusEntry, SyncStatus};
-use project::{FileEntry, ProjectInfo, SkillEntry};
+use project::{FileEntry, McpServerInfo, ProjectInfo, SkillEntry};
 use pty::{PtyEvent, PtyManager};
 use review::FileDiff;
 use runner::{AndroidEnvironment, IosEnvironment, RunTarget, ValidationTarget};
@@ -761,6 +761,13 @@ async fn search_prompt_files(
 #[tauri::command]
 async fn list_prompt_skills(project_path: Option<String>) -> Vec<SkillEntry> {
     run_blocking(move || project::list_skills(project_path.as_deref()))
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn list_mcp_servers(project_path: Option<String>) -> Vec<McpServerInfo> {
+    run_blocking(move || project::list_mcp_servers(project_path.as_deref()))
         .await
         .unwrap_or_default()
 }
@@ -2030,6 +2037,7 @@ pub fn run() {
             remove_recent_project,
             search_prompt_files,
             list_prompt_skills,
+            list_mcp_servers,
             // Git
             get_git_status_v2,
             get_sync_status,

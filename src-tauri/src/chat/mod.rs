@@ -399,9 +399,18 @@ impl ChatManager {
         };
         let note = attach::prompt_note(&args.attachments);
         let agent_prompt = if acp::handles(&args.agent_id) { prompt.strip_prefix("/agent:").map(|s| format!("/{s}")).unwrap_or_else(||prompt.clone()) } else { prompt.clone() };
+        let skill_note = if acp::handles(&args.agent_id) {
+            None
+        } else {
+            crate::project::resolve_skill_note(Some(&meta.cwd), &agent_prompt)
+        };
+        let skill_suffix = skill_note.as_deref().unwrap_or("");
+        let is_native_slash = acp::handles(&args.agent_id)
+            && agent_prompt.trim_start().starts_with('/')
+            && args.attachments.is_empty();
         let full_prompt = match digest {
-            Some(d) => format!("{d}\n\n## New request\n{agent_prompt}{note}"),
-            None => format!("{agent_prompt}{note}"),
+            Some(d) if !is_native_slash => format!("{d}\n\n## New request\n{agent_prompt}{skill_suffix}{note}"),
+            _ => format!("{agent_prompt}{skill_suffix}{note}"),
         };
 
         if acp::handles(&args.agent_id) {

@@ -88,6 +88,8 @@ const CommandPalette: Component = () => {
     { id: "a-preview", section: "Actions", label: "Show preview", icon: "globe", run: act(() => toggleSide("preview")) },
     { id: "a-terminal", section: "Actions", label: "Show terminal", keys: `${MOD}J`, icon: "terminal", run: act(() => toggleSide("terminal")) },
     { id: "a-flow", section: "Actions", label: "Show flow", icon: "flow", run: act(() => toggleSide("flow")) },
+    { id: "a-mcp", section: "Actions", label: "Inspect MCP servers (/mcp)", icon: "layers", run: act(() => runAction("open-mcp")) },
+    { id: "a-skills", section: "Actions", label: "Browse skills and commands (/skills)", icon: "sparkle", run: act(() => runAction("open-skills")) },
     { id: "a-review", section: "Actions", label: "Review working changes", icon: "diff", run: act(() => store.currentProject && openReview(undefined, "Working changes")) },
     { id: "a-plan", section: "Actions", label: "Switch to Plan mode", icon: "clipboard", run: act(() => setComposer({ mode: "plan" })) },
     { id: "a-ask", section: "Actions", label: "Switch to Ask mode", icon: "help", run: act(() => setComposer({ mode: "ask" })) },
