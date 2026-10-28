@@ -1284,6 +1284,14 @@ test('spinner and running indicator animations are enabled in standard motion', 
   assert.doesNotMatch(css, /(^|\n)\.flow-gate-pulse\s*\{\s*animation:\s*none/);
 });
 
+test('conversation column scales with available horizontal space', () => {
+  const css = readFileSync(new URL("../src/App.css", import.meta.url), "utf8");
+  assert.match(css, /\.center-col\s*\{[^}]*--conversation-max:\s*clamp\(920px,\s*88%,\s*1440px\)/);
+  assert.match(css, /\.dock\s+\.composer\s*\{[^}]*max-width:\s*var\(--conversation-max\)/);
+  assert.match(css, /\.transcript-inner\s*\{[^}]*max-width:\s*var\(--conversation-max\)/);
+  assert.match(css, /\.empty-state-inner\s*\{[^}]*max-width:\s*var\(--conversation-max\)/);
+});
+
 // ── Device mirror (Android scrcpy / iOS idb) wire helpers ────────────────────
 
 async function loadMirror() {

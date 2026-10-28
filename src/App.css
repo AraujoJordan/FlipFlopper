@@ -1407,14 +1407,14 @@ input, textarea {
 }
 
 .main-body { flex: 1; min-height: 0; display: flex; gap: var(--panel-gap); }
-.center-col { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; border: 1px solid var(--border-muted); border-radius: var(--panel-radius); background: var(--surface-1); overflow: clip; }
+.center-col { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; border: 1px solid var(--border-muted); border-radius: var(--panel-radius); background: var(--surface-1); overflow: clip; --conversation-max: clamp(920px, 88%, 1440px); }
 .dock { flex: 0 0 auto; padding: 0 0 20px; }
-.dock .composer { max-width: 780px; margin: 0 auto; padding: 0 24px; }
+.dock .composer { width: 100%; max-width: var(--conversation-max); margin: 0 auto; padding: 0 24px; }
 
 /* ── Transcript ── */
 .transcript-wrap { flex: 1; min-height: 0; position: relative; display: flex; }
 .transcript { flex: 1; overflow-y: auto; scroll-behavior: auto; }
-.transcript-inner { max-width: 780px; margin: 0 auto; padding: 24px 24px 28px; display: flex; flex-direction: column; gap: 28px; }
+.transcript-inner { width: 100%; max-width: var(--conversation-max); margin: 0 auto; padding: 24px 24px 28px; display: flex; flex-direction: column; gap: 28px; }
 .jump-latest {
   position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
   display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
@@ -1663,9 +1663,9 @@ input, textarea {
 .mention-detail { color: var(--fg-subtle); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 /* ── Empty / new-session screen ── */
-.empty-state { flex: 1; min-height: 0; overflow-y: auto; display: flex; align-items: center; justify-content: center; padding: 32px 24px; }
+.empty-state { flex: 1; min-height: 0; overflow-y: auto; display: flex; align-items: center; justify-content: center; padding: 32px 0; }
 .empty-state-ready { align-items: flex-end; padding-bottom: 24px; }
-.empty-state-inner { width: 100%; max-width: 732px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+.empty-state-inner { width: 100%; max-width: var(--conversation-max); padding: 0 24px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
 .empty-note {
   width: 100%; padding: 10px 14px; border-radius: var(--radius-lg); font-size: 13px; line-height: 1.5;
   background: var(--status-mod-bg); color: var(--status-mod);
@@ -1972,6 +1972,7 @@ input, textarea {
   .session-header-live { display: none; }
   .dock .composer { padding: 0 12px; }
   .transcript-inner { padding: 20px 12px; }
+  .empty-state-inner { padding: 0 12px; }
   .composer-model { max-width: 130px; }
   .composer-agent { max-width: 140px; }
 }
