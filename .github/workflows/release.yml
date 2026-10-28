@@ -115,9 +115,9 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            FlipFlopper 0.20.0 fetches model lists from the installed agent CLIs when you
-            open the model picker and remembers the last answer, so new models show up
-            without an app update. No model or effort tables are bundled any more.
+            FlipFlopper 0.21.0 introduces enhanced slash command integration, an interactive
+            MCP server & skills inspector, seamless headless skill execution, wider responsive
+            conversation columns, and queued message steering (Ctrl+Enter).
 
             Installers include the pinned Node sidecar and Claude ACP helper. Native
             Claude requires macOS 13.5+ on a Mac.

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.21.0 - 2026-10-28
+
+### Added
+
+- **Commands & MCP integration**:
+  - Interactive **MCP & Skills Inspector** dialog accessible via `/mcp`, `/skills`, the composer `+` menu, or the command palette (⌘K). Displays all detected MCP servers across Claude, Cursor, Codex, Gemini/AGY, OpenCode, Kimi, and Qwen configurations with credential masking, 1-click status checking, and Claude ACP server reconnect (`/agent:mcp reconnect <name>`).
+  - **Universal skill discovery & execution**: scans project and global skill directories across all supported agents. For headless agents (Codex, AGY, OpenCode, Kimi, Qwen), prompts starting with `/<skill-name>` automatically inject instructions referencing the exact `SKILL.md` path.
+  - Rich slash command palette with argument hints, category tags, intelligent scoring, and direct execution of native ACP commands (`/compact`, `/usage`, etc.) without Ask-mode preambles or context mangling.
+- **Dynamic wider conversation column**:
+  - The conversation column now grows responsively with available window width (`--conversation-max: clamp(920px, 88%, 1440px)`), giving ample room for wide diffs, multi-column tables, tool call outputs, and code blocks.
+- **Queued message steering & force send**:
+  - Queued messages feature a direct manual send button and support `Ctrl+Enter` (`⌘+Enter`) to steer active agent turns immediately.
+
+### Changed
+
+- Enhanced GitHub CI workflow with agent runtime caching, retried Node downloads, and deduplicated build runs.
+
 ## 0.20.0 - 2026-10-28
 
 ### Added
