@@ -2,7 +2,7 @@ import {
   Component, For, Show, batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from "solid-js";
 import {
-  agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, isRunning, splitMode,
+  agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, sendQueuedNow, isRunning, splitMode,
 } from "../../lib/chat";
 import { AgentLogo, agentModelsError, agentModelsLoading, hydrateAgentModels, refreshAgentModels } from "../../lib/agentMeta";
 import { listPromptSkills, searchPromptFiles, type FileEntry, type PermissionMode } from "../../lib/ipc";
@@ -243,7 +243,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   }
 
   // ── Sending ──
-  async function send() {
+  async function send(force = false) {
     if (submitting() || permissionModeUpdating()) return;
     const original = value();
     const text = original.trim();
@@ -282,7 +282,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     queueMicrotask(resize);
     let ok = false;
     try {
-      ok = await submitPrompt(text, files, (id) => {
+      const onCreated = (id: string) => {
         target = id;
         // Carry a follow-up being typed on the new-session screen into its
         // newly created conversation before navigation swaps the draft.
@@ -291,7 +291,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           attachmentDrafts.set(id, [...attachments()]);
           draftMove = { from: source, to: id };
         }
-      });
+      };
+      ok = await (force ? submitPrompt(text, files, onCreated, true) : submitPrompt(text, files, onCreated));
       if (ok && text) {
         history.unshift(text);
         history.length = Math.min(history.length, HISTORY_MAX);
@@ -339,6 +340,16 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     if (e.key === "Tab" && e.shiftKey) {
       e.preventDefault();
       if (!permissionModeUpdating()) cycleMode(1);
+      return;
+    }
+
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      if (!hasText() && chat.activeId && (chat.queued[chat.activeId]?.length ?? 0) > 0) {
+        void sendQueuedNow(chat.activeId, 0);
+      } else {
+        void send(true);
+      }
       return;
     }
 
@@ -497,7 +508,9 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
             submitting()
               ? "Write a follow-up while sending…"
               : running()
-              ? "Queue a follow-up…"
+              ? (chat.activeId && (chat.queued[chat.activeId]?.length ?? 0) > 0
+                ? "Queue a follow-up, or Ctrl+Enter to send queued now…"
+                : "Queue a follow-up, or Ctrl+Enter to steer…")
               : chat.activeId
                 ? "Reply, or @ to mention a file…"
                 : "Describe a task or ask a question"
@@ -698,8 +711,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                     type="button"
                     class="send-btn"
                     disabled={!hasText() || submitting() || permissionModeUpdating()}
-                    onClick={() => void send()}
-                    title={submitting() ? "Sending message" : running() ? "Queue follow-up (Enter)" : "Send (Enter)"}
+                    onClick={(e) => void send(e.ctrlKey || e.metaKey)}
+                    title={submitting() ? "Sending message" : running() ? "Queue follow-up (Enter) · Steer now (Ctrl+Enter)" : "Send (Enter)"}
                     aria-label={submitting() ? "Sending message" : "Send"}
                   >
                     <Show when={submitting()} fallback={<Icon name="arrowUp" size={16} />}>

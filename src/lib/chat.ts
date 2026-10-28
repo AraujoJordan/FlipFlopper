@@ -339,6 +339,8 @@ function flushLiveEntries() {
   }
 }
 
+const forceSendPending = new Set<string>();
+
 async function onTurnEnded(id: string, status: TurnStatus) {
   await refreshSessions();
   bumpGitStatus();
@@ -353,19 +355,28 @@ async function onTurnEnded(id: string, status: TurnStatus) {
     }
   }
 
+  const forced = forceSendPending.delete(id);
   const next = chat.queued[id]?.[0];
-  if (next && status === "done") {
+  if (next && (status === "done" || forced)) {
     setChat("queued", id, (q) => q.slice(1));
     await sendTurn(id, next.text, next.attachments);
   }
-  // After a failed or cancelled turn the queue is kept, not auto-sent: the
-  // transcript offers each follow-up as a chip to send or discard.
+  // After an unforced failed or cancelled turn the queue is kept, not auto-sent:
+  // the transcript offers each follow-up as a chip to send or discard.
 }
 
-/** Send a queued follow-up right now (after a failed/cancelled turn). */
-export async function sendQueuedNow(id: string, index: number) {
+/** Send a queued follow-up right now (interrupting a running turn to steer if needed). */
+export async function sendQueuedNow(id: string, index = 0) {
   const item = chat.queued[id]?.[index];
-  if (!item || isRunning(id)) return;
+  if (!item) return;
+  if (isRunning(id)) {
+    if (index > 0) {
+      setChat("queued", id, (q) => [item, ...(q ?? []).filter((_, i) => i !== index)]);
+    }
+    forceSendPending.add(id);
+    await chatCancel(id);
+    return;
+  }
   setChat("queued", id, (q) => q.filter((_, i) => i !== index));
   await sendTurn(id, item.text, item.attachments);
 }
@@ -654,7 +665,7 @@ export async function retryLastTurn(sessionId: string) {
 
 /** Send from the composer: creates the session on first use. Returns false if
  *  nothing was sent, so the composer can restore its submitted draft. */
-export async function submitPrompt(text: string, attachments: Attachment[] = [], onCreated?: (id: string) => void): Promise<boolean> {
+export async function submitPrompt(text: string, attachments: Attachment[] = [], onCreated?: (id: string) => void, force = false): Promise<boolean> {
   if (permissionModeUpdating()) { toast("Session permissions are still updating.", "info"); return false; }
   const prompt = text.trim();
   if (!prompt && attachments.length === 0) return false;
@@ -663,6 +674,12 @@ export async function submitPrompt(text: string, attachments: Attachment[] = [],
   let id = chat.activeId;
   if (id) {
     if (isRunning(id)) {
+      if (force) {
+        setChat("queued", id, (q) => [{ text: prompt, attachments }, ...(q ?? [])]);
+        forceSendPending.add(id);
+        void chatCancel(id);
+        return true;
+      }
       setChat("queued", id, (q) => [...(q ?? []), { text: prompt, attachments }]);
       toast("Queued — it will send when the current turn finishes");
       return true;
@@ -788,11 +805,18 @@ export async function startSessionTurn(o: StartTurnOptions): Promise<SessionMeta
 
 export function cancelTurn() {
   const id = chat.activeId;
-  if (id) void chatCancel(id);
+  if (id) {
+    forceSendPending.delete(id);
+    void chatCancel(id);
+  }
 }
 
 export function dropQueued(id: string, index: number) {
-  setChat("queued", id, (q) => (q ?? []).filter((_, i) => i !== index));
+  setChat("queued", id, (q) => {
+    const next = (q ?? []).filter((_, i) => i !== index);
+    if (next.length === 0 || index === 0) forceSendPending.delete(id);
+    return next;
+  });
 }
 
 // ── Session management ───────────────────────────────────────────────────────

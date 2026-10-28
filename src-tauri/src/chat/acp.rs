@@ -933,7 +933,8 @@ async fn run_agent(
                 // Preserve that native session; replaying the original prompt
                 // could repeat tool side effects whose results were lost.
                 let broken = outcome.is_err() && !turn_only_failure;
-                if broken {
+                let cancelled = foreground.cancelled.load(Ordering::SeqCst);
+                if broken || cancelled {
                     foreground.closing.store(true, Ordering::SeqCst);
                 }
                 foreground
@@ -941,14 +942,14 @@ async fn run_agent(
                     .store(store::now_ms(), Ordering::SeqCst);
                 {
                     let mut l = foreground.live.lock().unwrap();
-                    if broken {
+                    if broken || cancelled {
                         l.state.connected = false;
                     }
                     l.cancel_requests();
                     l.flush();
                     if let Some(current) = l.current.take() {
                         let _ = current.events.send(Message::Finished(
-                            if foreground.cancelled.load(Ordering::SeqCst) {
+                            if cancelled {
                                 Ok(TurnStatus::Cancelled)
                             } else {
                                 outcome
@@ -956,7 +957,7 @@ async fn run_agent(
                         ));
                     }
                 }
-                if broken || foreground.cancelled.load(Ordering::SeqCst) {
+                if broken || cancelled {
                     return Ok(());
                 }
             }

@@ -1,4 +1,4 @@
-import { cancelTurn, chat, navBack, navForward, selectSession, startNewSession } from "./chat";
+import { cancelTurn, chat, navBack, navForward, selectSession, sendQueuedNow, startNewSession } from "./chat";
 import { layout, resetZoom, stepZoom, toggleSide, toggleSidebar } from "./layout";
 import { togglePalette } from "./palette";
 import { closeReview, store } from "./store";
@@ -95,6 +95,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     label: "Composer",
     items: [
       { keys: "Enter", description: "Send (or queue while a turn runs)" },
+      { keys: `${modKey}Enter / Ctrl+Enter`, description: "Steer now (interrupt and send draft or queued message)" },
       { keys: `${shiftKey}Enter`, description: "New line" },
       { keys: "@", description: "Mention a file" },
       { keys: "/", description: "Commands and skills" },
@@ -154,6 +155,11 @@ export function installGlobalShortcuts(): () => void {
     if (mod && !e.shiftKey && !e.altKey && key === "k") return handle(togglePalette);
     if (mod && !e.shiftKey && !e.altKey && key === "l") return handle(() => runAction("focus-prompt"));
     if (mod && !e.shiftKey && !e.altKey && e.key === ".") return handle(cancelTurn);
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "Enter" && !inTerminal && !inInput) {
+      if (chat.activeId && (chat.queued[chat.activeId]?.length ?? 0) > 0) {
+        return handle(() => void sendQueuedNow(chat.activeId!, 0));
+      }
+    }
 
     // Browser-convention zoom: Cmd/Ctrl + (+/=), (-/_), and 0 (including numpad).
     if (mod && !e.altKey && (e.key === "=" || e.key === "+" || e.code === "Equal" || e.code === "NumpadAdd")) {

@@ -209,10 +209,11 @@ const Transcript: Component = () => {
                       {text.text || `${text.attachments.length} attachment${text.attachments.length === 1 ? "" : "s"}`}
                       <Show when={text.text && text.attachments.length > 0}> · {text.attachments.length} attached</Show>
                     </span>
-                    <Show when={!running() && chat.activeId}>
+                    <Show when={chat.activeId}>
                       <button
                         type="button"
                         class="queued-send"
+                        title={running() ? `Interrupt and send now (${isMac ? "⌘" : "Ctrl+"}Enter)` : "Send now"}
                         onClick={() => void sendQueuedNow(chat.activeId!, i())}
                       >
                         Send now

@@ -626,8 +626,6 @@ impl ChatManager {
             } else {
                 count += 1;
             }
-            app(&session_id, &ended);
-
             let _ = store::update_session(&session_id, |m| {
                 m.status = if status == TurnStatus::Error { "error".into() } else { "idle".into() };
                 if let Some(id) = &native_id {
@@ -637,7 +635,9 @@ impl ChatManager {
                 m.agent_last_entry.insert(agent_id.clone(), count);
                 m.updated_at = store::now_ms();
             });
+            // Release before TurnEnded: queued follow-ups can start immediately.
             manager.running.lock().unwrap().remove(&session_id);
+            app(&session_id, &ended);
         });
 
         Ok(turn_id)
