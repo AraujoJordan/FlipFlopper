@@ -31,6 +31,29 @@ if (!existsSync(marker) || readFileSync(marker, "utf8") !== fingerprint) {
   writeFileSync(marker, fingerprint);
 }
 
+async function fetchWithRetry(url, asBuffer = false, expectedSha256 = undefined) {
+  let lastError;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(90_000) });
+      if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+      if (!asBuffer) return await response.text();
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (expectedSha256 && createHash("sha256").update(bytes).digest("hex") !== expectedSha256) {
+        throw new Error("Node checksum mismatch");
+      }
+      return bytes;
+    } catch (err) {
+      lastError = err;
+      if (attempt < 4) {
+        console.warn(`Download attempt ${attempt}/4 failed for ${url}: ${err.message || err}. Retrying...`);
+        await new Promise((r) => setTimeout(r, attempt * 2000));
+      }
+    }
+  }
+  throw lastError;
+}
+
 const [name, checksum] = platform;
 const windows = name.startsWith("win-");
 const binaries = join(root, "src-tauri", "binaries");
@@ -39,10 +62,7 @@ const stamp = executable + ".version";
 mkdirSync(binaries, { recursive: true });
 if (!existsSync(executable) || !existsSync(stamp) || readFileSync(stamp, "utf8") !== version) {
   const archive = windows ? "win-x64/node.exe" : `node-v${version}-${name}.tar.gz`;
-  const response = await fetch(`https://nodejs.org/dist/v${version}/${archive}`);
-  if (!response.ok) throw new Error(`Node download failed: HTTP ${response.status}`);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (createHash("sha256").update(bytes).digest("hex") !== checksum) throw new Error("Node checksum mismatch");
+  const bytes = await fetchWithRetry(`https://nodejs.org/dist/v${version}/${archive}`, true, checksum);
   const temporary = join(binaries, `.node-${target}.tmp`);
   if (windows) writeFileSync(temporary, bytes);
   else {
@@ -62,9 +82,9 @@ if (!existsSync(executable) || !existsSync(stamp) || readFileSync(stamp, "utf8")
   renameSync(temporary, executable);
   writeFileSync(stamp, version);
 }
+if (!windows) chmodSync(executable, 0o755);
 if (!existsSync(join(runtime, "NODE-LICENSE"))) {
-  const license = await fetch(`https://raw.githubusercontent.com/nodejs/node/v${version}/LICENSE`);
-  if (!license.ok) throw new Error("Cannot download Node license");
-  writeFileSync(join(runtime, "NODE-LICENSE"), await license.text());
+  const licenseText = await fetchWithRetry(`https://raw.githubusercontent.com/nodejs/node/v${version}/LICENSE`);
+  writeFileSync(join(runtime, "NODE-LICENSE"), licenseText);
 }
 console.log(`Agent runtime ready: Node ${version}, Claude ACP 0.94.0 (${target})`);

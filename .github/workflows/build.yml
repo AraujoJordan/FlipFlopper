@@ -3,9 +3,21 @@ name: Build
 on:
   push:
     branches: [main, ai-work]
+    paths-ignore:
+      - "homebrew-tap/**"
+      - "docs/**"
+      - "*.md"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "homebrew-tap/**"
+      - "docs/**"
+      - "*.md"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   typecheck:
@@ -104,6 +116,15 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Agent runtime cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/binaries
+            src-tauri/agent-runtime/node_modules
+            src-tauri/agent-runtime/NODE-LICENSE
+          key: agent-runtime-${{ runner.os }}-${{ matrix.target || 'host' }}-${{ hashFiles('scripts/prepare-agents.mjs', 'src-tauri/agent-runtime/package-lock.json') }}
 
       - name: Prepare agent runtime for tests
         if: matrix.platform == 'ubuntu-22.04'

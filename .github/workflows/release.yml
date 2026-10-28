@@ -84,6 +84,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Agent runtime cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/binaries
+            src-tauri/agent-runtime/node_modules
+            src-tauri/agent-runtime/NODE-LICENSE
+          key: agent-runtime-${{ runner.os }}-${{ matrix.target || 'host' }}-${{ hashFiles('scripts/prepare-agents.mjs', 'src-tauri/agent-runtime/package-lock.json') }}
+
       - name: Build & publish release
         uses: tauri-apps/tauri-action@v0
         env:

@@ -24,7 +24,7 @@ X64_URL="https://github.com/AraujoJordan/FlipFlopper/releases/download/${VERSION
 TEMP_DIR=$(mktemp -d -t flipflopper-brew-XXXXXX)
 
 echo "Downloading Apple Silicon (ARM64) DMG..."
-if curl -L --fail -o "$TEMP_DIR/flipflopper_arm.dmg" "$ARM_URL"; then
+if curl -L --fail --retry 5 --retry-delay 5 --retry-all-errors -o "$TEMP_DIR/flipflopper_arm.dmg" "$ARM_URL"; then
   ARM_SHA=$(shasum -a 256 "$TEMP_DIR/flipflopper_arm.dmg" | cut -d ' ' -f 1)
   echo "✅ Apple Silicon SHA256: $ARM_SHA"
 else
@@ -34,7 +34,7 @@ else
 fi
 
 echo "Downloading Intel (x86_64) DMG..."
-if curl -L --fail -o "$TEMP_DIR/flipflopper_x64.dmg" "$X64_URL"; then
+if curl -L --fail --retry 5 --retry-delay 5 --retry-all-errors -o "$TEMP_DIR/flipflopper_x64.dmg" "$X64_URL"; then
   X64_SHA=$(shasum -a 256 "$TEMP_DIR/flipflopper_x64.dmg" | cut -d ' ' -f 1)
   echo "✅ Intel SHA256: $X64_SHA"
 else
