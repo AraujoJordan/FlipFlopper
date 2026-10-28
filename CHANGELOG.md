@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.19.0 - 2026-10-27
+
+### Added
+
+- **YOLO + Plan**: YOLO is now an independent auto-approve toggle (`yolo` on sessions, composer prefs and runtime state) instead of the `full` permission mode, so it works on top of any mode. In Plan mode the agent stays read-only, non-write permission requests are approved automatically and the plan itself is accepted, handing over to Auto-edit with YOLO kept. Questions, forms and auth links still ask.
+- Settings has a YOLO Off/On row; the composer pill keeps the mode name and shows an amber zap while YOLO is on.
+
+### Changed
+
+- Plan and Ask never auto-approve writes, even with YOLO. Headless CLIs only receive their bypass flag outside Plan/Ask.
+- Native mode changes no longer switch YOLO off; only the toggle does.
+- `chat_set_mode` takes `(mode, yolo)`. Sessions and composer prefs saved with the old `full` mode load as Auto-edit + YOLO.
+
 ## 0.18.1 - 2026-10-27
 
 ### Added
