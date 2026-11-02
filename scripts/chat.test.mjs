@@ -427,6 +427,36 @@ async function loadFrontend(file, mocks) {
   await module.evaluate();
   return module.namespace;
 }
+test("Explain refreshes for delegated progress and changed questions without retrying identical failures", async () => {
+  const child = { kind: "subagent", id: "child", title: "Check checkout", state: "running" };
+  const question = { id: "q", payload: { message: "Choose a delivery option" } };
+  const view = { loaded: true, running: false, messages: [{ role: "assistant", status: "done", blocks: [child] }], runtime: { pending: [question] } };
+  let calls = 0;
+  let fail = false;
+  const explain = await loadFrontend("../src/lib/explain.ts", {
+    "solid-js/store": solidStore,
+    "@tauri-apps/plugin-os": { locale: async () => "en" },
+    "./ipc": { chatExplain: async () => { calls++; if (fail) throw new Error("offline"); return { text: "Summary", source: "Test" }; } },
+    "./chat": { chat: { sessions: [{ id: "s", agent_id: "kimi" }], views: { s: view } } },
+    "./store": { store: { agents: [{ id: "kimi", installed: true, headless_supported: true }] } },
+    "./appPrefs": { readPref: async (_key, fallback) => fallback, writePref: () => {} },
+  });
+  await explain.explain("s");
+  assert.equal(explain.explainIsStale("s"), false);
+  child.state = "idle";
+  child.error = "Service unavailable";
+  assert.equal(explain.explainIsStale("s"), true);
+  await explain.explain("s");
+  question.payload.message = "Choose a payment option";
+  assert.equal(explain.explainIsStale("s"), true);
+  fail = true;
+  await explain.explain("s");
+  assert.equal(explain.explainIsStale("s"), false);
+  await explain.explain("s");
+  assert.equal(calls, 3);
+  assert.equal(explain.explanationFor("s").text, "Summary");
+});
+
 async function motionFixture(saved = {}) {
   const reduced = new EventTarget(); reduced.matches = false;
   const narrow = new EventTarget(); narrow.matches = false;

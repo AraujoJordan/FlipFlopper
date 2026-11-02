@@ -1,5 +1,5 @@
 import { Component, For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
-import { activeSession, agentTuning, chat } from "../../lib/chat";
+import { activeSession, agentTuning } from "../../lib/chat";
 import { hydrateAgentModels } from "../../lib/agentMeta";
 import { layout } from "../../lib/layout";
 import {
@@ -53,12 +53,9 @@ const ExplainView: Component = () => {
   createEffect(() => {
     const s = session();
     if (!visible() || !s) return;
-    void chat.views[s.id]?.messages.length;
-    void chat.views[s.id]?.running;
-    void chat.views[s.id]?.runtime?.pending.length;
-    // Re-check when a request ends, so changes made meanwhile are not missed.
-    void explanationFor(s.id)?.loading;
-    void effectiveChoice();
+    // Read the key inside the effect so lifecycle patches and replacement
+    // questions (even with the same count) invalidate the explanation.
+    if (!explainIsStale(s.id)) return;
     const timer = window.setTimeout(() => { if (explainIsStale(s.id)) void explain(s.id); }, 1500);
     onCleanup(() => window.clearTimeout(timer));
   });

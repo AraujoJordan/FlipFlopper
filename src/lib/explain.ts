@@ -86,8 +86,13 @@ async function userLanguage(): Promise<string> {
 function requestKey(id: string, provider: ExplainProvider): string {
   const view = chat.views[id];
   const last = view?.messages[view.messages.length - 1];
-  const pending = view?.runtime?.pending.map((p) => p.id).join(",") ?? "";
-  return `${view?.messages.length ?? 0}|${last?.role === "assistant" ? last.status : ""}|${pending}|${JSON.stringify(provider)}`;
+  const pending = view?.runtime?.pending ?? [];
+  const progress = last?.role === "assistant" ? [last.status, last.error, last.blocks.flatMap((b) => {
+    if (b.kind === "subagent") return [[b.id, b.title, b.description, b.state, b.stopReason, b.error]];
+    if (b.kind === "notice" && (b.severity === "warning" || b.severity === "error")) return [[b.severity, b.title, b.description]];
+    return [];
+  })] : [];
+  return JSON.stringify([view?.messages.length ?? 0, progress, pending, provider]);
 }
 
 /** Ask the chosen model to explain session `id`. Skips unchanged sessions unless `force`. */

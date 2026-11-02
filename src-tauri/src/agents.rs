@@ -249,11 +249,20 @@ mod tests {
         let prompt = "Explain this change.\nKeep it short.";
         let command = super::headless_command(find_agent("codex").unwrap(), "codex", "scratch", prompt, Some("selected-model")).unwrap();
         let args: Vec<_> = command.as_std().get_args().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(args, ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "-m", "selected-model", prompt]);
+        assert_eq!(args, ["exec", prompt, "--skip-git-repo-check", "--sandbox", "read-only", "-m", "selected-model"]);
         assert_eq!(command.as_std().get_current_dir(), Some(std::path::Path::new("scratch")));
         let claude = super::headless_command(find_agent("claude").unwrap(), "claude", "scratch", prompt, None).unwrap();
         let args: Vec<_> = claude.as_std().get_args().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(args, ["-p", prompt]);
+        assert_eq!(args, ["-p", prompt, "--output-format", "text"]);
+    }
+
+    #[test]
+    fn helper_prompt_stays_attached_to_value_taking_flags() {
+        for (agent, format) in [("kimi", "text"), ("grok", "plain")] {
+            let command = super::headless_command(find_agent(agent).unwrap(), agent, "scratch", "Explain this", Some("chosen")).unwrap();
+            let args: Vec<_> = command.as_std().get_args().map(|a| a.to_str().unwrap()).collect();
+            assert_eq!(args, ["-p", "Explain this", "--output-format", format, "-m", "chosen"]);
+        }
     }
 
     #[test]
@@ -723,17 +732,24 @@ fn headless_command(
     let headless_args = def.headless_args
         .ok_or_else(|| format!("Agent '{}' has no non-interactive mode.", def.name))?;
     let mut cmd = tokio::process::Command::new(binary);
-    cmd.args(headless_args);
+    // Kimi and Grok's -p consumes the very next argument (unlike Claude's
+    // boolean print flag). Keep the prompt adjacent before adding model flags.
+    cmd.args(headless_args).arg(prompt);
     if def.id == "codex" {
         // Explain runs outside a repository. These one-shot helpers only need
         // a text answer; allowing a non-Git cwd must not grant write access.
         cmd.args(["--skip-git-repo-check", "--sandbox", "read-only"]);
     }
+    match def.id {
+        "claude" | "kimi" => { cmd.args(["--output-format", "text"]); }
+        "grok" => { cmd.args(["--output-format", "plain"]); }
+        _ => {}
+    }
     if let (Some(flag), Some(model)) = (model_flag(def.id), model.filter(|m| !m.trim().is_empty())) {
         cmd.arg(flag).arg(model);
     }
-    cmd.arg(prompt)
-        .current_dir(project_path)
+    cmd.current_dir(project_path)
+        .kill_on_drop(true)
         .env("PATH", augmented_path_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
