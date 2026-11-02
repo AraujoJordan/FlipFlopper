@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.23.0 - 2026-11-02
+
+### Added
+
+- **Live CLI / Chat View Switcher**:
+  - Seamlessly switch between the conversational transcript and a live interactive terminal CLI in the session header.
+  - PTY handoff under session operation lock: resumes native sessions for Claude Code, Codex, Cursor, agy, Qwen, OpenCode, and Kimi directly in the session's effective working directory.
+  - Preserves live CLI execution when toggling views; exiting or ending the CLI safely restores chat ownership.
+- **Enhanced Model Integrations**:
+  - Improved model discovery, listing, and prompt context dispatch for headless agents and ACP sessions.
+  - Better integration with local and remote model catalogs.
+
+### Fixed
+
+- **Claude Advisor & ACP Helper Improvements**:
+  - Backported advisor-result handling and excluded server tools from local dispatch tracking in the pinned Claude ACP helper, preventing false `incomplete_tool_call` interruptions.
+  - Enhanced advisor message styling and notice handling in conversation transcripts.
+- **Explain View Refinements**:
+  - Fixed and improved Explain panel context generation, cached explanation persistence, provider selection, and prompt formatting.
+
 ## 0.22.0 - 2026-10-28
 
 ### Added
