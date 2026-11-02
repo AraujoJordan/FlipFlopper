@@ -18,7 +18,7 @@ import {
   syncNativeMenuState,
   type NativeMenuState,
 } from "./lib/ipc";
-import { cancelTurn, chat, initChat, isRunning, setYolo, startNewSession } from "./lib/chat";
+import { cancelTurn, chat, initChat, isRunning, setYolo, startNewSession, conversationMode, conversationTerminal, conversationTerminalView, setConversationMode, endConversationTerminal, canResumeInTerminal } from "./lib/chat";
 import { PANEL_INSET, PANEL_GAP, hydrateLayout, watchMotionPreferences, watchLayoutSizes, paneIsOverlay, sidebarIsOverlay, renderedSidebarWidth, layout, openSide, resetZoom, setLayout, setSidebarWidth, stepZoom, toggleSide, toggleSidebar } from "./lib/layout";
 import { openProjectPath, forgetRecentProject, pickAndOpenProject, projectCreated } from "./lib/projects";
 import { watchNativeAppearance, isMacDesktop, handleWindowHeaderMouseDown, handleWindowHeaderDoubleClick } from "./lib/native";
@@ -51,6 +51,7 @@ import "./App.css";
 // Lazy modals: each is also wrapped in a `Show` at its call site — without
 // the gate a lazy component that's always rendered (just internally hidden)
 // would fetch its chunk at startup anyway.
+const ConversationTerminal = lazy(() => import("./components/TerminalPane"));
 const ProjectPicker = lazy(() => import("./components/ProjectPicker"));
 const NewProjectWizard = lazy(() => import("./components/NewProjectWizard"));
 const SettingsPanel = lazy(() => import("./components/SettingsPanel"));
@@ -80,6 +81,10 @@ const App: Component = () => {
   onCleanup(appearance.dispose);
   onMount(() => onCleanup(watchMotionPreferences()));
   let rootElement: HTMLDivElement | undefined;
+  let chatSurface: HTMLDivElement | undefined;
+  let cliSurface: HTMLDivElement | undefined;
+  const chatPresent = usePresence(() => conversationMode() === "chat", () => chatSurface, { slide: () => true, duration: 180 });
+  const cliPresent = usePresence(() => conversationMode() === "cli", () => cliSurface, { slide: () => true, duration: 180 });
   let mainBody: HTMLDivElement | undefined;
   let mainElement: HTMLElement | undefined;
   onMount(() => { if (rootElement && mainBody) onCleanup(watchLayoutSizes(rootElement, mainBody)); });
@@ -358,19 +363,45 @@ const App: Component = () => {
         <div ref={mainBody} class="main-body">
           <section class="center-col">
             <SessionHeader changeCount={gitChangedCount()} />
-            <Show
-              when={chat.activeId}
-              fallback={
-                <EmptyState
-                  onOpenProjects={() => setPickerOpen(true)}
-                  onNewProject={() => setNewProjectOpen(true)}
-                />
-              }
-            >
-              <Transcript />
-            </Show>
-            <div class="dock">
-              <Composer onOpenProjects={() => setPickerOpen(true)} />
+            <div class="conversation-stage">
+              <div ref={chatSurface} class="conversation-surface" style={{ display: chatPresent() ? "flex" : "none" }}>
+                <Show
+                  when={chat.activeId}
+                  fallback={
+                    <EmptyState
+                      onOpenProjects={() => setPickerOpen(true)}
+                      onNewProject={() => setNewProjectOpen(true)}
+                    />
+                  }
+                >
+                  <Transcript />
+                </Show>
+                <div class="dock" style={{ display: conversationTerminal() ? "none" : undefined }}>
+                  <Composer onOpenProjects={() => setPickerOpen(true)} />
+                </div>
+                <Show when={conversationTerminal()}>
+                  <div class="conversation-cli-note">The CLI is active. Exit it to send chat messages.
+                    <button class="ui-btn ui-btn-outline" onClick={() => void setConversationMode("cli")}>Show CLI</button>
+                    <button class="ui-btn ui-btn-outline" onClick={() => void endConversationTerminal()}>End CLI</button>
+                  </div>
+                </Show>
+              </div>
+              <div ref={cliSurface} class="conversation-surface" style={{ display: cliPresent() ? "flex" : "none" }}>
+                <div class="conversation-cli-note">
+                  <span>Resumes this agent's saved conversation. CLI messages stay in native history and are not mirrored in Chat. CLI permissions apply.</span>
+                  <Show when={conversationTerminal()}><button class="ui-btn ui-btn-outline" onClick={() => void endConversationTerminal()}>End CLI</button></Show>
+                  <Show when={!conversationTerminal() && conversationTerminalView()}><button class="ui-btn ui-btn-outline" disabled={!!chat.activeId && chat.terminalBusy[chat.activeId]} onClick={() => void setConversationMode("cli")}>Resume CLI</button></Show>
+                </div>
+                <div class="conversation-cli-body">
+                  <Show when={conversationTerminalView()} keyed fallback={
+                    <div class="pane-empty">
+                      <Icon name="terminal" size={28} />
+                      <p>{chat.activeId && chat.terminalBusy[chat.activeId] ? "Opening CLI…" : chat.activeId && isRunning(chat.activeId) ? "Finish or stop the chat turn before opening CLI mode." : chat.activeId && canResumeInTerminal(chat.activeId) ? "CLI is not running. Resume the saved conversation when ready." : "CLI mode needs a saved conversation from a supported agent. Send a chat message first."}</p>
+                      <button class="ui-btn ui-btn-outline" disabled={!chat.activeId || !canResumeInTerminal(chat.activeId) || isRunning(chat.activeId) || chat.terminalBusy[chat.activeId]} onClick={() => void setConversationMode("cli")}>Open CLI</button>
+                    </div>
+                  }>{(id) => <ConversationTerminal sessionId={id} active={conversationMode() === "cli"} />}</Show>
+                </div>
+              </div>
             </div>
           </section>
           <SidePane />

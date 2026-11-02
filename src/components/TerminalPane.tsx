@@ -1,6 +1,6 @@
 import { onMount, onCleanup, createEffect, type Component } from "solid-js";
 import { Terminal, type ITheme } from "@xterm/xterm";
-import { MOTION_EVENT, ZOOM_EVENT, layout, resolvedMotion, motionForeground } from "../lib/layout";
+import { MOTION_EVENT, ZOOM_EVENT, resolvedMotion, motionForeground } from "../lib/layout";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { onPtyOutput, onPtyExit, ptyInput, ptyResize, ptyAttach } from "../lib/ipc";
@@ -77,7 +77,7 @@ function createCachedTerminal(sessionId: string): CachedTerminal {
 
   const onThemeChanged = () => { terminal.options.theme = terminalTheme(); };
   window.addEventListener(THEME_EVENT, onThemeChanged);
-  const onMotionChanged = () => { terminal.options.cursorBlink = resolvedMotion() === "full" && motionForeground() && layout.sideOpen && layout.sideTab === "terminal" && container.getClientRects().length > 0; };
+  const onMotionChanged = () => { terminal.options.cursorBlink = !terminal.options.disableStdin && resolvedMotion() === "full" && motionForeground() && container.getClientRects().length > 0; };
   window.addEventListener(MOTION_EVENT, onMotionChanged);
   const media = window.matchMedia("(prefers-color-scheme: light)");
   media.addEventListener("change", onThemeChanged);
@@ -100,6 +100,8 @@ function createCachedTerminal(sessionId: string): CachedTerminal {
     unlistenOutput = un;
 
     const unExit = await onPtyExit(sessionId, () => {
+      terminal.options.disableStdin = true;
+      terminal.options.cursorBlink = false;
       terminal.writeln("\r\n\x1b[90m[process exited]\x1b[0m");
     });
     if (disposed) return unExit();
@@ -187,7 +189,7 @@ const TerminalPane: Component<Props> = (props) => {
     fitFrame = requestAnimationFrame(() => {
       fitFrame = undefined;
       if (!wrapperRef?.getClientRects().length) { terminal.options.cursorBlink = false; return; }
-      terminal.options.cursorBlink = props.active && resolvedMotion() === "full" && motionForeground() && layout.sideOpen && layout.sideTab === "terminal";
+      terminal.options.cursorBlink = !terminal.options.disableStdin && props.active && resolvedMotion() === "full" && motionForeground();
       try {
       fitAddon.fit();
       const { cols, rows } = terminal;

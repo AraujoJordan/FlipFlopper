@@ -130,6 +130,30 @@ test("webview reload restores only a request owned by the live backend turn", as
   assert.equal(wrongTurn.running, false);
   assert.equal(wrongTurn.runtime.pending.length, 0);
 });
+
+test("CLI presentation reuses the native terminal and preserves the transcript", async () => {
+  let opens = 0;
+  const module = await loadChat({ "./ipc": {
+    chatOpenTerminal: async () => { opens++; return "pty"; },
+    chatRuntimeState: async () => ({ ...runtime(), active_turn_id: null, terminal_id: "pty" }),
+  } });
+  module.setChat("sessions", [{ id: "s", agent_id: "claude", native_ids: { claude: "native" } }]);
+  module.setChat("activeId", "s");
+  const view = module.reduceTranscript(waiting());
+  view.running = false;
+  module.setChat("views", "s", view);
+  const before = JSON.stringify(module.chat.views.s.messages);
+  await module.setConversationMode("cli");
+  assert.equal(module.conversationMode(), "cli");
+  assert.equal(module.conversationTerminal(), "pty");
+  await module.setConversationMode("chat");
+  assert.equal(module.conversationTerminal(), "pty", "view changes must not kill the CLI");
+  await module.setConversationMode("cli");
+  assert.equal(opens, 1);
+  assert.equal(JSON.stringify(module.chat.views.s.messages), before);
+  module.setChat("activeId", null);
+  assert.equal(module.conversationMode(), "chat");
+});
 test("request resolution and turn completion do not replay or duplicate tools", async () => {
   const chat = await loadChat(), entries = waiting();
   entries.push(

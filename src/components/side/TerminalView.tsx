@@ -1,6 +1,6 @@
 import { Component, For, Show, createSignal, lazy } from "solid-js";
-import { chatDetachNative, openTerminal, ptySendLine } from "../../lib/ipc";
-import { activeSession, isRunning } from "../../lib/chat";
+import { openTerminal } from "../../lib/ipc";
+import { activeSession, isRunning, canResumeInTerminal, setConversationMode } from "../../lib/chat";
 import { addTerminal, effectiveRoot, removeTerminal, setActiveTerminal, store, type TerminalKind } from "../../lib/store";
 import { agentColor } from "../../lib/agentMeta";
 import ValidationButton from "../ValidationButton";
@@ -19,41 +19,17 @@ function kindColor(kind: TerminalKind): string {
   }
 }
 
-/** Command that reopens a headless session in the agent's own TUI. */
-const RESUME_COMMANDS: Record<string, (id: string) => string> = {
-  claude: (id) => `claude --resume ${id}`,
-  codex: (id) => `codex resume ${id}`,
-  cursor: (id) => `cursor-agent --resume ${id}`,
-  agy: (id) => `agy --conversation ${id}`,
-  qwen: (id) => `qwen -r ${id}`,
-  opencode: (id) => `opencode -s ${id}`,
-  kimi: (id) => `kimi -S ${id}`,
-};
-
 const TerminalView: Component = () => {
   const [opening, setOpening] = createSignal(false);
 
-  const resumeCommand = () => {
-    const s = activeSession();
-    const id = s?.native_ids[s.agent_id];
-    // Native IDs are opaque protocol values; only shell-safe CLI identifiers
-    // can be typed into the user's interactive shell as a resume argument.
-    return s && id && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,255}$/.test(id) && RESUME_COMMANDS[s.agent_id] ? RESUME_COMMANDS[s.agent_id](id) : null;
-  };
-
-  async function newShell(initial?: string) {
+  async function newShell() {
     const root = effectiveRoot();
     const project = store.currentProject;
     if (!root || !project || opening()) return;
     setOpening(true);
     try {
-      if (initial && activeSession()) await chatDetachNative(activeSession()!.id);
       const sessionId = await openTerminal(project.path, root);
-      addTerminal({ sessionId, label: initial ? "Agent TUI" : "Terminal", kind: "shell" });
-      if (initial) {
-        // Give the shell a beat to print its prompt before typing.
-        setTimeout(() => void ptySendLine(sessionId, initial).catch(() => {}), 350);
-      }
+      addTerminal({ sessionId, label: "Terminal", kind: "shell" });
     } catch (e) {
       toast(`Failed to open terminal: ${String(e)}`, "error");
     } finally {
@@ -100,8 +76,8 @@ const TerminalView: Component = () => {
           </button>
         </div>
         <ValidationButton />
-        <Show when={resumeCommand()}>
-          <button class="icon-btn" disabled={opening() || !!activeSession() && isRunning(activeSession()!.id)} onClick={() => void newShell(resumeCommand()!)} title="Resume this session in the agent's own terminal UI" aria-label="Resume in agent TUI">
+        <Show when={activeSession() && canResumeInTerminal(activeSession()!.id)}>
+          <button class="icon-btn" disabled={opening() || !!activeSession() && isRunning(activeSession()!.id)} onClick={() => void setConversationMode("cli")} title="Resume this conversation in the middle panel’s CLI view" aria-label="Resume in agent TUI">
             <Icon name="external" size={14} />
           </button>
         </Show>

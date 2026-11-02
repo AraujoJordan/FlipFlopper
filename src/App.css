@@ -2829,3 +2829,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   accent-color: var(--accent);
   cursor: pointer;
 }
+
+/* Retained conversation presentations share one surface and crossfade/slide. */
+.conversation-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.conversation-surface { position: absolute; inset: 0; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface-1); }
+.conversation-mode { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--border-muted); border-radius: 8px; }
+.conversation-cli-body { flex: 1; min-height: 0; position: relative; }
+.conversation-cli-note { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 16px; color: var(--fg-muted); font-size: 12px; border-bottom: 1px solid var(--border-muted); }
+.conversation-cli-note > span { flex: 1; min-width: 180px; }

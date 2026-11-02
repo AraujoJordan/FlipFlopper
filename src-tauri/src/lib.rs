@@ -220,6 +220,9 @@ fn bridge_pty_with_url(
                     let _ = app.emit_to(&window_label, &format!("pty://{session_id}"), data);
                 }
                 PtyEvent::Exit => {
+                    if let Some(owner) = app.state::<std::sync::Arc<chat::ChatManager>>().terminal_exited(&session_id) {
+                        emit_terminal_state(&app, &owner);
+                    }
                     if let Some(urls) = app.try_state::<SessionUrls>() {
                         urls.0.lock().unwrap().remove(&session_id);
                     }
@@ -1490,15 +1493,43 @@ async fn chat_send(
 }
 
 #[tauri::command]
-fn chat_cancel(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, force: Option<bool>) {
+fn chat_cancel(app: tauri::AppHandle, state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, force: Option<bool>) {
     state.cancel(&session_id);
     // Checkout removal/merge cannot wait for a cooperative protocol cancel.
-    if force==Some(true){state.native.close_session(&session_id);}
+    if force==Some(true){state.close_terminal(&session_id);state.native.close_session(&session_id);}
+    emit_terminal_state(&app, &session_id);
 }
 
 #[tauri::command]
 fn chat_cancel_subagent(state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, subagent_id: String) -> Result<(), String> {
     state.native.cancel_subagent(&session_id, &subagent_id)
+}
+
+#[tauri::command]
+async fn chat_open_terminal(app: tauri::AppHandle, session_id: String) -> Result<String, String> {
+    let spawn_app = app.clone();
+    let owner = session_id.clone();
+    let (terminal_id, rx) = run_blocking(move || {
+        spawn_app.state::<std::sync::Arc<chat::ChatManager>>().open_terminal(&owner, &spawn_app.state::<PtyManager>())
+    }).await??;
+    if let Some(rx) = rx { park_bridge(app.clone(), terminal_id.clone(), rx, UrlAction::Ignore); }
+    emit_terminal_state(&app, &session_id);
+    Ok(terminal_id)
+}
+
+#[tauri::command]
+async fn chat_close_terminal(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
+    let close_app = app.clone();
+    let owner = session_id.clone();
+    run_blocking(move || close_app.state::<std::sync::Arc<chat::ChatManager>>().close_terminal(&owner)).await?;
+    emit_terminal_state(&app, &session_id);
+    Ok(())
+}
+
+fn emit_terminal_state(app: &tauri::AppHandle, session_id: &str) {
+    let state = app.state::<std::sync::Arc<chat::ChatManager>>().runtime_state(session_id);
+    let entry = chat::store::Entry::Event { event: chat::event::ChatEvent::RuntimeUpdated { state }, ts: chat::store::now_ms() };
+    let _ = app.emit(&format!("chat://{session_id}"), entry);
 }
 
 #[tauri::command]
@@ -1535,19 +1566,23 @@ fn agent_runtime_info(agent_id: String) -> chat::acp::RuntimeInfo {
 
 #[tauri::command]
 async fn chat_update_session(
+    app: tauri::AppHandle,
     state: State<'_, std::sync::Arc<chat::ChatManager>>,
     session_id: String,
     mut patch: chat::SessionPatch,
 ) -> Result<chat::store::SessionMeta, String> {
-    if patch.archived == Some(true) || patch.cwd.is_some() || patch.worktree.is_some() {
-        state.cancel(&session_id);
-        state.native.close_session(&session_id);
-    }
     let manager = state.inner().clone();
     run_blocking(move || {
         if patch.mode.is_some() || patch.yolo.is_some() {
             let meta = chat::store::get_session(&session_id).ok_or("Session not found")?;
             manager.set_mode(&session_id, patch.mode.take().unwrap_or(meta.mode), patch.yolo.take().unwrap_or(meta.yolo))?;
+        }
+        let operation = manager.session_operation(&session_id);
+        let _update = operation.lock().unwrap();
+        if patch.archived == Some(true) || patch.cwd.is_some() || patch.worktree.is_some() {
+            manager.cancel(&session_id);
+            manager.native.close_session(&session_id);
+            emit_terminal_state(&app, &session_id);
         }
         chat::update_session(&session_id, patch)
     }).await?
@@ -2148,6 +2183,8 @@ pub fn run() {
             chat_runtime_state,
             chat_set_mode,
             chat_detach_native,
+            chat_open_terminal,
+            chat_close_terminal,
             chat_respond,
             agent_runtime_info,
             chat_cancel,

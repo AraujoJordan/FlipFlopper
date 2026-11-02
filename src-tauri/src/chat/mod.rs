@@ -44,6 +44,7 @@ struct Running {
 pub struct ChatManager {
     running: Mutex<HashMap<String, Running>>,
     pub native: acp::Pool,
+    terminals: Mutex<HashMap<String, (String, crate::pty::PtyManager)>>,
     session_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
@@ -239,11 +240,53 @@ pub fn update_session(id: &str, patch: SessionPatch) -> Result<SessionMeta, Stri
 }
 
 impl ChatManager {
-    fn session_operation(&self, session_id: &str) -> Arc<Mutex<()>> {
+    pub(crate) fn session_operation(&self, session_id: &str) -> Arc<Mutex<()>> {
         self.session_operations.lock().unwrap().entry(session_id.into()).or_default().clone()
     }
+    /// The operation lock makes native chat and the interactive CLI exclusive.
+    pub fn open_terminal(&self, session_id: &str, ptys: &crate::pty::PtyManager) -> Result<(String, Option<std::sync::mpsc::Receiver<crate::pty::PtyEvent>>), String> {
+        let operation = self.session_operation(session_id);
+        let _handoff = operation.lock().unwrap();
+        if let Some((id, _)) = self.terminals.lock().unwrap().get(session_id) { return Ok((id.clone(), None)); }
+        if self.is_running(session_id) { return Err("Finish or stop the chat turn before opening CLI mode.".into()); }
+        let meta = store::get_session(session_id).ok_or("Session not found")?;
+        if meta.archived { return Err("Restore this archived session before opening CLI mode.".into()); }
+        let native_id = meta.native_ids.get(&meta.agent_id).ok_or("Send a chat message first to create a resumable conversation.")?;
+        let args = terminal_resume_args(&meta.agent_id, native_id)?;
+        let def = crate::agents::find_agent(&meta.agent_id).ok_or("Unknown agent")?;
+        let binary = crate::agents::launch_binary(def).ok_or("Agent executable not found")?;
+        self.native.close_session(session_id);
+        let (id, rx) = crate::pty::spawn_agent_terminal(ptys, &binary, &args, &meta.cwd)?;
+        self.terminals.lock().unwrap().insert(session_id.into(), (id.clone(), ptys.clone()));
+        Ok((id, Some(rx)))
+    }
+
+    pub fn close_terminal(&self, session_id: &str) {
+        let operation = self.session_operation(session_id);
+        let _handoff = operation.lock().unwrap();
+        self.stop_terminal(session_id);
+    }
+
+    fn stop_terminal(&self, session_id: &str) {
+        if let Some((id, manager)) = self.terminals.lock().unwrap().remove(session_id) {
+            if let Some(mut session) = manager.sessions.lock().unwrap().remove(&id) {
+                if let Some(pid) = session.child.process_id() { kill_tree(pid); }
+                let _ = session.child.kill();
+                let _ = session.child.wait();
+            }
+        }
+    }
+
+    pub fn terminal_exited(&self, terminal_id: &str) -> Option<String> {
+        let mut terminals = self.terminals.lock().unwrap();
+        let owner = terminals.iter().find(|(_, (id, _))| id == terminal_id).map(|(owner, _)| owner.clone())?;
+        if let Some((id, manager)) = terminals.remove(&owner) { manager.sessions.lock().unwrap().remove(&id); }
+        Some(owner)
+    }
+
     pub fn runtime_state(&self, session_id: &str) -> acp_types::RuntimeState {
         let mut state = self.native.state(session_id);
+        state.terminal_id = self.terminals.lock().unwrap().get(session_id).map(|(id, _)| id.clone());
         if !state.connected {
             if let Some(run) = self.running.lock().unwrap().get(session_id).filter(|run| !run.cancelled.load(Ordering::SeqCst)) {
                 state.agent_id = run.agent_id.clone();
@@ -275,7 +318,7 @@ impl ChatManager {
     pub fn clear_session(&self, session_id: &str) -> Result<ClearResult, String> {
         let operation = self.session_operation(session_id);
         let _clear = operation.lock().unwrap();
-        if self.is_running(session_id) || self.native.state(session_id).active_turn_id.is_some() {
+        if self.terminals.lock().unwrap().contains_key(session_id) || self.is_running(session_id) || self.native.state(session_id).active_turn_id.is_some() {
             return Err("Stop the current turn before clearing".into());
         }
         let meta = store::get_session(session_id).ok_or("Session not found")?;
@@ -317,6 +360,7 @@ impl ChatManager {
 
     /// Kill the running turn (and its children) for a session, if any.
     pub fn cancel(&self, session_id: &str) {
+        self.stop_terminal(session_id);
         if let Some(run) = self.running.lock().unwrap().get(session_id) {
             run.cancelled.store(true, Ordering::SeqCst);
             if run.pid != 0 { kill_tree(run.pid); }
@@ -325,6 +369,8 @@ impl ChatManager {
     }
 
     pub fn cancel_all(&self) {
+        let ids: Vec<_> = self.terminals.lock().unwrap().keys().cloned().collect();
+        for id in ids { self.stop_terminal(&id); }
         let running = self.running.lock().unwrap();
         for run in running.values() {
             run.cancelled.store(true, Ordering::SeqCst);
@@ -335,6 +381,8 @@ impl ChatManager {
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        let operation = self.session_operation(session_id);
+        let _delete = operation.lock().unwrap();
         self.cancel(session_id);
         self.native.close_session(session_id);
         store::delete_session(session_id)?;
@@ -348,6 +396,9 @@ impl ChatManager {
         (args.mode, args.yolo) = args.mode.with_yolo(args.yolo);
         let operation = self.session_operation(&args.session_id);
         let _launch = operation.lock().unwrap();
+        if self.terminals.lock().unwrap().contains_key(&args.session_id) {
+            return Err("Exit the CLI before sending a chat message in this conversation.".into());
+        }
         if self.is_running(&args.session_id) {
             return Err("This session is already running a turn".into());
         }
@@ -784,6 +835,20 @@ pub fn recover_interrupted_sessions() {
     }
 }
 
+fn terminal_resume_args(agent: &str, id: &str) -> Result<Vec<String>, String> {
+    if id.is_empty() || id.starts_with('-') || id.contains(['\0', '\n', '\r']) { return Err("Invalid native session id".into()); }
+    let flag = match agent {
+        "claude" | "cursor" => "--resume",
+        "codex" => "resume",
+        "agy" => "--conversation",
+        "qwen" => "-r",
+        "opencode" => "-s",
+        "kimi" => "-S",
+        _ => return Err("This agent does not yet support resuming a conversation in CLI mode.".into()),
+    };
+    Ok(vec![flag.into(), id.into()])
+}
+
 pub(crate) fn kill_tree(pid: u32) {
     #[cfg(unix)]
     {
@@ -860,6 +925,34 @@ fn diff_changes(before: &Snapshot, after: &Snapshot) -> Vec<ChangedFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_handoff_blocks_chat_and_clear_until_exit() {
+        let manager = Arc::new(ChatManager::default());
+        manager.terminals.lock().unwrap().insert("s".into(), ("pty".into(), crate::pty::PtyManager::new()));
+        assert_eq!(manager.runtime_state("s").terminal_id.as_deref(), Some("pty"));
+        let args = SendArgs { recover_context: false, session_id: "s".into(), prompt: "hello".into(), agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, context_from: None, attachments: vec![] };
+        assert!(manager.send(Arc::new(|_, _| {}), args).unwrap_err().contains("Exit the CLI"));
+        assert!(manager.clear_session("s").is_err());
+        let (id, receiver) = manager.open_terminal("s", &crate::pty::PtyManager::new()).unwrap();
+        assert_eq!(id, "pty");
+        assert!(receiver.is_none(), "opening twice must reuse the owned terminal");
+        assert_eq!(manager.terminal_exited("pty"), Some("s".into()));
+        assert!(manager.runtime_state("s").terminal_id.is_none());
+        assert_eq!(manager.terminal_exited("pty"), None);
+    }
+
+    #[test]
+    fn terminal_resume_passes_native_ids_as_arguments() {
+        for (agent, flag) in [("claude", "--resume"), ("codex", "resume"), ("cursor", "--resume"), ("agy", "--conversation"), ("qwen", "-r"), ("opencode", "-s"), ("kimi", "-S")] {
+            assert_eq!(terminal_resume_args(agent, "native-id").unwrap(), vec![flag, "native-id"]);
+        }
+        assert!(terminal_resume_args("aider", "native-id").is_err());
+        assert!(terminal_resume_args("claude", "--help").is_err());
+        assert!(terminal_resume_args("claude", "bad\ncommand").is_err());
+        // No shell sees this value: metacharacters remain one opaque argument.
+        assert_eq!(terminal_resume_args("codex", "id; echo unexpected").unwrap()[1], "id; echo unexpected");
+    }
 
     #[test]
     fn converting_a_running_headless_session_saves_policy_without_restarting_it() {

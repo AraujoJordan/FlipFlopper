@@ -85,6 +85,16 @@ Currently implemented:
   tool rows and inline diffs; composer with `@` mentions, `/` commands and
   skills, queued follow-ups, agent/model/effort and permission pickers, and a
   Local/Worktree toggle.
+- The middle panel has retained Chat/CLI presentations with shared motion helpers.
+  CLI resumes an existing native conversation for Claude, Codex, Cursor, agy,
+  Qwen, OpenCode and Kimi, launched directly in the effective session cwd.
+  `ChatManager` owns the PTY handoff under the session operation lock; chat sends
+  and clearing are blocked while the CLI owns the conversation. Switching views
+  preserves the live CLI; exiting or End CLI releases ownership. Native history
+  survives, but CLI messages are not mirrored into FlipFlopper's JSONL transcript
+  (so cross-agent digests and Explain do not include those messages). Native CLI
+  permissions/settings apply. `runtime.terminal_id` restores ownership on reload.
+  The side-terminal resume button routes through this same handoff.
 - Side pane with Changes (git status/sync/history over the existing git
   backend, diffs via `DiffPane`), Preview (Run targets + iframe of the
   captured dev-server URL; Android projects show the live device/emulator

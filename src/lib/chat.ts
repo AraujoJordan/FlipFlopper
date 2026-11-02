@@ -3,6 +3,8 @@ import { createStore, produce } from "solid-js/store";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   chatCancel,
+  chatOpenTerminal,
+  chatCloseTerminal,
   chatRuntimeState,
   chatSetMode,
   chatRespond,
@@ -33,6 +35,7 @@ import { requestNotificationPermissionIfNeeded, sendNativeNotification } from ".
 import { bumpGitStatus, setStore, store } from "./store";
 import { toast, confirmDialog } from "../components/ui";
 import { discoveredTuning, type AgentTuning } from "./agentMeta";
+import { disposeCachedTerminal } from "./terminalCache";
 import { layout } from "./layout";
 import { applyEntry, lastAssistant, reduceTranscript } from "./transcript";
 import type { SessionView } from "./transcript";
@@ -81,6 +84,9 @@ interface ChatState {
   composer: ComposerPrefs;
   /** Follow-ups typed while a turn was running, sent in order afterwards. */
   queued: Record<string, QueuedMessage[]>;
+  presentation: Record<string, "chat" | "cli">;
+  terminalBusy: Record<string, boolean>;
+  terminalViews: Record<string, string>;
   ready: boolean;
 }
 
@@ -109,8 +115,55 @@ export const [chat, setChat] = createStore<ChatState>({
   attention: {},
   composer: { ...DEFAULT_COMPOSER },
   queued: {},
+  presentation: {},
+  terminalBusy: {},
+  terminalViews: {},
   ready: false,
 });
+
+/** Presentation changes never copy or replace the conversation transcript. */
+export const conversationMode = () => chat.activeId ? chat.presentation[chat.activeId] ?? "chat" : "chat";
+export const conversationTerminal = () => chat.activeId ? chat.views[chat.activeId]?.runtime?.terminal_id : undefined;
+export const conversationTerminalView = () => conversationTerminal() ?? (chat.activeId ? chat.terminalViews[chat.activeId] : undefined);
+export const canResumeInTerminal = (id: string) => {
+  const session = chat.sessions.find((s) => s.id === id);
+  return !!session?.native_ids[session.agent_id] && ["claude", "codex", "cursor", "agy", "qwen", "opencode", "kimi"].includes(session.agent_id);
+};
+
+export async function setConversationMode(mode: "chat" | "cli") {
+  const id = chat.activeId;
+  if (!id) return;
+  setChat("presentation", id, mode);
+  if (mode !== "cli" || chat.views[id]?.runtime?.terminal_id || chat.terminalBusy[id]) return;
+  if (isRunning(id) || !canResumeInTerminal(id)) return;
+  setChat("terminalBusy", id, true);
+  try {
+    const terminal = await chatOpenTerminal(id);
+    const previous = chat.terminalViews[id];
+    if (previous && previous !== terminal) disposeCachedTerminal(previous);
+    setChat("terminalViews", id, terminal);
+    setChat("views", id, "runtime", await chatRuntimeState(id));
+  } catch (e) { toast(`Could not open CLI: ${String(e)}`, "error"); }
+  finally { setChat("terminalBusy", id, false); }
+}
+
+export async function endConversationTerminal() {
+  const id = chat.activeId;
+  const terminal = conversationTerminal();
+  if (!id || !terminal || chat.terminalBusy[id]) return;
+  if (!await confirmDialog("End the CLI process? Any running work will stop. Its saved native conversation remains available.", "End CLI")) return;
+  setChat("terminalBusy", id, true);
+  try {
+    await chatCloseTerminal(id);
+    disposeCachedTerminal(terminal);
+    setChat("terminalViews", produce((views) => { delete views[id]; }));
+    setChat("views", id, "runtime", await chatRuntimeState(id));
+    setChat("presentation", id, "chat");
+    setChat("terminalViews", produce((views) => { delete views[id]; }));
+    bumpGitStatus();
+  } catch (e) { toast(String(e), "error"); }
+  finally { setChat("terminalBusy", id, false); }
+}
 
 // ── Selectors ────────────────────────────────────────────────────────────────
 
@@ -259,6 +312,13 @@ function handleLiveEntry(id: string, entry: ChatEntry) {
   const loading = loadingEntries.get(id);
   if (loading) { loading.push(entry); return; }
   if (!chat.views[id]) return;
+  if (entry.kind === "event" && entry.event.type === "runtime_updated") {
+    const previous = chat.views[id]?.runtime?.terminal_id;
+    if (previous && previous !== entry.event.state.terminal_id) {
+      if (!chat.terminalBusy[id]) setChat("terminalViews", id, previous);
+      bumpGitStatus();
+    }
+  }
   const queue = pendingEntries.get(id);
   if (queue) queue.push(entry);
   else pendingEntries.set(id, [entry]);
@@ -610,6 +670,9 @@ export function setComposerAgent(agentId: string) {
 // ── Sending ──────────────────────────────────────────────────────────────────
 
 async function sendTurn(sessionId: string, text: string, attachments: Attachment[] = [], recoverContext = false): Promise<boolean> {
+  if (chat.terminalBusy[sessionId] || chat.views[sessionId]?.runtime?.terminal_id) {
+    toast("Exit the CLI before sending chat messages in this conversation.", "info"); return false;
+  }
   if (permissionUpdates().has(sessionId)) await new Promise<void>((resolve) => {
     createRoot((dispose) => createEffect(() => {
       if (!permissionUpdates().has(sessionId)) { dispose(); resolve(); }
@@ -832,9 +895,17 @@ export async function renameSession(id: string, title: string) {
   }
 }
 
+function forgetTerminalView(id: string) {
+  const terminal = chat.views[id]?.runtime?.terminal_id ?? chat.terminalViews[id];
+  if (terminal) disposeCachedTerminal(terminal);
+  setChat("terminalViews", produce((views) => { delete views[id]; }));
+  if (chat.views[id]?.runtime) setChat("views", id, "runtime", "terminal_id", null);
+}
+
 export async function archiveSession(id: string, archived: boolean) {
   try {
     const meta = await chatUpdateSession(id, { archived });
+    if (archived) forgetTerminalView(id);
     setChat("sessions", (s) => s.id === id, meta);
     if (archived && chat.activeId === id) startNewSession(meta.project_path);
   } catch (e) {
@@ -859,6 +930,7 @@ export async function clearSession(id: string) {
     const request = chatClearSession(id);
     // Animate only after the backend confirmed, so a refusal leaves the transcript intact.
     const result = await request;
+    forgetTerminalView(id);
     const archived = result.archived;
     const swap = () => {
       setChat("sessions", (s) => s.id === id, result.session);
@@ -878,12 +950,15 @@ export async function clearSession(id: string) {
 
 export async function deleteSession(id: string) {
   try {
+    const terminal = chat.views[id]?.runtime?.terminal_id ?? chat.terminalViews[id];
     await chatDeleteSession(id);
+    if (terminal) disposeCachedTerminal(terminal);
   } catch (e) {
     toast(String(e), "error");
     return;
   }
   unsubscribe(id);
+  setChat("terminalViews", produce((views) => { delete views[id]; }));
   const wasActive = chat.activeId === id;
   const project = chat.sessions.find((s) => s.id === id)?.project_path;
   setChat("sessions", (s) => s.filter((x) => x.id !== id));

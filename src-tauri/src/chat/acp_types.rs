@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 pub struct RuntimeState {
     pub connected: bool,
     #[serde(default)]
+    pub terminal_id: Option<String>,
+    #[serde(default)]
     pub active_turn_id: Option<String>,
     pub agent_id: String,
     pub native_session_id: Option<String>,

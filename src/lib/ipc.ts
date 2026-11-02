@@ -677,6 +677,7 @@ export type InteractionResponse =
   | { kind: "plan"; accepted: boolean; reason: string | null; cancelled?: boolean }
   | { kind: "url"; action: "accept" | "decline" | "cancel" };
 export interface AgentRuntimeState {
+  terminal_id?: string | null;
   connected: boolean; active_turn_id?: string | null; agent_id: string; native_session_id: string | null; agent_version: string | null;
   capabilities: Record<string, unknown> | null; config_options: AgentOption[];
   modes: { id: string; name: string; description?: string }[];
@@ -898,6 +899,8 @@ export const windowTitlebarDoubleClick = (): Promise<void> =>
 export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenFn> =>
   listen<string>("native-menu-command", (e) => cb(e.payload));
 
+export const chatOpenTerminal = (sessionId: string): Promise<string> => invoke("chat_open_terminal", { sessionId });
+export const chatCloseTerminal = (sessionId: string): Promise<void> => invoke("chat_close_terminal", { sessionId });
 export const chatDetachNative = (sessionId: string): Promise<void> => invoke("chat_detach_native", { sessionId });
 export const chatRuntimeState = (sessionId: string): Promise<AgentRuntimeState> => invoke("chat_runtime_state", { sessionId });
 export const chatSetMode = (sessionId: string, mode: PermissionMode, yolo: boolean): Promise<{ session: SessionMeta; runtime: AgentRuntimeState }> =>

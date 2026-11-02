@@ -1,6 +1,6 @@
 import { Menu, MenuItem, MenuLabel, useValueMotion, useSelectionMotion } from "../ui";
 import { Component, Show, createSignal } from "solid-js";
-import { activeSession, activeView, renameSession } from "../../lib/chat";
+import { activeSession, activeView, renameSession, conversationMode, setConversationMode } from "../../lib/chat";
 import { layout, openSide, toggleSidebar, toggleSide, type SideTab } from "../../lib/layout";
 import { store } from "../../lib/store";
 import BranchIndicator from "../BranchIndicator";
@@ -75,6 +75,12 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
       </div>
 
       <div class="session-header-actions">
+        <Show when={session()}>
+          <div class="conversation-mode" role="group" aria-label="Conversation view">
+            <button class="pane-toggle" classList={{ "pane-toggle-on": conversationMode() === "chat" }} aria-pressed={conversationMode() === "chat"} onClick={() => void setConversationMode("chat")}>Chat</button>
+            <button class="pane-toggle" classList={{ "pane-toggle-on": conversationMode() === "cli" }} aria-pressed={conversationMode() === "cli"} onClick={() => void setConversationMode("cli")} title="Use the agent's own terminal interface">CLI</button>
+          </div>
+        </Show>
         <Show when={project()}>
           <div class="session-header-branch"><BranchIndicator /></div>
         </Show>

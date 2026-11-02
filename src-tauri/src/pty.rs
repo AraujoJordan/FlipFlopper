@@ -35,6 +35,7 @@ pub struct PtySession {
 }
 
 /// Shared state owned by the UI; PTY operations lock this from the main thread.
+#[derive(Clone)]
 pub struct PtyManager {
     pub sessions: Arc<Mutex<HashMap<String, PtySession>>>,
 }
@@ -265,6 +266,27 @@ pub fn spawn_shell_command(
     Ok((session_id, rx))
 }
 
+/// Launch an agent directly, without interpolating native ids into a shell.
+pub fn spawn_agent_terminal(
+    manager: &PtyManager, binary: &str, args: &[String], cwd: &str,
+) -> Result<(String, mpsc::Receiver<PtyEvent>), String> {
+    let pair = native_pty_system().openpty(PtySize { rows: 24, cols: 100, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| format!("PTY open error: {e}"))?;
+    let mut command = CommandBuilder::new(binary);
+    command.args(args);
+    command.cwd(cwd);
+    command.env("PATH", augmented_path_string());
+    command.env("TERM", "xterm-256color");
+    let reader = pair.master.try_clone_reader().map_err(|e| format!("Reader error: {e}"))?;
+    let writer = pair.master.take_writer().map_err(|e| format!("Writer error: {e}"))?;
+    let child = pair.slave.spawn_command(command).map_err(|e| format!("Spawn error: {e}"))?;
+    let id = Uuid::new_v4().to_string();
+    let (tx, rx) = mpsc::channel();
+    manager.sessions.lock().unwrap().insert(id.clone(), PtySession { writer, master: pair.master, child });
+    spawn_reader_thread(reader, tx);
+    Ok((id, rx))
+}
+
 /// Spawn an interactive login shell (e.g. for a user-opened terminal tab),
 /// as opposed to `spawn_shell_command` which runs a one-off command via
 /// `sh -c` and exits when it completes. `cwd` overrides the shell's working
@@ -338,6 +360,27 @@ pub fn spawn_interactive_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_terminal_delivers_input_output_and_literal_arguments() {
+        let manager = PtyManager::new();
+        let (id, rx) = spawn_agent_terminal(&manager, "/bin/sh", &[
+            "-c".into(), "printf 'ARG:%s\\n' \"$1\"; read -r line; printf 'INPUT:%s\\n' \"$line\"".into(),
+            "--".into(), "native; not a command".into(),
+        ], "/tmp").unwrap();
+        send_input(&manager, &id, "hello\r").unwrap();
+        let mut output = String::new();
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap() {
+                PtyEvent::Data(data) => output.push_str(&data),
+                PtyEvent::Exit => break,
+            }
+        }
+        kill_session(&manager, &id).unwrap();
+        assert!(output.contains("ARG:native; not a command"), "{output}");
+        assert!(output.contains("INPUT:hello"), "{output}");
+    }
 
     /// Feed `input` to the decoder `chunk` bytes at a time, mimicking the
     /// reader thread's `read()` boundaries.
