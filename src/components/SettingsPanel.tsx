@@ -244,7 +244,7 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
               <div class="settings-row">
                 <div>
                   <div class="settings-row-title">Explain tab model</div>
-                  <div class="settings-row-hint">Writes the plain-language session summary. Auto uses the cheapest model of the session's agent.</div>
+                  <div class="settings-row-hint">Explains what changes for users. Auto uses the session's agent with a lightweight model when available, otherwise its configured default.</div>
                 </div>
                 <ExplainProviderSelect />
               </div>

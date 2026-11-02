@@ -19,7 +19,7 @@ export const ExplainProviderSelect: Component = () => {
   const change = (value: string) => { try { setExplainChoice(JSON.parse(value) as ExplainChoice); } catch { /* ignore */ } };
   return (
     <select class="explain-select" value={encode(effectiveChoice())} onChange={(e) => change(e.currentTarget.value)} title="Model that writes the explanation" aria-label="Explanation model">
-      <option value={encode({ kind: "auto" })}>Auto (cheapest model)</option>
+      <option value={encode({ kind: "auto" })}>Auto</option>
       <For each={headlessAgents()}>
         {(agent) => (
           <optgroup label={agent.name}>

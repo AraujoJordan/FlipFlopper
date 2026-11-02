@@ -5,7 +5,7 @@ import { chat } from "./chat";
 import { store } from "./store";
 import { readPref, writePref } from "./appPrefs";
 
-/** Where explanations come from. `auto` = the cheapest model of the session's agent. */
+/** Auto uses the session's agent with a lightweight alias when available, otherwise its CLI default. */
 export type ExplainChoice =
   | { kind: "auto" }
   | { kind: "agent"; agent_id: string; model: string | null }

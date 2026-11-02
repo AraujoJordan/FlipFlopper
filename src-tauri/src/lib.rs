@@ -985,7 +985,7 @@ async fn chat_explain(
         .iter()
         .map(|a| (a.id.to_string(), a.name.to_string()))
         .collect();
-    let digest = chat::store::digest_body(&entries, &names, chat::store::EXPLAIN_MAX_BYTES);
+    let digest = chat::store::explain_digest(&entries, &names);
     let pending = state.runtime_state(&session_id).pending;
     if digest.is_none() && pending.is_empty() {
         return Err("Nothing to explain yet.".to_string());

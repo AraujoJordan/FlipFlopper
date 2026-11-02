@@ -245,6 +245,18 @@ mod tests {
     use super::{cheapest_model, clean_explanation, find_agent, one_shot_output, parse_ollama_list, strip_ansi};
 
     #[test]
+    fn headless_codex_allows_scratch_directory_without_write_access() {
+        let prompt = "Explain this change.\nKeep it short.";
+        let command = super::headless_command(find_agent("codex").unwrap(), "codex", "scratch", prompt, Some("selected-model")).unwrap();
+        let args: Vec<_> = command.as_std().get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "-m", "selected-model", prompt]);
+        assert_eq!(command.as_std().get_current_dir(), Some(std::path::Path::new("scratch")));
+        let claude = super::headless_command(find_agent("claude").unwrap(), "claude", "scratch", prompt, None).unwrap();
+        let args: Vec<_> = claude.as_std().get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["-p", prompt]);
+    }
+
+    #[test]
     fn cursor_uses_unambiguous_binary() {
         let cursor = find_agent("cursor").unwrap();
         assert_eq!(cursor.binary, "cursor-agent");
@@ -335,6 +347,7 @@ mod tests {
     #[test]
     fn cheapest_models() {
         assert_eq!(cheapest_model("claude"), Some("haiku"));
+        assert_eq!(cheapest_model("codex"), None);
         assert_eq!(cheapest_model("cursor"), None);
     }
 }
@@ -353,7 +366,6 @@ fn model_flag(agent_id: &str) -> Option<&'static str> {
 pub fn cheapest_model(agent_id: &str) -> Option<&'static str> {
     match agent_id {
         "claude" => Some("haiku"),
-        "codex" => Some("gpt-5.1-codex-mini"),
         _ => None,
     }
 }
@@ -678,9 +690,6 @@ pub async fn run_headless_with_model(
     prompt: &str,
     model: Option<&str>,
 ) -> Result<String, String> {
-    let headless_args = def
-        .headless_args
-        .ok_or_else(|| format!("Agent '{}' has no non-interactive mode.", def.name))?;
     let binary = launch_binary(def).ok_or_else(|| {
         format!(
             "Agent '{}' binary not found on PATH. Install it first.",
@@ -688,17 +697,7 @@ pub async fn run_headless_with_model(
         )
     })?;
 
-    let mut cmd = tokio::process::Command::new(&binary);
-    cmd.args(headless_args);
-    if let (Some(flag), Some(model)) = (model_flag(def.id), model.filter(|m| !m.trim().is_empty())) {
-        cmd.arg(flag).arg(model);
-    }
-    cmd.arg(prompt)
-        .current_dir(project_path)
-        .env("PATH", augmented_path_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+    let mut cmd = headless_command(def, &binary, project_path, prompt, model)?;
 
     let child = cmd
         .spawn()
@@ -712,4 +711,33 @@ pub async fn run_headless_with_model(
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     one_shot_output(output.status.success(), stdout, stderr, format!("{} produced no output.", def.name))
+}
+
+fn headless_command(
+    def: &AgentDef,
+    binary: &str,
+    project_path: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<tokio::process::Command, String> {
+    let headless_args = def.headless_args
+        .ok_or_else(|| format!("Agent '{}' has no non-interactive mode.", def.name))?;
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.args(headless_args);
+    if def.id == "codex" {
+        // Explain runs outside a repository. These one-shot helpers only need
+        // a text answer; allowing a non-Git cwd must not grant write access.
+        cmd.args(["--skip-git-repo-check", "--sandbox", "read-only"]);
+    }
+    if let (Some(flag), Some(model)) = (model_flag(def.id), model.filter(|m| !m.trim().is_empty())) {
+        cmd.arg(flag).arg(model);
+    }
+    cmd.arg(prompt)
+        .current_dir(project_path)
+        .env("PATH", augmented_path_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    Ok(cmd)
 }
