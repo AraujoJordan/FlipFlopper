@@ -354,6 +354,7 @@ const App: Component = () => {
         </div>
 
       <main ref={mainElement} class="main-col">
+        <div class="native-window-space main-native-space" data-window-header aria-hidden="true" />
         <div ref={mainBody} class="main-body">
           <section class="center-col">
             <SessionHeader changeCount={gitChangedCount()} />

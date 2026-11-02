@@ -2,11 +2,47 @@
 // mocked; no DOM, provider login or additional test framework is required.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { SourceTextModule, SyntheticModule } from "node:vm";
+import { existsSync, readFileSync } from "node:fs";
+import { SourceTextModule, SyntheticModule, runInNewContext } from "node:vm";
 import ts from "typescript";
 import * as solid from "solid-js";
 import * as solidStore from "solid-js/store";
+
+const claudeHelper = new URL("../src-tauri/agent-runtime/node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js", import.meta.url);
+test("prepared Claude helper resolves advisor results and only dispatches client tools", {
+  skip: !existsSync(claudeHelper) && "Run npm run prepare:agents to test the bundled helper",
+}, async () => {
+  const helper = readFileSync(claudeHelper, "utf8");
+  const start = helper.indexOf("const MAX_DISPATCHED_TOOL_CALLS =");
+  const end = helper.indexOf("const MAX_REACHED_TOOL_USES =", start);
+  assert.ok(start >= 0 && end > start);
+  const record = runInNewContext(helper.slice(start, end) + "; recordDispatchedToolUses");
+  const session = {};
+  record(session, [
+    { type: "server_tool_use", id: "server" },
+    { type: "tool_use", id: "local" },
+    { type: "mcp_tool_use", id: "mcp" },
+  ]);
+  assert.deepEqual([...session.dispatchedToolCalls], ["local", "mcp"]);
+
+  const { toAcpNotifications } = await import(claudeHelper.href);
+  for (const [content, status, expected] of [
+    [{ type: "advisor_result", text: "Advice" }, "completed", "Advice"],
+    [{ type: "advisor_redacted_result", data: "secret-ciphertext" }, "completed", "Advisor guidance applied server-side."],
+    [{ type: "advisor_tool_result_error", error_code: "unavailable" }, "failed", "Advisor error: unavailable"],
+  ]) {
+    const cache = {};
+    const options = { emittedToolCalls: new Set(["server"]) };
+    const notify = (blocks) => toAcpNotifications(blocks, "assistant", "test", cache, {}, console, options);
+    notify([{ type: "server_tool_use", id: "server", name: "advisor", input: {} }]);
+    const updates = notify([{ type: "advisor_tool_result", tool_use_id: "server", content }]);
+    assert.equal(updates[0].update.status, status);
+    assert.equal(updates[0].update.rawOutput, expected);
+    assert.equal(options.emittedToolCalls.size, 0);
+    assert.equal(cache.server, undefined);
+    assert.ok(!JSON.stringify(updates).includes("secret-ciphertext"));
+  }
+});
 
 const source = ts.transpileModule(readFileSync(new URL("../src/lib/chat.ts", import.meta.url), "utf8"), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },

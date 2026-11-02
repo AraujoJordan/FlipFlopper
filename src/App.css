@@ -1257,9 +1257,18 @@ input, textarea {
    dimensions even when interface zoom changes; other platforms keep OS chrome. */
 .native-window-space { display: none; }
 .app-macos:not(.app-native-fullscreen) .native-window-space { display: block; height: var(--native-title-height); flex: 0 0 var(--native-title-height); }
+/* Without a docked sidebar the controls would straddle the 8px frame and the
+   panel's rounded corner. Reserve a frame-coloured row above the panels (their
+   top edge lands on the title-bar height) so the controls sit on plain
+   background, as they do over the docked sidebar. */
+.app-macos:not(.app-native-fullscreen) .native-window-space.main-native-space { display: none; }
+.app-macos:not(.app-native-fullscreen):not(.app-sidebar-docked) .native-window-space.main-native-space {
+  display: block;
+  height: calc(var(--native-title-height) - var(--panel-inset));
+  flex-basis: calc(var(--native-title-height) - var(--panel-inset));
+}
 .app-macos :is(.session-header, .side-pane-head) { user-select: none; }
 .app-macos:not(.app-native-fullscreen) :is(.session-header, .side-pane-head) { min-height: var(--native-title-height); }
-.app-macos:not(.app-native-fullscreen):not(.app-sidebar-docked) .session-header,
 .app-macos:not(.app-native-fullscreen):not(.app-sidebar-docked) .side-pane-overlay .side-pane-head { padding-left: var(--native-controls-width); }
 
 /* ── Sidebar ── */

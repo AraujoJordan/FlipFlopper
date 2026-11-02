@@ -63,6 +63,10 @@ Currently implemented:
   Claude's typed `incomplete_tool_call` failure ends the turn with an error but
   retains the native connection for an explicit follow-up; never automatically
   replay that prompt because the unfinished tool may already have run.
+  `prepare-agents.mjs` backports advisor-result handling and excludes server
+  tools from local dispatch tracking in the pinned helper (upstream #1247/#1486),
+  preventing false `incomplete_tool_call` failures. Reassess these guarded
+  backports when updating the helper; `test:chat` covers the prepared runtime.
 - The ACP client opts in to Claude's `session.notices`, `session.compaction` and
   `subagents` capabilities. They become additive `notice`, `compaction`,
   `subagent` and `subagent_tool` events (subagent tool calls render inside the

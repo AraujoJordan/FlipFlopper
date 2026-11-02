@@ -31,6 +31,46 @@ if (!existsSync(marker) || readFileSync(marker, "utf8") !== fingerprint) {
   writeFileSync(marker, fingerprint);
 }
 
+// Backport advisor result handling (upstream PR #1247) and server-tool
+// dispatch classification (#1486) to our pinned 0.94.0 helper. Never suppress
+// incomplete results for client tools: those tools may already have run.
+const helper = join(runtime, "node_modules", "@agentclientprotocol", "claude-agent-acp", "dist", "acp-agent.js");
+const helperVersion = JSON.parse(readFileSync(join(dirname(dirname(helper)), "package.json"), "utf8")).version;
+if (helperVersion !== "0.94.0") throw new Error("Reassess Claude advisor backports before updating the helper.");
+let helperSource = readFileSync(helper, "utf8");
+function backport(before, after) {
+  if (helperSource.includes(after)) return;
+  if (helperSource.split(before).length !== 2) throw new Error("Claude advisor backport no longer matches the pinned helper.");
+  helperSource = helperSource.replace(before, after);
+}
+backport(
+  'if (isToolUseBlock(block))\n            recordDispatchedToolCall(session, block.id);',
+  'if (isToolUseBlock(block) && block.type !== "server_tool_use")\n            recordDispatchedToolCall(session, block.id);',
+);
+backport(
+  '            case "advisor_tool_result":\n            case "fallback":',
+  '            case "fallback": // Advisor results are resolved above.',
+);
+backport(
+  '            case "tool_result":\n            case "tool_search_tool_result":',
+  `            case "advisor_tool_result": {
+                const result = chunk.content;
+                unregisterHookCallback(chunk.tool_use_id);
+                output.push(...toAcpNotifications([{
+                    type: "tool_result",
+                    tool_use_id: chunk.tool_use_id,
+                    is_error: result.type === "advisor_tool_result_error",
+                    content: result.type === "advisor_result" ? result.text
+                        : result.type === "advisor_redacted_result" ? "Advisor guidance applied server-side."
+                        : \`Advisor error: \${result.error_code}\`,
+                }], role, sessionId, toolUseCache, client, logger, options));
+                break;
+            }
+            case "tool_result":
+            case "tool_search_tool_result":`,
+);
+writeFileSync(helper, helperSource);
+
 async function fetchWithRetry(url, asBuffer = false, expectedSha256 = undefined) {
   let lastError;
   for (let attempt = 1; attempt <= 4; attempt++) {
