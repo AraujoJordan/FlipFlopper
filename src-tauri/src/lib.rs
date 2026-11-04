@@ -220,7 +220,7 @@ fn bridge_pty_with_url(
                     let _ = app.emit_to(&window_label, &format!("pty://{session_id}"), data);
                 }
                 PtyEvent::Exit => {
-                    if let Some(owner) = app.state::<std::sync::Arc<chat::ChatManager>>().terminal_exited(&session_id) {
+                    if let Some(owner) = app.state::<std::sync::Arc<chat::ChatManager>>().terminal_exited(&session_id, chat_emitter(&app)) {
                         emit_terminal_state(&app, &owner);
                     }
                     if let Some(urls) = app.try_state::<SessionUrls>() {
@@ -971,6 +971,27 @@ struct ExplainResult {
     source: String,
 }
 
+async fn run_explain_prompt(provider: ExplainProvider, prompt: &str) -> Result<ExplainResult, String> {
+    match provider {
+        ExplainProvider::Agent { agent_id, model } => {
+            let def = agents::find_agent(&agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
+            let model = model.filter(|m| !m.trim().is_empty()).or_else(|| agents::cheapest_model(&agent_id).map(str::to_string));
+            let scratch = chat::store::explain_scratch_dir();
+            let text = agents::run_headless_with_model(def, &scratch.to_string_lossy(), prompt, model.as_deref()).await?;
+            let text = agents::clean_explanation(&text);
+            let source = match &model {
+                Some(m) => format!("{} · {m}", def.name),
+                None => def.name.to_string(),
+            };
+            Ok(ExplainResult { text, source })
+        }
+        ExplainProvider::Ollama { model } => {
+            let text = agents::clean_explanation(&agents::run_ollama(&model, prompt).await?);
+            Ok(ExplainResult { text, source: format!("Ollama · {model}") })
+        }
+    }
+}
+
 /// Explain a session (and any open agent question) in plain ASD-STE100 text,
 /// using a cheap headless agent model or a local Ollama model.
 #[tauri::command]
@@ -994,23 +1015,35 @@ async fn chat_explain(
         return Err("Nothing to explain yet.".to_string());
     }
     let prompt = chat::store::build_explain_prompt(digest.as_deref(), &pending, language.trim());
-    match provider {
-        ExplainProvider::Agent { agent_id, model } => {
-            let def = agents::find_agent(&agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
-            let model = model.filter(|m| !m.trim().is_empty()).or_else(|| agents::cheapest_model(&agent_id).map(str::to_string));
-            let scratch = chat::store::explain_scratch_dir();
-            let text = agents::run_headless_with_model(def, &scratch.to_string_lossy(), &prompt, model.as_deref()).await?;
-            let text = agents::clean_explanation(&text);
-            let source = match &model {
-                Some(m) => format!("{} · {m}", def.name),
-                None => def.name.to_string(),
-            };
-            Ok(ExplainResult { text, source })
-        }
-        ExplainProvider::Ollama { model } => {
-            let text = agents::clean_explanation(&agents::run_ollama(&model, &prompt).await?);
-            Ok(ExplainResult { text, source: format!("Ollama · {model}") })
-        }
+    run_explain_prompt(provider, &prompt).await
+}
+
+#[tauri::command]
+async fn chat_generate_session_title(
+    state: State<'_, std::sync::Arc<chat::ChatManager>>,
+    session_id: String,
+    provider: ExplainProvider,
+    language: String,
+) -> Result<String, String> {
+    if chat::store::get_session(&session_id).is_none() {
+        return Err("Session not found.".to_string());
+    }
+    let entries = chat::store::load_entries(&session_id);
+    let names: std::collections::HashMap<String, String> = agents::AGENTS
+        .iter()
+        .map(|a| (a.id.to_string(), a.name.to_string()))
+        .collect();
+    let digest = chat::store::explain_digest(&entries, &names);
+    let pending = state.runtime_state(&session_id).pending;
+    if digest.is_none() && pending.is_empty() {
+        return Err("Nothing to name yet.".to_string());
+    }
+    let prompt = chat::store::build_session_title_prompt(digest.as_deref(), &pending, language.trim());
+    let title = agents::clean_session_title(&run_explain_prompt(provider, &prompt).await?.text);
+    if title.is_empty() {
+        Err("The model did not return a session title.".to_string())
+    } else {
+        Ok(title)
     }
 }
 
@@ -1486,17 +1519,17 @@ async fn chat_send(
     args: chat::SendArgs,
 ) -> Result<String, String> {
     let manager = state.inner().clone();
-    let emit: chat::Emitter = std::sync::Arc::new(move |session_id, entry| {
-        let _ = app.emit(&format!("chat://{session_id}"), entry);
-    });
+    let emit = chat_emitter(&app);
     run_blocking(move || manager.send(emit, args)).await?
 }
 
 #[tauri::command]
 fn chat_cancel(app: tauri::AppHandle, state: State<'_, std::sync::Arc<chat::ChatManager>>, session_id: String, force: Option<bool>) {
-    state.cancel(&session_id);
+    if let Some(terminal) = state.cancel(&session_id) {
+        state.sync_terminal(&session_id, terminal, chat_emitter(&app));
+    }
     // Checkout removal/merge cannot wait for a cooperative protocol cancel.
-    if force==Some(true){state.close_terminal(&session_id);state.native.close_session(&session_id);}
+    if force==Some(true){state.close_terminal(&session_id, chat_emitter(&app));state.native.close_session(&session_id);}
     emit_terminal_state(&app, &session_id);
 }
 
@@ -1521,9 +1554,16 @@ async fn chat_open_terminal(app: tauri::AppHandle, session_id: String) -> Result
 async fn chat_close_terminal(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
     let close_app = app.clone();
     let owner = session_id.clone();
-    run_blocking(move || close_app.state::<std::sync::Arc<chat::ChatManager>>().close_terminal(&owner)).await?;
+    run_blocking(move || close_app.state::<std::sync::Arc<chat::ChatManager>>().close_terminal(&owner, chat_emitter(&close_app))).await?;
     emit_terminal_state(&app, &session_id);
     Ok(())
+}
+
+fn chat_emitter(app: &tauri::AppHandle) -> chat::Emitter {
+    let app = app.clone();
+    std::sync::Arc::new(move |session_id, entry| {
+        let _ = app.emit(&format!("chat://{session_id}"), entry);
+    })
 }
 
 fn emit_terminal_state(app: &tauri::AppHandle, session_id: &str) {
@@ -1580,7 +1620,9 @@ async fn chat_update_session(
         let operation = manager.session_operation(&session_id);
         let _update = operation.lock().unwrap();
         if patch.archived == Some(true) || patch.cwd.is_some() || patch.worktree.is_some() {
-            manager.cancel(&session_id);
+            if let Some(terminal) = manager.cancel(&session_id) {
+                manager.sync_terminal(&session_id, terminal, chat_emitter(&app));
+            }
             manager.native.close_session(&session_id);
             emit_terminal_state(&app, &session_id);
         }
@@ -2135,6 +2177,7 @@ pub fn run() {
             remove_worktree,
             generate_worktree_commit_message,
             chat_explain,
+            chat_generate_session_title,
             list_ollama_models,
             list_agent_models,
             // Tools

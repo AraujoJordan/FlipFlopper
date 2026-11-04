@@ -57,7 +57,7 @@ async function loadChat(overrides = {}) {
   globalThis.requestAnimationFrame = () => 1;
   globalThis.cancelAnimationFrame = () => {};
   const transcript = overrides["./transcript"] ?? await loadFrontend("../src/lib/transcript.ts", {});
-  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { discoveredTuning: () => ({ models: [], efforts: [] }) }, "./store": { store: {} }, "./layout": { layout: {projectNames:{},projectOrder:[],hiddenProjects:[]} }, "./transcript": transcript, ...overrides };
+  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { discoveredTuning: () => ({ models: [], efforts: [] }) }, "./store": { store: { agents: [{ id: "claude", installed: true }] } }, "./layout": { layout: {projectNames:{},projectOrder:[],hiddenProjects:[]} }, "./transcript": transcript, ...overrides };
   const module = new SourceTextModule(source);
   await module.link((specifier) => {
     const names = imports.get(specifier);
@@ -154,6 +154,34 @@ test("CLI presentation reuses the native terminal and preserves the transcript",
   module.setChat("activeId", null);
   assert.equal(module.conversationMode(), "chat");
 });
+
+test("CLI can create a fresh session before the first chat turn", async () => {
+  const meta = { id: "fresh", project_path: "/project", cwd: "/project", agent_id: "claude", native_ids: {}, mode: "auto_edit", yolo: false };
+  let opens = 0, created;
+  const module = await loadChat({
+    "./store": { store: { agents: [{ id: "claude", installed: true }], currentProject: { path: "/project" } }, setStore() {} },
+    "./appPrefs": { writePref() {} },
+    "./ipc": {
+      chatCreateSession: async () => meta,
+      onChatEntry: async () => () => {},
+      chatOpenTerminal: async () => { opens++; return "pty"; },
+      chatRuntimeState: async () => ({ ...runtime(), active_turn_id: null, terminal_id: "pty" }),
+    },
+  });
+  const off = module.onCliSessionCreated((id) => { created = id; });
+  module.setChat("draftProject", "/project");
+  await module.setConversationMode("cli");
+  off();
+  assert.equal(created, "fresh");
+  assert.equal(module.chat.activeId, "fresh");
+  assert.equal(module.conversationTerminal(), "pty");
+  assert.equal(opens, 1);
+  await module.setConversationMode("chat");
+  assert.equal(module.conversationTerminal(), "pty");
+  await module.setConversationMode("cli");
+  assert.equal(opens, 1);
+});
+
 test("request resolution and turn completion do not replay or duplicate tools", async () => {
   const chat = await loadChat(), entries = waiting();
   entries.push(
@@ -216,6 +244,24 @@ test("model, effort and command pickers use the active provider catalog", async 
   assert.equal(chat.nativeCommands()[0].name, "native-command");
   chat.setChat("composer", "agentId", "cursor");
   assert.equal(chat.nativeCommands().length, 0);
+});
+
+test("Cursor merges its complete CLI model catalog with native options", async () => {
+  const chat = await loadChat({ "./agentMeta": { discoveredTuning: () => ({ models: [
+    { id: "cli-only-a", label: "CLI A" },
+    { id: "native-model", label: "Duplicate native id" },
+    { id: "cli-only-b", label: "CLI B" },
+  ], efforts: [] }) } });
+  const state = { ...runtime(), agent_id: "cursor", config_options: [
+    { id: "model", category: "model", options: [{ value: "native-model", name: "Native model" }] },
+    { id: "effort", category: "thought_level", options: [{ value: "high", name: "High" }] },
+  ] };
+  chat.setChat("views", "s", { messages: [], loaded: true, running: false, runtime: state });
+  chat.setChat("activeId", "s");
+  const tuning = chat.agentTuning("cursor");
+  assert.deepEqual(tuning.models.map((model) => model.id), ["native-model", "cli-only-a", "cli-only-b"]);
+  assert.equal(tuning.models[0].label, "Native model");
+  assert.equal(tuning.efforts[0].id, "high");
 });
 
 
@@ -1028,7 +1074,7 @@ async function composerFixture(activeId = 's') {
   const module = await loadFrontend('../src/components/chat/Composer.tsx', {
     'solid-js': { ...solid, createSignal: (...args) => { const signal=solid.createSignal(...args); signals.push(signal); return signal; } },
     '../../lib/chat': {
-      chat, isRunning: () => false, cycleMode() {}, modeAvailable: () => true, splitMode: (mode, yolo) => ({ mode, yolo: !!yolo }), permissionModeUpdating: () => false, sessionModePending: () => false,
+      chat, isRunning: () => false, cycleMode() {}, modeAvailable: () => true, splitMode: (mode, yolo) => ({ mode, yolo: !!yolo }), permissionModeUpdating: () => false, sessionModePending: () => false, onCliSessionCreated: () => () => {},
       setYolo: (v) => { yoloCalls.push(v); setChat('composer', 'yolo', v); },
       agentTuning: () => ({ models:[], efforts:[] }), nativeCommands: () => [], contextUsage: () => undefined,
       submitPrompt: (...args) => { submissions.push(args); return new Promise((done) => { resolve=done; }); },

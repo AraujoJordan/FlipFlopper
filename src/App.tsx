@@ -18,7 +18,7 @@ import {
   syncNativeMenuState,
   type NativeMenuState,
 } from "./lib/ipc";
-import { cancelTurn, chat, initChat, isRunning, setYolo, startNewSession, conversationMode, conversationTerminal, conversationTerminalView, setConversationMode, endConversationTerminal, canResumeInTerminal } from "./lib/chat";
+import { cancelTurn, chat, initChat, isRunning, setYolo, startNewSession, conversationMode, conversationTerminal, conversationTerminalView, conversationTerminalBusy, setConversationMode, endConversationTerminal, canOpenInTerminal } from "./lib/chat";
 import { PANEL_INSET, PANEL_GAP, hydrateLayout, watchMotionPreferences, watchLayoutSizes, paneIsOverlay, sidebarIsOverlay, renderedSidebarWidth, layout, openSide, resetZoom, setLayout, setSidebarWidth, stepZoom, toggleSide, toggleSidebar } from "./lib/layout";
 import { openProjectPath, forgetRecentProject, pickAndOpenProject, projectCreated } from "./lib/projects";
 import { watchNativeAppearance, isMacDesktop, handleWindowHeaderMouseDown, handleWindowHeaderDoubleClick } from "./lib/native";
@@ -56,6 +56,11 @@ const ProjectPicker = lazy(() => import("./components/ProjectPicker"));
 const NewProjectWizard = lazy(() => import("./components/NewProjectWizard"));
 const SettingsPanel = lazy(() => import("./components/SettingsPanel"));
 const UpdateDialog = lazy(() => import("./components/UpdateDialog"));
+
+const cliHistorySynced = () => {
+  const agent = chat.sessions.find((session) => session.id === chat.activeId)?.agent_id ?? chat.composer.agentId;
+  return ["claude", "codex", "cursor", "agy", "qwen", "opencode", "kimi", "droid"].includes(agent);
+};
 
 const App: Component = () => {
   const win = getCurrentWindow();
@@ -380,7 +385,7 @@ const App: Component = () => {
                   <Composer onOpenProjects={() => setPickerOpen(true)} />
                 </div>
                 <Show when={conversationTerminal()}>
-                  <div class="conversation-cli-note">The CLI is active. Exit it to send chat messages.
+                  <div class="conversation-cli-note">The CLI is still running in the background. End it to send chat messages.
                     <button class="ui-btn ui-btn-outline" onClick={() => void setConversationMode("cli")}>Show CLI</button>
                     <button class="ui-btn ui-btn-outline" onClick={() => void endConversationTerminal()}>End CLI</button>
                   </div>
@@ -388,16 +393,16 @@ const App: Component = () => {
               </div>
               <div ref={cliSurface} class="conversation-surface" style={{ display: cliPresent() ? "flex" : "none" }}>
                 <div class="conversation-cli-note">
-                  <span>Resumes this agent's saved conversation. CLI messages stay in native history and are not mirrored in Chat. CLI permissions apply.</span>
+                  <span>The agent's native interface stays running while you switch views. {cliHistorySynced() ? "CLI activity is added to Chat when the CLI exits." : "CLI messages remain in native history and are not mirrored in Chat."}</span>
                   <Show when={conversationTerminal()}><button class="ui-btn ui-btn-outline" onClick={() => void endConversationTerminal()}>End CLI</button></Show>
-                  <Show when={!conversationTerminal() && conversationTerminalView()}><button class="ui-btn ui-btn-outline" disabled={!!chat.activeId && chat.terminalBusy[chat.activeId]} onClick={() => void setConversationMode("cli")}>Resume CLI</button></Show>
+                  <Show when={!conversationTerminal() && conversationTerminalView()}><button class="ui-btn ui-btn-outline" disabled={conversationTerminalBusy()} onClick={() => void setConversationMode("cli")}>Resume CLI</button></Show>
                 </div>
                 <div class="conversation-cli-body">
                   <Show when={conversationTerminalView()} keyed fallback={
                     <div class="pane-empty">
                       <Icon name="terminal" size={28} />
-                      <p>{chat.activeId && chat.terminalBusy[chat.activeId] ? "Opening CLI…" : chat.activeId && isRunning(chat.activeId) ? "Finish or stop the chat turn before opening CLI mode." : chat.activeId && canResumeInTerminal(chat.activeId) ? "CLI is not running. Resume the saved conversation when ready." : "CLI mode needs a saved conversation from a supported agent. Send a chat message first."}</p>
-                      <button class="ui-btn ui-btn-outline" disabled={!chat.activeId || !canResumeInTerminal(chat.activeId) || isRunning(chat.activeId) || chat.terminalBusy[chat.activeId]} onClick={() => void setConversationMode("cli")}>Open CLI</button>
+                      <p>{conversationTerminalBusy() ? "Opening CLI…" : chat.activeId && isRunning(chat.activeId) ? "Finish or stop the chat turn before opening CLI mode." : chat.activeId && !canOpenInTerminal(chat.activeId) ? "Install the selected agent to use its CLI." : !chat.activeId && !(chat.draftProject ?? store.currentProject) ? "Choose a project to open the selected agent CLI." : "Open the agent CLI. Its screen and scrollback stay here while you switch to Chat."}</p>
+                      <button class="ui-btn ui-btn-outline" disabled={conversationTerminalBusy() || (!!chat.activeId && (!canOpenInTerminal(chat.activeId) || isRunning(chat.activeId))) || (!chat.activeId && !(chat.draftProject ?? store.currentProject))} onClick={() => void setConversationMode("cli")}>Open CLI</button>
                     </div>
                   }>{(id) => <ConversationTerminal sessionId={id} active={conversationMode() === "cli"} />}</Show>
                 </div>

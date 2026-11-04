@@ -362,6 +362,8 @@ export interface ExplainResult { text: string; source: string }
 
 export const chatExplain = (sessionId: string, provider: ExplainProvider, language: string): Promise<ExplainResult> =>
   invoke("chat_explain", { sessionId, provider, language });
+export const chatGenerateSessionTitle = (sessionId: string, provider: ExplainProvider, language: string): Promise<string> =>
+  invoke("chat_generate_session_title", { sessionId, provider, language });
 export const listOllamaModels = (): Promise<string[]> => invoke("list_ollama_models");
 export interface AgentModelChoice { id: string; label: string; efforts: string[] }
 export const listAgentModels = (agentId: string): Promise<AgentModelChoice[]> => invoke("list_agent_models", { agentId });

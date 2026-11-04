@@ -76,24 +76,34 @@ Currently implemented:
   (`SessionMeta.title_locked`). The composer shows a context ring from
   `context_usage`; clicking it runs `/agent:compact`.
 - Native model/effort/command catalogs come from the connected agent, including
-  model-dependent option updates. `/agent:<command>` distinguishes native
-  commands from local app actions. Images up to 20 MiB use structured ACP image
-  blocks when supported; other attachments remain accessible by prompt paths.
-- Headless agents' model lists are never bundled: opening the model picker runs `list_agent_models` (`agents::fetch_agent_models`: codex, opencode, grok, agy, droid, kimi, plus qwen's `modelProviders`) and persists the answer in `preferences.json`. Aider and unlisted CLIs rely on the custom model ID field.
+  model-dependent option updates. Cursor merges ACP options with the complete
+  `cursor-agent models` catalog, deduplicated by id. `/agent:<command>` distinguishes
+  native commands from local app actions. Images up to 20 MiB use structured ACP
+  image blocks when supported; other attachments remain accessible by prompt paths.
+- Headless agents' model lists are never bundled: opening the model picker runs `list_agent_models` (`agents::fetch_agent_models`: codex, opencode, grok, agy, droid, kimi, cursor, plus qwen's `modelProviders`) and persists the answer in `preferences.json`. Aider and unlisted CLIs rely on the custom model ID field.
 - `/clear` resets the session in place (empty transcript and title, new native context) and archives the previous transcript as a `(cleared)` session; typed local `/commands` run on Enter instead of being sent.
 - Sessions sidebar grouped by project; transcript with markdown, collapsible
   tool rows and inline diffs; composer with `@` mentions, `/` commands and
   skills, queued follow-ups, agent/model/effort and permission pickers, and a
   Local/Worktree toggle.
 - The middle panel has retained Chat/CLI presentations with shared motion helpers.
-  CLI resumes an existing native conversation for Claude, Codex, Cursor, agy,
-  Qwen, OpenCode and Kimi, launched directly in the effective session cwd.
-  `ChatManager` owns the PTY handoff under the session operation lock; chat sends
-  and clearing are blocked while the CLI owns the conversation. Switching views
-  preserves the live CLI; exiting or End CLI releases ownership. Native history
-  survives, but CLI messages are not mirrored into FlipFlopper's JSONL transcript
-  (so cross-agent digests and Explain do not include those messages). Native CLI
-  permissions/settings apply. `runtime.terminal_id` restores ownership on reload.
+  The switcher is always available and names the selected agent. Opening CLI on
+  the new-session screen creates the session (honoring Local/Worktree) and starts
+  a fresh agent; sessions with a native id resume it for Claude, Codex, Cursor,
+  agy, Qwen, OpenCode, Kimi and Droid (interactive Droid uses `-r`). Both launch
+  directly in the effective session cwd. `ChatManager` owns the PTY handoff under
+  the session operation lock; chat sends and clearing are blocked while the CLI
+  owns the conversation. Switching views preserves the live CLI, its scrollback
+  and composer drafts; exiting or End CLI releases ownership. Claude/Codex use
+  append-only JSONL line checkpoints. Cursor, agy, Qwen, Kimi and Droid reconcile
+  normalized native JSONL snapshots so rewrites do not duplicate old entries;
+  OpenCode uses its official `session list`/`export` commands rather than reading
+  its mutable database. All seven save fresh `native_ids` and emit only new CLI
+  entries into Chat after exit; changed pre-checkpoint snapshots are skipped.
+  Native titles rename unlocked sessions in the sidebar/header, while
+  `title_locked` preserves manual names; agents without a title use the first
+  imported prompt. Native CLI permissions/settings apply. `runtime.terminal_id` restores ownership
+  on reload.
   The side-terminal resume button routes through this same handoff.
 - Side pane with Changes (git status/sync/history over the existing git
   backend, diffs via `DiffPane`), Preview (Run targets + iframe of the

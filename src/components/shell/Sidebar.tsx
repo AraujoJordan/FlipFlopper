@@ -3,7 +3,7 @@ import { Portal } from "solid-js/web";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   archiveSession, chat, deleteSession, isRunning, pendingInputCount, navBack, navForward, navState, nestSessions, pinSession,
-  projectName, renameSession, selectSession, sessionGroups, sessionProjects, startNewSession,
+  projectName, projectSessionStatus, renameSession, selectSession, sessionGroups, sessionProjects, startNewSession,
 } from "../../lib/chat";
 import { removeWorktree, type SessionMeta } from "../../lib/ipc";
 import { cycleTheme, layout, sidebarIsOverlay, moveSidebarProject, setProjectDisplayName, setProjectFilter, setSidebarGroup, toggleSidebar } from "../../lib/layout";
@@ -132,6 +132,36 @@ const SessionRow: Component<{
       </Show>
       <span class="session-row-time">{ago(props.session.updated_at)}</span>
     </div>
+  );
+};
+
+const ProjectStatus: Component<{ path: string }> = (props) => {
+  const status = () => projectSessionStatus(props.path);
+  const summary = () => {
+    const value = status();
+    const parts: string[] = [];
+    if (value.waiting) parts.push(`${value.waiting} need${value.waiting === 1 ? "s" : ""} input`);
+    const active = Math.max(0, value.running - value.waiting);
+    if (active) parts.push(`${active} running`);
+    if (value.failed) parts.push(`${value.failed} failed`);
+    if (value.unread) parts.push(`${value.unread} finished`);
+    if (!parts.length) return value.total ? "Idle" : "No sessions yet";
+    return parts.join(" · ");
+  };
+  const tone = () => {
+    const value = status();
+    if (value.waiting) return "waiting";
+    if (value.failed) return "failed";
+    if (value.running) return "running";
+    if (value.unread) return "unread";
+    return "idle";
+  };
+  return (
+    <span class="project-status" data-tone={tone()} title={summary()}>
+      <span class="project-status-dot" />
+      <span class="project-status-text">{summary()}</span>
+      <span class="project-status-count">{status().total} session{status().total === 1 ? "" : "s"}</span>
+    </span>
   );
 };
 
@@ -356,7 +386,7 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
           <For each={groups()}>
             {(group) => (
               <section class="session-group" data-project-path={group.projectPath}
-                classList={{ "project-dragging": drag()?.path === group.projectPath && !!group.projectPath, "project-drop-before": drop()?.path === group.projectPath && drop()?.position === "before", "project-drop-after": drop()?.path === group.projectPath && drop()?.position === "after" }}>
+                classList={{ "session-group-active": chat.sessions.find((session) => session.id === chat.activeId)?.project_path === group.projectPath, "project-dragging": drag()?.path === group.projectPath && !!group.projectPath, "project-drop-before": drop()?.path === group.projectPath && drop()?.position === "before", "project-drop-after": drop()?.path === group.projectPath && drop()?.position === "after" }}>
                 <div class="session-group-head" data-motion-key={`group:${group.key}`}
                   onContextMenu={(event) => { if (group.projectPath) showProjectMenu(event, group.projectPath); }}>
                   <Show when={renamingProject() === group.projectPath && !!group.projectPath} fallback={
@@ -380,7 +410,10 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                       style={{ transform: collapsed()[group.key] ? "none" : "rotate(90deg)", transition: "transform var(--dur-fast)" }}
                     />
                     <Icon name={group.key === "pinned" ? "sparkle" : group.projectPath ? "folder" : "history"} size={14} />
-                    <span class="session-group-name">{group.label}<Show when={group.projectPath && projectSuffix(group.projectPath, group.label)}>{(suffix) => <small>{suffix()}</small>}</Show></span>
+                    <span class="session-group-copy">
+                      <span class="session-group-name">{group.label}<Show when={group.projectPath && projectSuffix(group.projectPath, group.label)}>{(suffix) => <small>{suffix()}</small>}</Show></span>
+                      <Show when={group.projectPath}>{(path) => <ProjectStatus path={path()} />}</Show>
+                    </span>
                   </button>
                   }>
                     <input class="session-row-input project-name-input" aria-label="Project display name" maxLength={80} value={projectDraft()}

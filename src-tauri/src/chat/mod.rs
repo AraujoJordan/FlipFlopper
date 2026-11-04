@@ -39,12 +39,18 @@ struct Running {
     turn_id: String,
 }
 
+pub struct OwnedTerminal {
+    id: String,
+    ptys: crate::pty::PtyManager,
+    history: Option<import::HistoryCheckpoint>,
+}
+
 /// Tauri-managed state: turns currently executing, keyed by session id.
 #[derive(Default)]
 pub struct ChatManager {
     running: Mutex<HashMap<String, Running>>,
     pub native: acp::Pool,
-    terminals: Mutex<HashMap<String, (String, crate::pty::PtyManager)>>,
+    terminals: Mutex<HashMap<String, OwnedTerminal>>,
     session_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
@@ -247,46 +253,81 @@ impl ChatManager {
     pub fn open_terminal(&self, session_id: &str, ptys: &crate::pty::PtyManager) -> Result<(String, Option<std::sync::mpsc::Receiver<crate::pty::PtyEvent>>), String> {
         let operation = self.session_operation(session_id);
         let _handoff = operation.lock().unwrap();
-        if let Some((id, _)) = self.terminals.lock().unwrap().get(session_id) { return Ok((id.clone(), None)); }
+        if let Some(terminal) = self.terminals.lock().unwrap().get(session_id) { return Ok((terminal.id.clone(), None)); }
         if self.is_running(session_id) { return Err("Finish or stop the chat turn before opening CLI mode.".into()); }
         let meta = store::get_session(session_id).ok_or("Session not found")?;
         if meta.archived { return Err("Restore this archived session before opening CLI mode.".into()); }
-        let native_id = meta.native_ids.get(&meta.agent_id).ok_or("Send a chat message first to create a resumable conversation.")?;
-        let args = terminal_resume_args(&meta.agent_id, native_id)?;
+        let args = terminal_args(&meta.agent_id, meta.native_ids.get(&meta.agent_id).map(String::as_str))?;
+        let history = import::history_checkpoint(&meta.agent_id, &meta.cwd, meta.native_ids.get(&meta.agent_id).map(String::as_str));
         let def = crate::agents::find_agent(&meta.agent_id).ok_or("Unknown agent")?;
         let binary = crate::agents::launch_binary(def).ok_or("Agent executable not found")?;
         self.native.close_session(session_id);
         let (id, rx) = crate::pty::spawn_agent_terminal(ptys, &binary, &args, &meta.cwd)?;
-        self.terminals.lock().unwrap().insert(session_id.into(), (id.clone(), ptys.clone()));
+        self.terminals.lock().unwrap().insert(session_id.into(), OwnedTerminal { id: id.clone(), ptys: ptys.clone(), history });
         Ok((id, Some(rx)))
     }
 
-    pub fn close_terminal(&self, session_id: &str) {
+    pub fn close_terminal(&self, session_id: &str, app: Emitter) {
         let operation = self.session_operation(session_id);
         let _handoff = operation.lock().unwrap();
-        self.stop_terminal(session_id);
+        if let Some(terminal) = self.stop_terminal(session_id) { self.sync_terminal(session_id, terminal, app); }
     }
 
-    fn stop_terminal(&self, session_id: &str) {
-        if let Some((id, manager)) = self.terminals.lock().unwrap().remove(session_id) {
-            if let Some(mut session) = manager.sessions.lock().unwrap().remove(&id) {
-                if let Some(pid) = session.child.process_id() { kill_tree(pid); }
-                let _ = session.child.kill();
-                let _ = session.child.wait();
+    fn stop_terminal(&self, session_id: &str) -> Option<OwnedTerminal> {
+        let terminal = self.terminals.lock().unwrap().remove(session_id)?;
+        if let Some(mut session) = terminal.ptys.sessions.lock().unwrap().remove(&terminal.id) {
+            if let Some(pid) = session.child.process_id() { kill_tree(pid); }
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+        }
+        Some(terminal)
+    }
+
+    pub fn sync_terminal(&self, session_id: &str, terminal: OwnedTerminal, app: Emitter) {
+        let Some(checkpoint) = terminal.history else { return };
+        let Some(update) = import::sync_history(&checkpoint) else { return };
+        if store::get_session(session_id).is_none() { return; }
+        let fallback_title = update.entries.iter().find_map(|entry| match entry {
+            Entry::User { text, .. } => Some(first_line(text, 60)),
+            _ => None,
+        });
+        let mut imported = 0;
+        for entry in update.entries {
+            if let Err(error) = emit_entry(&app, session_id, &entry) {
+                eprintln!("Failed to sync CLI transcript: {error}");
+                break;
             }
+            imported += 1;
+        }
+        let agent_id = checkpoint.agent_id.clone();
+        let updated_at = if update.last_ts > 0 { update.last_ts } else { store::now_ms() };
+        if let Err(error) = store::update_session(session_id, |meta| {
+            meta.native_ids.insert(agent_id.clone(), update.native_id.clone());
+            meta.entry_count = meta.entry_count.saturating_add(imported);
+            meta.agent_last_entry.insert(agent_id.clone(), meta.entry_count);
+            meta.updated_at = updated_at;
+            if !meta.title_locked {
+                if let Some(title) = &update.title { meta.title = title.clone(); }
+                else if meta.title.is_empty() {
+                    if let Some(title) = &fallback_title { meta.title = title.clone(); }
+                }
+            }
+        }) {
+            eprintln!("Failed to save CLI history checkpoint: {error}");
         }
     }
 
-    pub fn terminal_exited(&self, terminal_id: &str) -> Option<String> {
-        let mut terminals = self.terminals.lock().unwrap();
-        let owner = terminals.iter().find(|(_, (id, _))| id == terminal_id).map(|(owner, _)| owner.clone())?;
-        if let Some((id, manager)) = terminals.remove(&owner) { manager.sessions.lock().unwrap().remove(&id); }
+    pub fn terminal_exited(&self, terminal_id: &str, app: Emitter) -> Option<String> {
+        let owner = self.terminals.lock().unwrap().iter().find(|(_, terminal)| terminal.id == terminal_id).map(|(owner, _)| owner.clone())?;
+        let terminal = self.terminals.lock().unwrap().remove(&owner)?;
+        terminal.ptys.sessions.lock().unwrap().remove(&terminal.id);
+        self.sync_terminal(&owner, terminal, app);
         Some(owner)
     }
 
     pub fn runtime_state(&self, session_id: &str) -> acp_types::RuntimeState {
         let mut state = self.native.state(session_id);
-        state.terminal_id = self.terminals.lock().unwrap().get(session_id).map(|(id, _)| id.clone());
+        state.terminal_id = self.terminals.lock().unwrap().get(session_id).map(|terminal| terminal.id.clone());
         if !state.connected {
             if let Some(run) = self.running.lock().unwrap().get(session_id).filter(|run| !run.cancelled.load(Ordering::SeqCst)) {
                 state.agent_id = run.agent_id.clone();
@@ -359,18 +400,21 @@ impl ChatManager {
     }
 
     /// Kill the running turn (and its children) for a session, if any.
-    pub fn cancel(&self, session_id: &str) {
-        self.stop_terminal(session_id);
+    pub fn cancel(&self, session_id: &str) -> Option<OwnedTerminal> {
+        let terminal = self.stop_terminal(session_id);
         if let Some(run) = self.running.lock().unwrap().get(session_id) {
             run.cancelled.store(true, Ordering::SeqCst);
             if run.pid != 0 { kill_tree(run.pid); }
         }
         self.native.cancel(session_id);
+        terminal
     }
 
     pub fn cancel_all(&self) {
         let ids: Vec<_> = self.terminals.lock().unwrap().keys().cloned().collect();
-        for id in ids { self.stop_terminal(&id); }
+        for id in ids {
+            if let Some(terminal) = self.stop_terminal(&id) { self.sync_terminal(&id, terminal, Arc::new(|_, _| {})); }
+        }
         let running = self.running.lock().unwrap();
         for run in running.values() {
             run.cancelled.store(true, Ordering::SeqCst);
@@ -383,7 +427,7 @@ impl ChatManager {
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let operation = self.session_operation(session_id);
         let _delete = operation.lock().unwrap();
-        self.cancel(session_id);
+        let _ = self.cancel(session_id);
         self.native.close_session(session_id);
         store::delete_session(session_id)?;
         self.session_operations.lock().unwrap().remove(session_id);
@@ -835,7 +879,8 @@ pub fn recover_interrupted_sessions() {
     }
 }
 
-fn terminal_resume_args(agent: &str, id: &str) -> Result<Vec<String>, String> {
+fn terminal_args(agent: &str, native_id: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(id) = native_id else { return Ok(Vec::new()); };
     if id.is_empty() || id.starts_with('-') || id.contains(['\0', '\n', '\r']) { return Err("Invalid native session id".into()); }
     let flag = match agent {
         "claude" | "cursor" => "--resume",
@@ -844,6 +889,7 @@ fn terminal_resume_args(agent: &str, id: &str) -> Result<Vec<String>, String> {
         "qwen" => "-r",
         "opencode" => "-s",
         "kimi" => "-S",
+        "droid" => "-r",
         _ => return Err("This agent does not yet support resuming a conversation in CLI mode.".into()),
     };
     Ok(vec![flag.into(), id.into()])
@@ -929,7 +975,7 @@ mod tests {
     #[test]
     fn terminal_handoff_blocks_chat_and_clear_until_exit() {
         let manager = Arc::new(ChatManager::default());
-        manager.terminals.lock().unwrap().insert("s".into(), ("pty".into(), crate::pty::PtyManager::new()));
+        manager.terminals.lock().unwrap().insert("s".into(), OwnedTerminal { id: "pty".into(), ptys: crate::pty::PtyManager::new(), history: None });
         assert_eq!(manager.runtime_state("s").terminal_id.as_deref(), Some("pty"));
         let args = SendArgs { recover_context: false, session_id: "s".into(), prompt: "hello".into(), agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, context_from: None, attachments: vec![] };
         assert!(manager.send(Arc::new(|_, _| {}), args).unwrap_err().contains("Exit the CLI"));
@@ -937,21 +983,73 @@ mod tests {
         let (id, receiver) = manager.open_terminal("s", &crate::pty::PtyManager::new()).unwrap();
         assert_eq!(id, "pty");
         assert!(receiver.is_none(), "opening twice must reuse the owned terminal");
-        assert_eq!(manager.terminal_exited("pty"), Some("s".into()));
+        assert_eq!(manager.terminal_exited("pty", Arc::new(|_, _| {})), Some("s".into()));
         assert!(manager.runtime_state("s").terminal_id.is_none());
-        assert_eq!(manager.terminal_exited("pty"), None);
+        assert_eq!(manager.terminal_exited("pty", Arc::new(|_, _| {})), None);
     }
 
     #[test]
-    fn terminal_resume_passes_native_ids_as_arguments() {
-        for (agent, flag) in [("claude", "--resume"), ("codex", "resume"), ("cursor", "--resume"), ("agy", "--conversation"), ("qwen", "-r"), ("opencode", "-s"), ("kimi", "-S")] {
-            assert_eq!(terminal_resume_args(agent, "native-id").unwrap(), vec![flag, "native-id"]);
+    fn terminal_launch_starts_fresh_or_resumes_native_ids() {
+        for agent in ["claude", "codex", "cursor", "agy", "qwen", "opencode", "kimi", "droid", "aider"] {
+            assert!(terminal_args(agent, None).unwrap().is_empty());
         }
-        assert!(terminal_resume_args("aider", "native-id").is_err());
-        assert!(terminal_resume_args("claude", "--help").is_err());
-        assert!(terminal_resume_args("claude", "bad\ncommand").is_err());
+        for (agent, flag) in [("claude", "--resume"), ("codex", "resume"), ("cursor", "--resume"), ("agy", "--conversation"), ("qwen", "-r"), ("opencode", "-s"), ("kimi", "-S"), ("droid", "-r")] {
+            assert_eq!(terminal_args(agent, Some("native-id")).unwrap(), vec![flag, "native-id"]);
+        }
+        assert!(terminal_args("aider", Some("native-id")).is_err());
+        assert!(terminal_args("claude", Some("--help")).is_err());
+        assert!(terminal_args("claude", Some("bad\ncommand")).is_err());
         // No shell sees this value: metacharacters remain one opaque argument.
-        assert_eq!(terminal_resume_args("codex", "id; echo unexpected").unwrap()[1], "id; echo unexpected");
+        assert_eq!(terminal_args("codex", Some("id; echo unexpected")).unwrap()[1], "id; echo unexpected");
+    }
+
+    #[test]
+    fn cli_history_sync_appends_suffix_and_captures_fresh_native_id() {
+        let _env = store::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-cli-sync-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&data).unwrap();
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let native = data.join("fresh-native.jsonl");
+        std::fs::write(&native, concat!(
+            r#"{"type":"user","timestamp":"2026-10-22T09:00:00Z","message":{"content":"Old prompt"}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-22T09:00:01Z","message":{"content":[{"type":"text","text":"Old answer"}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-10-22T09:01:00Z","message":{"content":"CLI prompt"}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-22T09:01:01Z","message":{"content":[{"type":"text","text":"CLI answer"}]}}"#, "\n",
+        )).unwrap();
+        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: None }).unwrap();
+        let history = import::HistoryCheckpoint { agent_id: "claude".into(), cwd: "/test".into(), native_id: None, path: Some(native.clone()), line_offset: 2, started_at: 0, previous_entries: Vec::new() };
+        let terminal = OwnedTerminal { id: "pty".into(), ptys: crate::pty::PtyManager::new(), history: Some(history) };
+        let emitted = Arc::new(Mutex::new(0));
+        let count = emitted.clone();
+        let manager = ChatManager::default();
+        manager.sync_terminal(&meta.id, terminal, Arc::new(move |_, _| *count.lock().unwrap() += 1));
+        let entries = store::load_entries(&meta.id);
+        let users: Vec<_> = entries.iter().filter_map(|e| match e { Entry::User { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(users, ["CLI prompt"]);
+        assert!(!entries.iter().any(|e| matches!(e, Entry::Event { event: ChatEvent::Text { delta }, .. } if delta == "Old answer")));
+        assert_eq!(*emitted.lock().unwrap(), entries.len());
+        let saved = store::get_session(&meta.id).unwrap();
+        assert_eq!(saved.native_ids.get("claude").map(String::as_str), Some("fresh-native"));
+        assert_eq!(saved.title, "CLI prompt");
+        assert_eq!(saved.entry_count, entries.len());
+        assert_eq!(saved.agent_last_entry.get("claude"), Some(&entries.len()));
+
+        let mut native_contents = std::fs::read_to_string(&native).unwrap();
+        native_contents.push_str(r#"{"type":"ai-title","aiTitle":"Native CLI title"}"#);
+        native_contents.push('\n');
+        std::fs::write(&native, native_contents).unwrap();
+        let checkpoint = |line_offset| import::HistoryCheckpoint { agent_id: "claude".into(), cwd: "/test".into(), native_id: Some("fresh-native".into()), path: Some(native.clone()), line_offset, started_at: 0, previous_entries: Vec::new() };
+        let automatic = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: Some("Old automatic title".into()) }).unwrap();
+        manager.sync_terminal(&automatic.id, OwnedTerminal { id: "pty-title".into(), ptys: crate::pty::PtyManager::new(), history: Some(checkpoint(4)) }, Arc::new(|_, _| {}));
+        assert_eq!(store::get_session(&automatic.id).unwrap().title, "Native CLI title");
+
+        let manual = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: Some("My title".into()) }).unwrap();
+        store::update_session(&manual.id, |meta| meta.title_locked = true).unwrap();
+        manager.sync_terminal(&manual.id, OwnedTerminal { id: "pty-manual".into(), ptys: crate::pty::PtyManager::new(), history: Some(checkpoint(5)) }, Arc::new(|_, _| {}));
+        assert_eq!(store::get_session(&manual.id).unwrap().title, "My title");
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
     }
 
     #[test]

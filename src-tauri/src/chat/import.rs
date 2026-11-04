@@ -11,8 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use uuid::Uuid;
 
+use crate::env::augmented_path_string;
 use super::adapters::{new_parser, PermissionMode};
 use super::event::{first_line, truncate_output, ChatEvent, ToolKind, TurnStatus, MAX_TOOL_OUTPUT};
 use super::store::{self, Entry, SessionMeta};
@@ -294,7 +296,244 @@ fn scan_codex(wanted: &HashSet<&str>) -> Vec<ImportCandidate> {
     out
 }
 
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+    if depth > 8 { return; }
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() { walk_files(&path, out, depth + 1); } else { out.push(path); }
+    }
+}
+
+fn history_candidate(agent: &str, id: String, path: PathBuf, cwd: &str, updated_at: u64) -> ImportCandidate {
+    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    ImportCandidate { agent_id: agent.into(), native_id: id, path: path.to_string_lossy().to_string(), cwd: cwd.into(), title: String::new(), updated_at, size }
+}
+
+fn cursor_histories(cwd: &str) -> Vec<ImportCandidate> {
+    let home = home();
+    let data = std::env::var_os("CURSOR_DATA_DIR").map(PathBuf::from).or_else(|| home.clone().map(|p| p.join(".cursor")));
+    let config = std::env::var_os("CURSOR_CONFIG_DIR").map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("cursor")))
+        .or_else(|| home.map(|p| p.join(".cursor")));
+    let (Some(data), Some(config)) = (data, config) else { return Vec::new() };
+    let mut metadata = Vec::new();
+    walk_files(&config.join("chats"), &mut metadata, 0);
+    let mut transcripts = Vec::new();
+    walk_files(&data.join("projects"), &mut transcripts, 0);
+    let mut out = Vec::new();
+    for meta in metadata.into_iter().filter(|p| p.file_name().is_some_and(|name| name == "meta.json")) {
+        let Ok(value) = serde_json::from_str::<Value>(&fs::read_to_string(&meta).unwrap_or_default()) else { continue };
+        if value.get("cwd").and_then(Value::as_str) != Some(cwd) { continue; }
+        let Some(id) = meta.parent().and_then(Path::file_name).map(|id| id.to_string_lossy().to_string()) else { continue };
+        let Some(path) = transcripts.iter().find(|path| path.file_name().is_some_and(|name| name == format!("{id}.jsonl").as_str())) else { continue };
+        let updated = value.get("updatedAtMs").and_then(Value::as_u64).unwrap_or_else(|| mtime_ms(path));
+        let mut candidate = history_candidate("cursor", id, path.clone(), cwd, updated);
+        candidate.title = value.get("title").and_then(Value::as_str).unwrap_or_default().into();
+        out.push(candidate);
+    }
+    out
+}
+
+fn agy_root() -> Option<PathBuf> { home().map(|p| p.join(".gemini/antigravity-cli")) }
+fn agy_path(id: &str) -> Option<PathBuf> {
+    let path = agy_root()?.join("brain").join(id).join(".system_generated/logs/transcript_full.jsonl");
+    path.is_file().then_some(path)
+}
+
+fn agy_histories(cwd: &str) -> Vec<ImportCandidate> {
+    let Some(root) = agy_root() else { return Vec::new() };
+    let Ok(cache) = serde_json::from_str::<Value>(&fs::read_to_string(root.join("cache/last_conversations.json")).unwrap_or_default()) else { return Vec::new() };
+    let Some(id) = cache.get(cwd).and_then(Value::as_str) else { return Vec::new() };
+    let Some(path) = agy_path(id) else { return Vec::new() };
+    vec![history_candidate("agy", id.into(), path.clone(), cwd, mtime_ms(&path))]
+}
+
+fn qwen_root() -> Option<PathBuf> {
+    std::env::var_os("QWEN_RUNTIME_DIR").map(PathBuf::from)
+        .or_else(|| std::env::var_os("QWEN_HOME").map(PathBuf::from))
+        .or_else(|| home().map(|p| p.join(".qwen")))
+}
+
+fn qwen_histories(cwd: &str) -> Vec<ImportCandidate> {
+    let encoded = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+    let chats = qwen_root().map(|root| root.join("projects").join(encoded).join("chats"));
+    let Some(chats) = chats else { return Vec::new() };
+    let mut out = Vec::new();
+    for dir in [chats.clone(), chats.join("archive")] {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for path in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|ext| ext == "jsonl")) {
+            let Some(id) = path.file_stem().map(|id| id.to_string_lossy().to_string()) else { continue };
+            out.push(history_candidate("qwen", id, path.clone(), cwd, mtime_ms(&path)));
+        }
+    }
+    out
+}
+
+fn kimi_root() -> Option<PathBuf> {
+    std::env::var_os("KIMI_CODE_HOME").map(PathBuf::from).or_else(|| home().map(|p| p.join(".kimi-code")))
+}
+
+fn kimi_histories(cwd: &str) -> Vec<ImportCandidate> {
+    let Some(root) = kimi_root() else { return Vec::new() };
+    let mut out = Vec::new();
+    for line in lines_of(&root.join("session_index.jsonl")).into_iter().flatten() {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+        if value.get("workDir").and_then(Value::as_str) != Some(cwd) { continue; }
+        let (Some(id), Some(dir)) = (value.get("sessionId").and_then(Value::as_str), value.get("sessionDir").and_then(Value::as_str)) else { continue };
+        let path = PathBuf::from(dir).join("agents/main/wire.jsonl");
+        if !path.is_file() { continue; }
+        let state = fs::read_to_string(PathBuf::from(dir).join("state.json")).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        let updated = state.as_ref().and_then(|s| s.get("updatedAt")).and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(parse_iso_ms))).unwrap_or_else(|| mtime_ms(&path));
+        out.push(history_candidate("kimi", id.into(), path, cwd, updated));
+    }
+    out
+}
+
+fn droid_histories(cwd: &str) -> Vec<ImportCandidate> {
+    let Some(root) = home().map(|p| p.join(".factory/sessions")) else { return Vec::new() };
+    let mut files = Vec::new();
+    walk_files(&root, &mut files, 0);
+    let mut out = Vec::new();
+    for path in files.into_iter().filter(|p| p.extension().is_some_and(|ext| ext == "jsonl")) {
+        let Some(first) = lines_of(&path).and_then(|mut lines| lines.next()).and_then(|line| serde_json::from_str::<Value>(&line).ok()) else { continue };
+        if first.get("cwd").and_then(Value::as_str).is_some_and(|value| value != cwd) { continue; }
+        let id = first.get("id").or_else(|| first.get("sessionId")).and_then(Value::as_str).map(str::to_string)
+            .or_else(|| path.file_stem().map(|id| id.to_string_lossy().to_string()));
+        let Some(id) = id else { continue; };
+        out.push(history_candidate("droid", id, path.clone(), cwd, mtime_ms(&path)));
+    }
+    out
+}
+
 // ── Convert ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct HistoryCheckpoint {
+    pub(crate) agent_id: String,
+    pub(crate) cwd: String,
+    pub(crate) native_id: Option<String>,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) line_offset: usize,
+    pub(crate) started_at: u64,
+    pub(crate) previous_entries: Vec<Entry>,
+}
+
+pub struct HistoryUpdate {
+    pub native_id: String,
+    pub entries: Vec<Entry>,
+    pub last_ts: u64,
+    pub title: Option<String>,
+}
+
+fn histories(agent: &str, cwd: &str) -> Vec<ImportCandidate> {
+    let mut out = match agent {
+        "claude" => scan_claude(&[cwd.to_string()]),
+        "codex" => scan_codex(&HashSet::from([cwd])),
+        "cursor" => cursor_histories(cwd),
+        "agy" => agy_histories(cwd),
+        "qwen" => qwen_histories(cwd),
+        "kimi" => kimi_histories(cwd),
+        "droid" => droid_histories(cwd),
+        _ => Vec::new(),
+    };
+    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    out
+}
+
+fn native_id_at(agent: &str, path: &Path) -> Option<String> {
+    match agent {
+        "claude" | "cursor" | "qwen" | "droid" => path.file_stem().map(|id| id.to_string_lossy().to_string()),
+        "codex" => lines_of(path)?.next().and_then(|line| serde_json::from_str::<Value>(&line).ok())?.get("payload")?.get("id")?.as_str().map(str::to_string),
+        "agy" => path.ancestors().find(|p| p.parent().and_then(Path::file_name).is_some_and(|name| name == "brain"))?.file_name().map(|id| id.to_string_lossy().to_string()),
+        "kimi" => path.ancestors().find(|p| p.join("state.json").is_file())?.file_name().map(|id| id.to_string_lossy().to_string()),
+        _ => None,
+    }
+}
+
+fn native_title(agent: &str, cwd: &str, native_id: &str, path: &Path) -> Option<String> {
+    let clean = |title: &str| {
+        let title = title.trim();
+        (!title.is_empty()).then(|| first_line(title, 80))
+    };
+    match agent {
+        "claude" => lines_of(path)?.filter_map(|line| serde_json::from_str::<Value>(&line).ok()).filter(|v| v.get("type").and_then(Value::as_str) == Some("ai-title")).filter_map(|v| v.get("aiTitle").and_then(Value::as_str).and_then(clean)).last(),
+        "cursor" => histories(agent, cwd).into_iter().find(|candidate| candidate.native_id == native_id).and_then(|candidate| clean(&candidate.title)),
+        "qwen" => lines_of(path)?.filter_map(|line| serde_json::from_str::<Value>(&line).ok()).filter(|v| v.get("subtype").and_then(Value::as_str) == Some("custom_title")).filter_map(|v| v.get("systemPayload").and_then(|p| p.get("title")).or_else(|| v.get("title")).and_then(Value::as_str).and_then(clean)).last(),
+        "kimi" => {
+            let dir = path.ancestors().find(|p| p.join("state.json").is_file())?;
+            let state = serde_json::from_str::<Value>(&fs::read_to_string(dir.join("state.json")).ok()?).ok()?;
+            state.get("title").and_then(Value::as_str).and_then(clean)
+        }
+        "droid" => lines_of(path)?.next().and_then(|line| serde_json::from_str::<Value>(&line).ok())?.get("title").and_then(Value::as_str).and_then(clean),
+        _ => None,
+    }
+}
+
+fn entry_fingerprint(entry: &Entry) -> Value {
+    let mut value = serde_json::to_value(entry).unwrap_or(Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("ts");
+        if let Some(event) = object.get_mut("event").and_then(Value::as_object_mut) {
+            if matches!(event.get("type").and_then(Value::as_str), Some("turn_started" | "turn_ended")) {
+                event.remove("turn_id");
+            }
+        }
+    }
+    value
+}
+
+fn snapshot_suffix(previous: &[Entry], current: Vec<Entry>) -> Vec<Entry> {
+    let prefix_matches = previous.iter().zip(&current).all(|(a, b)| entry_fingerprint(a) == entry_fingerprint(b));
+    if prefix_matches && current.len() >= previous.len() {
+        current.into_iter().skip(previous.len()).collect()
+    } else {
+        // Rewind/compaction can rewrite native history. Do not duplicate or
+        // silently replace Chat entries when the old snapshot no longer matches.
+        eprintln!("Native CLI history changed before the checkpoint; skipping reconciliation");
+        Vec::new()
+    }
+}
+
+/// Capture native history before handing the conversation to its interactive
+/// CLI. Append-only formats use a line offset; mutable formats keep a snapshot.
+pub fn history_checkpoint(agent: &str, cwd: &str, native_id: Option<&str>) -> Option<HistoryCheckpoint> {
+    if !matches!(agent, "claude" | "codex" | "cursor" | "agy" | "qwen" | "kimi" | "droid" | "opencode") { return None; }
+    let path = native_id.and_then(|id| histories(agent, cwd).into_iter().find(|c| c.native_id == id)).map(|c| PathBuf::from(c.path));
+    let line_offset = path.as_ref().and_then(|p| lines_of(p).map(|lines| lines.count())).unwrap_or(0);
+    let previous_entries = match agent {
+        "claude" | "codex" => Vec::new(),
+        "opencode" => native_id.and_then(opencode_export).map(|(entries, _, _, _)| entries).unwrap_or_default(),
+        _ => path.as_deref().and_then(|path| convert_snapshot(agent, path)).map(|(entries, _, _)| entries).unwrap_or_default(),
+    };
+    Some(HistoryCheckpoint { agent_id: agent.into(), cwd: cwd.into(), native_id: native_id.map(str::to_string), path, line_offset, started_at: store::now_ms(), previous_entries })
+}
+
+/// Convert only native activity added after the checkpoint. A fresh CLI can
+/// also yield its native id without producing a displayable message.
+pub fn sync_history(checkpoint: &HistoryCheckpoint) -> Option<HistoryUpdate> {
+    if checkpoint.agent_id == "opencode" { return sync_opencode(checkpoint); }
+    let resolved = if let Some(path) = &checkpoint.path {
+        checkpoint.native_id.clone().or_else(|| native_id_at(&checkpoint.agent_id, path)).map(|id| (id, path.clone()))
+    } else {
+        let candidates = histories(&checkpoint.agent_id, &checkpoint.cwd);
+        if let Some(id) = &checkpoint.native_id {
+            candidates.into_iter().find(|c| &c.native_id == id).map(|c| (c.native_id, PathBuf::from(c.path)))
+        } else {
+            candidates.into_iter().find(|c| c.updated_at >= checkpoint.started_at.saturating_sub(1000)).map(|c| (c.native_id, PathBuf::from(c.path)))
+        }
+    }?;
+    let (native_id, path) = resolved;
+    let converted = match checkpoint.agent_id.as_str() {
+        "claude" => convert_claude_from(&path, checkpoint.line_offset),
+        "codex" => convert_codex_from(&path, checkpoint.line_offset),
+        _ => convert_snapshot(&checkpoint.agent_id, &path),
+    };
+    let (entries, _, last_ts) = converted.unwrap_or_default();
+    let entries = if matches!(checkpoint.agent_id.as_str(), "claude" | "codex") { entries } else { snapshot_suffix(&checkpoint.previous_entries, entries) };
+    let title = native_title(&checkpoint.agent_id, &checkpoint.cwd, &native_id, &path);
+    Some(HistoryUpdate { native_id, entries, last_ts, title })
+}
 
 /// Builds a transcript, opening a turn at the first agent output after a user
 /// prompt and closing it before the next prompt.
@@ -377,10 +616,10 @@ impl Builder {
     }
 }
 
-fn convert_claude(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+fn convert_claude_from(path: &Path, skip: usize) -> Option<(Vec<Entry>, u64, u64)> {
     let mut b = Builder::new("claude");
     let mut parser = new_parser("claude");
-    for line in lines_of(path)? {
+    for line in lines_of(path)?.skip(skip) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         if v.get("isSidechain").and_then(Value::as_bool) == Some(true) || v.get("isMeta").and_then(Value::as_bool) == Some(true) {
             continue;
@@ -411,7 +650,11 @@ fn convert_claude(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
             _ => {}
         }
     }
-    let (entries, first, last) = b.finish();
+    Some(b.finish())
+}
+
+fn convert_claude(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+    let (entries, first, last) = convert_claude_from(path, 0)?;
     (!entries.is_empty()).then_some((entries, first, last))
 }
 
@@ -456,9 +699,9 @@ fn output_text(v: &Value) -> String {
     }
 }
 
-fn convert_codex(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+fn convert_codex_from(path: &Path, skip: usize) -> Option<(Vec<Entry>, u64, u64)> {
     let mut b = Builder::new("codex");
-    for line in lines_of(path)? {
+    for line in lines_of(path)?.skip(skip) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         if v.get("type").and_then(Value::as_str) != Some("response_item") {
             continue;
@@ -507,8 +750,279 @@ fn convert_codex(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
             _ => {}
         }
     }
-    let (entries, first, last) = b.finish();
+    Some(b.finish())
+}
+
+fn convert_codex(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+    let (entries, first, last) = convert_codex_from(path, 0)?;
     (!entries.is_empty()).then_some((entries, first, last))
+}
+
+fn tool_input(value: &Value) -> Value {
+    value.as_str().and_then(|text| serde_json::from_str(text).ok()).unwrap_or_else(|| value.clone())
+}
+
+fn convert_cursor(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+    let mut b = Builder::new("cursor");
+    for line in lines_of(path)? {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let content = v.get("message").and_then(|m| m.get("content")).cloned().unwrap_or(Value::Null);
+        match v.get("role").and_then(Value::as_str) {
+            Some("user") => {
+                let text = content_texts(&content).iter().filter_map(|text| user_text(text)).collect::<Vec<_>>().join("\n");
+                if !text.trim().is_empty() { b.user(text, 0); }
+            }
+            Some("assistant") => {
+                for part in content.as_array().into_iter().flatten() {
+                    match part.get("type").and_then(Value::as_str) {
+                        Some("text") => if let Some(text) = part.get("text").and_then(Value::as_str) { b.event(ChatEvent::Text { delta: text.into() }, 0); },
+                        Some("thinking") => if let Some(text) = part.get("thinking").or_else(|| part.get("text")).and_then(Value::as_str) { b.event(ChatEvent::Thinking { delta: text.into() }, 0); },
+                        Some("tool_use") => {
+                            let name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
+                            let input = part.get("input").cloned().unwrap_or(Value::Null);
+                            b.event(ChatEvent::ToolCall { id: part.get("id").and_then(Value::as_str).unwrap_or(name).into(), kind: codex_kind(name), title: codex_title(name, &input), input }, 0);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(b.finish())
+}
+
+fn agy_prompt(content: &str) -> String {
+    content.split("<USER_REQUEST>").nth(1)
+        .and_then(|rest| rest.split("</USER_REQUEST>").next())
+        .unwrap_or(content).trim().to_string()
+}
+
+fn convert_agy(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+    let mut b = Builder::new("agy");
+    for line in lines_of(path)? {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let ts = v.get("created_at").and_then(Value::as_str).and_then(parse_iso_ms).unwrap_or(0);
+        let content = v.get("content").and_then(Value::as_str).unwrap_or_default();
+        match v.get("type").and_then(Value::as_str) {
+            Some("USER_INPUT") => {
+                let prompt = agy_prompt(content);
+                if !prompt.is_empty() { b.user(prompt, ts); }
+            }
+            Some("PLANNER_RESPONSE") => {
+                if !content.trim().is_empty() { b.event(ChatEvent::Text { delta: content.into() }, ts); }
+                if let Some(thinking) = v.get("thinking").and_then(Value::as_str).filter(|text| !text.trim().is_empty()) {
+                    b.event(ChatEvent::Thinking { delta: thinking.into() }, ts);
+                }
+                let step = v.get("step_index").and_then(Value::as_u64).unwrap_or(0);
+                for (index, tool) in v.get("tool_calls").and_then(Value::as_array).into_iter().flatten().enumerate() {
+                    let name = tool.get("name").and_then(Value::as_str).unwrap_or("tool");
+                    let input = tool.get("args").cloned().unwrap_or(Value::Null);
+                    b.event(ChatEvent::ToolCall { id: tool.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("agy-{step}-{index}")), kind: codex_kind(name), title: codex_title(name, &input), input }, ts);
+                }
+                let input = v.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let output = v.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                if input > 0 || output > 0 { b.event(ChatEvent::Usage { input_tokens: input, output_tokens: output, cost_usd: None }, ts); }
+            }
+            _ if v.get("status").and_then(Value::as_str) == Some("ERROR") => {
+                b.event(ChatEvent::Error { message: v.get("error").and_then(Value::as_str).unwrap_or(content).into() }, ts);
+            }
+            _ => {}
+        }
+    }
+    Some(b.finish())
+}
+
+fn convert_qwen(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+    let mut b = Builder::new("qwen");
+    for line in lines_of(path)? {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let ts = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms).unwrap_or(0);
+        let parts = v.get("message").and_then(|m| m.get("parts")).and_then(Value::as_array).cloned().unwrap_or_default();
+        match v.get("type").and_then(Value::as_str) {
+            Some("user") if v.get("subtype").is_none() => {
+                let display = v.get("systemPayload").and_then(|p| p.get("displayText")).and_then(Value::as_str).map(str::to_string);
+                let text = display.unwrap_or_else(|| content_texts(&Value::Array(parts)).join("\n"));
+                if !text.trim().is_empty() { b.user(text, ts); }
+            }
+            Some("assistant") => {
+                if let Some(model) = v.get("model").and_then(Value::as_str) { b.event(ChatEvent::Model { name: model.into() }, ts); }
+                for part in &parts {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) { b.event(ChatEvent::Text { delta: text.into() }, ts); }
+                    if let Some(call) = part.get("functionCall") {
+                        let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        let input = call.get("args").cloned().unwrap_or(Value::Null);
+                        b.event(ChatEvent::ToolCall { id: call.get("id").and_then(Value::as_str).unwrap_or(name).into(), kind: codex_kind(name), title: codex_title(name, &input), input }, ts);
+                    }
+                }
+                if let Some(usage) = v.get("usageMetadata") {
+                    b.event(ChatEvent::Usage { input_tokens: usage.get("promptTokenCount").and_then(Value::as_u64).unwrap_or(0), output_tokens: usage.get("candidatesTokenCount").and_then(Value::as_u64).unwrap_or(0), cost_usd: None }, ts);
+                }
+            }
+            Some("tool_result") => {
+                for part in &parts {
+                    if let Some(response) = part.get("functionResponse") {
+                        let id = response.get("id").and_then(Value::as_str).unwrap_or_default();
+                        let output = response.get("response").map(output_text).unwrap_or_default();
+                        let ok = v.get("toolCallResult").and_then(|r| r.get("status")).and_then(Value::as_str) != Some("error");
+                        b.event(ChatEvent::ToolResult { id: id.into(), ok, output: truncate_output(output, MAX_TOOL_OUTPUT) }, ts);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(b.finish())
+}
+
+fn convert_kimi(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+    let mut b = Builder::new("kimi");
+    for line in lines_of(path)? {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let ts = v.get("time").and_then(Value::as_u64).unwrap_or(0);
+        match v.get("type").and_then(Value::as_str) {
+            Some("turn.prompt") if v.get("origin").and_then(|o| o.get("kind")).and_then(Value::as_str) == Some("user") => {
+                let text = content_texts(v.get("input").unwrap_or(&Value::Null)).join("\n");
+                if !text.trim().is_empty() { b.user(text, ts); }
+            }
+            Some("context.append_loop_event") => {
+                let event = v.get("event").cloned().unwrap_or(Value::Null);
+                match event.get("type").and_then(Value::as_str) {
+                    Some("content.part") => {
+                        let part = &event["part"];
+                        let text = part.get("text").and_then(Value::as_str).unwrap_or_default();
+                        if !text.is_empty() {
+                            if part.get("type").and_then(Value::as_str) == Some("think") { b.event(ChatEvent::Thinking { delta: text.into() }, ts); }
+                            else { b.event(ChatEvent::Text { delta: text.into() }, ts); }
+                        }
+                    }
+                    Some("tool.call") => {
+                        let name = event.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        let input = tool_input(event.get("args").unwrap_or(&Value::Null));
+                        b.event(ChatEvent::ToolCall { id: event.get("toolCallId").and_then(Value::as_str).unwrap_or(name).into(), kind: codex_kind(name), title: codex_title(name, &input), input }, ts);
+                    }
+                    Some("tool.result") => {
+                        let result = &event["result"];
+                        b.event(ChatEvent::ToolResult { id: event.get("toolCallId").and_then(Value::as_str).unwrap_or_default().into(), ok: !result.get("isError").and_then(Value::as_bool).unwrap_or(false), output: truncate_output(output_text(result.get("output").unwrap_or(&Value::Null)), MAX_TOOL_OUTPUT) }, ts);
+                    }
+                    _ => {}
+                }
+            }
+            Some("usage.record") => {
+                let usage = &v["usage"];
+                b.event(ChatEvent::Usage { input_tokens: usage.get("inputOther").and_then(Value::as_u64).unwrap_or(0), output_tokens: usage.get("output").and_then(Value::as_u64).unwrap_or(0), cost_usd: None }, ts);
+            }
+            _ => {}
+        }
+    }
+    Some(b.finish())
+}
+
+fn convert_droid(path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+    let mut b = Builder::new("droid");
+    for line in lines_of(path)? {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        if v.get("type").and_then(Value::as_str) != Some("message") || v.get("message").and_then(|m| m.get("visibility")).and_then(Value::as_str).is_some_and(|visibility| visibility != "visible") { continue; }
+        let ts = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms).unwrap_or(0);
+        let message = &v["message"];
+        let content = message.get("content").cloned().unwrap_or(Value::Null);
+        let parts = content.as_array().cloned().unwrap_or_default();
+        let has_results = parts.iter().any(|part| part.get("type").and_then(Value::as_str) == Some("tool_result"));
+        if message.get("role").and_then(Value::as_str) == Some("user") && !has_results {
+            let text = content_texts(&content).iter().filter_map(|text| user_text(text)).collect::<Vec<_>>().join("\n");
+            if !text.trim().is_empty() { b.user(text, ts); }
+            continue;
+        }
+        for part in parts {
+            match part.get("type").and_then(Value::as_str) {
+                Some("text") => if let Some(text) = part.get("text").and_then(Value::as_str) { b.event(ChatEvent::Text { delta: text.into() }, ts); },
+                Some("thinking") => if let Some(text) = part.get("thinking").or_else(|| part.get("text")).and_then(Value::as_str) { b.event(ChatEvent::Thinking { delta: text.into() }, ts); },
+                Some("tool_use") => {
+                    let name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
+                    let input = part.get("input").cloned().unwrap_or(Value::Null);
+                    b.event(ChatEvent::ToolCall { id: part.get("id").and_then(Value::as_str).unwrap_or(name).into(), kind: codex_kind(name), title: codex_title(name, &input), input }, ts);
+                }
+                Some("tool_result") => b.event(ChatEvent::ToolResult { id: part.get("tool_use_id").and_then(Value::as_str).unwrap_or_default().into(), ok: !part.get("is_error").and_then(Value::as_bool).unwrap_or(false), output: truncate_output(output_text(part.get("content").unwrap_or(&Value::Null)), MAX_TOOL_OUTPUT) }, ts),
+                _ => {}
+            }
+        }
+    }
+    Some(b.finish())
+}
+
+fn convert_snapshot(agent: &str, path: &Path) -> Option<(Vec<Entry>, u64, u64)> {
+    match agent {
+        "cursor" => convert_cursor(path),
+        "agy" => convert_agy(path),
+        "qwen" => convert_qwen(path),
+        "kimi" => convert_kimi(path),
+        "droid" => convert_droid(path),
+        _ => None,
+    }
+}
+
+fn convert_opencode(value: &Value) -> Option<(Vec<Entry>, u64, u64)> {
+    let mut b = Builder::new("opencode");
+    for message in value.get("messages")?.as_array()? {
+        let info = &message["info"];
+        let ts = info.get("time").and_then(|time| time.get("created")).and_then(Value::as_u64).unwrap_or(0);
+        let parts = message.get("parts").and_then(Value::as_array).cloned().unwrap_or_default();
+        if info.get("role").and_then(Value::as_str) == Some("user") {
+            let text = parts.iter().filter(|part| part.get("type").and_then(Value::as_str) == Some("text")).filter_map(|part| part.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n");
+            if !text.trim().is_empty() { b.user(text, ts); }
+            continue;
+        }
+        for part in parts {
+            match part.get("type").and_then(Value::as_str) {
+                Some("text") => if let Some(text) = part.get("text").and_then(Value::as_str) { b.event(ChatEvent::Text { delta: text.into() }, ts); },
+                Some("reasoning") => if let Some(text) = part.get("text").and_then(Value::as_str) { b.event(ChatEvent::Thinking { delta: text.into() }, ts); },
+                Some("tool") => {
+                    let state = &part["state"];
+                    let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
+                    let input = state.get("input").cloned().unwrap_or(Value::Null);
+                    let id = part.get("id").and_then(Value::as_str).unwrap_or(name);
+                    let title = state.get("title").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| codex_title(name, &input));
+                    b.event(ChatEvent::ToolCall { id: id.into(), kind: codex_kind(name), title, input }, ts);
+                    match state.get("status").and_then(Value::as_str) {
+                        Some("completed") => b.event(ChatEvent::ToolResult { id: id.into(), ok: true, output: truncate_output(state.get("output").and_then(Value::as_str).unwrap_or_default().into(), MAX_TOOL_OUTPUT) }, ts),
+                        Some("error") => b.event(ChatEvent::ToolResult { id: id.into(), ok: false, output: truncate_output(state.get("error").and_then(Value::as_str).unwrap_or_default().into(), MAX_TOOL_OUTPUT) }, ts),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Some(b.finish())
+}
+
+fn opencode_export(id: &str) -> Option<(Vec<Entry>, u64, u64, Option<String>)> {
+    let output = Command::new("opencode").args(["export", id]).env("PATH", augmented_path_string()).output().ok()?;
+    if !output.status.success() { return None; }
+    let value = serde_json::from_slice::<Value>(&output.stdout).ok()?;
+    let title = value.get("info").and_then(|info| info.get("title")).and_then(Value::as_str).map(str::trim).filter(|title| !title.is_empty()).map(|title| first_line(title, 80));
+    let (entries, first, last) = convert_opencode(&value)?;
+    Some((entries, first, last, title))
+}
+
+fn opencode_histories(cwd: &str) -> Vec<ImportCandidate> {
+    let Ok(output) = Command::new("opencode").args(["session", "list", "--format", "json"]).env("PATH", augmented_path_string()).output() else { return Vec::new() };
+    if !output.status.success() { return Vec::new() }
+    let Ok(sessions) = serde_json::from_slice::<Vec<Value>>(&output.stdout) else { return Vec::new() };
+    sessions.into_iter().filter(|session| session.get("directory").and_then(Value::as_str) == Some(cwd)).map(|session| {
+        let id = session.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+        let updated = session.get("time").and_then(|time| time.get("updated")).or_else(|| session.get("updated")).and_then(Value::as_u64).unwrap_or(0);
+        history_candidate("opencode", id, PathBuf::new(), cwd, updated)
+    }).collect()
+}
+
+fn sync_opencode(checkpoint: &HistoryCheckpoint) -> Option<HistoryUpdate> {
+    let native_id = checkpoint.native_id.clone().or_else(|| {
+        opencode_histories(&checkpoint.cwd).into_iter().find(|session| session.updated_at >= checkpoint.started_at.saturating_sub(1000)).map(|session| session.native_id)
+    })?;
+    let (current, _, last_ts, title) = opencode_export(&native_id)?;
+    let entries = snapshot_suffix(&checkpoint.previous_entries, current);
+    Some(HistoryUpdate { native_id, entries, last_ts, title })
 }
 
 // ── Import ───────────────────────────────────────────────────────────────────
@@ -632,6 +1146,101 @@ mod tests {
         assert!(entries.iter().any(|e| matches!(e, Entry::Event { event: ChatEvent::ToolCall { kind: ToolKind::Bash, title, .. }, .. } if title == "ls -la")));
         assert!(entries.iter().any(|e| matches!(e, Entry::Event { event: ChatEvent::ToolResult { output, .. }, .. } if output.contains("b.txt"))));
         assert!(entries.iter().any(|e| matches!(e, Entry::Event { event: ChatEvent::Text { delta }, .. } if delta == "Two files.")));
+    }
+
+    #[test]
+    fn cli_suffix_conversion_excludes_checkpointed_history() {
+        let claude = write_tmp("claude-suffix.jsonl", &[
+            r#"{"type":"user","timestamp":"2026-10-22T09:00:00Z","message":{"content":"Old prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-22T09:00:01Z","message":{"content":[{"type":"text","text":"Old answer"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-10-22T09:01:00Z","message":{"content":"CLI prompt"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-22T09:01:01Z","message":{"content":[{"type":"text","text":"CLI answer"}]}}"#,
+        ]);
+        let (entries, _, _) = convert_claude_from(&claude, 2).unwrap();
+        let users: Vec<_> = entries.iter().filter_map(|e| match e { Entry::User { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(users, ["CLI prompt"]);
+        assert!(entries.iter().any(|e| matches!(e, Entry::Event { event: ChatEvent::Text { delta }, .. } if delta == "CLI answer")));
+        assert!(!entries.iter().any(|e| matches!(e, Entry::Event { event: ChatEvent::Text { delta }, .. } if delta == "Old answer")));
+
+        let codex = write_tmp("codex-suffix.jsonl", &[
+            r#"{"type":"session_meta","payload":{"id":"native","cwd":"/p"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Old prompt"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Old answer"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"CLI prompt"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"CLI answer"}]}}"#,
+        ]);
+        let (entries, _, _) = convert_codex_from(&codex, 3).unwrap();
+        let users: Vec<_> = entries.iter().filter_map(|e| match e { Entry::User { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(users, ["CLI prompt"]);
+        assert!(entries.iter().any(|e| matches!(e, Entry::Event { event: ChatEvent::Text { delta }, .. } if delta == "CLI answer")));
+        assert!(!entries.iter().any(|e| matches!(e, Entry::Event { event: ChatEvent::Text { delta }, .. } if delta == "Old answer")));
+    }
+
+    #[test]
+    fn snapshot_histories_convert_and_deduplicate_new_activity() {
+        fn assert_converted(entries: &[Entry], prompt: &str) {
+            assert!(entries.iter().any(|entry| matches!(entry, Entry::User { text, .. } if text == prompt)), "missing {prompt}: {entries:?}");
+            assert!(entries.iter().any(|entry| matches!(entry, Entry::Event { event: ChatEvent::ToolCall { .. }, .. })));
+            assert!(entries.iter().any(|entry| matches!(entry, Entry::Event { event: ChatEvent::Text { .. }, .. })));
+        }
+        let cursor = write_tmp("cursor.jsonl", &[
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"Cursor prompt"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Cursor answer"},{"type":"tool_use","id":"c1","name":"Read","input":{"path":"a.rs"}}]}}"#,
+        ]);
+        assert_converted(&convert_cursor(&cursor).unwrap().0, "Cursor prompt");
+
+        let agy = write_tmp("agy.jsonl", &[
+            r#"{"step_index":0,"type":"USER_INPUT","created_at":"2026-10-22T09:00:00Z","content":"<USER_REQUEST>\nAgy prompt\n</USER_REQUEST>"}"#,
+            r#"{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-10-22T09:00:01Z","content":"Agy answer","tool_calls":[{"name":"read_file","args":{"Path":"a.rs"}}],"input_tokens":10,"output_tokens":2}"#,
+        ]);
+        assert_converted(&convert_agy(&agy).unwrap().0, "Agy prompt");
+
+        let qwen = write_tmp("qwen.jsonl", &[
+            r#"{"type":"user","timestamp":"2026-10-22T09:00:00Z","message":{"role":"user","parts":[{"type":"text","text":"Qwen prompt"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-22T09:00:01Z","model":"qwen","message":{"role":"model","parts":[{"type":"text","text":"Qwen answer"},{"functionCall":{"id":"q1","name":"read_file","args":{"path":"a.rs"}}}]},"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}"#,
+            r#"{"type":"tool_result","timestamp":"2026-10-22T09:00:02Z","message":{"parts":[{"functionResponse":{"id":"q1","response":{"output":"ok"}}}]}}"#,
+        ]);
+        assert_converted(&convert_qwen(&qwen).unwrap().0, "Qwen prompt");
+
+        let kimi = write_tmp("kimi.jsonl", &[
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"Kimi prompt"}],"origin":{"kind":"user"},"time":1}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"Kimi answer"}},"time":2}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"k1","name":"Read","args":"{\"path\":\"a.rs\"}"},"time":3}"#,
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"k1","result":{"output":"ok"}},"time":4}"#,
+        ]);
+        assert_converted(&convert_kimi(&kimi).unwrap().0, "Kimi prompt");
+
+        let droid = write_tmp("droid.jsonl", &[
+            r#"{"type":"message","timestamp":"2026-10-22T09:00:00Z","message":{"role":"user","visibility":"visible","content":[{"type":"text","text":"Droid prompt"}]}}"#,
+            r#"{"type":"message","timestamp":"2026-10-22T09:00:01Z","message":{"role":"assistant","visibility":"visible","content":[{"type":"text","text":"Droid answer"},{"type":"tool_use","id":"d1","name":"Read","input":{"path":"a.rs"}}]}}"#,
+        ]);
+        assert_converted(&convert_droid(&droid).unwrap().0, "Droid prompt");
+
+        let opencode = serde_json::json!({"messages":[
+            {"info":{"role":"user","time":{"created":1}},"parts":[{"type":"text","text":"OpenCode prompt"}]},
+            {"info":{"role":"assistant","time":{"created":2}},"parts":[{"type":"text","text":"OpenCode answer"},{"type":"tool","id":"o1","tool":"read","state":{"status":"completed","input":{"path":"a.rs"},"output":"ok"}}]}
+        ]});
+        assert_converted(&convert_opencode(&opencode).unwrap().0, "OpenCode prompt");
+    }
+
+    #[test]
+    fn changed_snapshot_prefix_is_not_reimported() {
+        let before = write_tmp("snapshot-before.jsonl", &[
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"Before"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Old answer"}]}}"#,
+        ]);
+        let after = write_tmp("snapshot-after.jsonl", &[
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"Before"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Old answer"}]}}"#,
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"New prompt"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"New answer"}]}}"#,
+        ]);
+        let previous = convert_cursor(&before).unwrap().0;
+        let suffix = snapshot_suffix(&previous, convert_cursor(&after).unwrap().0);
+        assert!(suffix.iter().any(|entry| matches!(entry, Entry::User { text, .. } if text == "New prompt")));
+        assert!(!suffix.iter().any(|entry| matches!(entry, Entry::User { text, .. } if text == "Before")));
+        let rewritten = write_tmp("snapshot-rewritten.jsonl", &[r#"{"role":"user","message":{"content":[{"type":"text","text":"Rewound"}]}}"#]);
+        assert!(snapshot_suffix(&previous, convert_cursor(&rewritten).unwrap().0).is_empty());
     }
 
     #[test]

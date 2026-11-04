@@ -122,20 +122,19 @@ export const [chat, setChat] = createStore<ChatState>({
 });
 
 /** Presentation changes never copy or replace the conversation transcript. */
-export const conversationMode = () => chat.activeId ? chat.presentation[chat.activeId] ?? "chat" : "chat";
+const presentationKey = () => chat.activeId ?? "new";
+export const conversationMode = () => chat.presentation[presentationKey()] ?? "chat";
 export const conversationTerminal = () => chat.activeId ? chat.views[chat.activeId]?.runtime?.terminal_id : undefined;
 export const conversationTerminalView = () => conversationTerminal() ?? (chat.activeId ? chat.terminalViews[chat.activeId] : undefined);
-export const canResumeInTerminal = (id: string) => {
+export const conversationTerminalBusy = () => !!chat.terminalBusy[presentationKey()];
+export const canOpenInTerminal = (id: string) => {
   const session = chat.sessions.find((s) => s.id === id);
-  return !!session?.native_ids[session.agent_id] && ["claude", "codex", "cursor", "agy", "qwen", "opencode", "kimi"].includes(session.agent_id);
+  return !!session && !!store.agents.find((agent) => agent.id === session.agent_id)?.installed;
 };
 
-export async function setConversationMode(mode: "chat" | "cli") {
-  const id = chat.activeId;
-  if (!id) return;
-  setChat("presentation", id, mode);
-  if (mode !== "cli" || chat.views[id]?.runtime?.terminal_id || chat.terminalBusy[id]) return;
-  if (isRunning(id) || !canResumeInTerminal(id)) return;
+async function openConversationTerminal(id: string) {
+  if (chat.views[id]?.runtime?.terminal_id || chat.terminalBusy[id]) return;
+  if (isRunning(id) || !canOpenInTerminal(id)) return;
   setChat("terminalBusy", id, true);
   try {
     const terminal = await chatOpenTerminal(id);
@@ -145,6 +144,56 @@ export async function setConversationMode(mode: "chat" | "cli") {
     setChat("views", id, "runtime", await chatRuntimeState(id));
   } catch (e) { toast(`Could not open CLI: ${String(e)}`, "error"); }
   finally { setChat("terminalBusy", id, false); }
+}
+
+const cliSessionCreatedHandlers = new Set<(id: string) => void>();
+export function onCliSessionCreated(handler: (id: string) => void) {
+  cliSessionCreatedHandlers.add(handler);
+  return () => { cliSessionCreatedHandlers.delete(handler); };
+}
+
+export async function setConversationMode(mode: "chat" | "cli") {
+  const key = presentationKey();
+  setChat("presentation", key, mode);
+  if (mode !== "cli") return;
+  if (chat.activeId) {
+    await openConversationTerminal(chat.activeId);
+    return;
+  }
+  if (chat.terminalBusy.new) return;
+  const projectPath = chat.draftProject ?? store.currentProject?.path;
+  if (!projectPath) { toast("Choose a project first", "error"); return; }
+  const c = chat.composer;
+  if (!store.agents.find((agent) => agent.id === c.agentId)?.installed) {
+    toast(`${c.agentId} is not installed`, "error");
+    return;
+  }
+  setChat("terminalBusy", "new", true);
+  let worktree: WorktreeRef | undefined;
+  try {
+    if (c.worktree) {
+      const info = await createWorktree(projectPath, c.agentId);
+      worktree = { path: info.worktree_path, branch: info.branch, source_branch: info.source_branch };
+    }
+    const meta = await createSession({
+      projectPath,
+      worktree,
+      agentId: c.agentId,
+      model: c.model,
+      effort: c.effort,
+      mode: c.mode,
+      yolo: c.yolo,
+      activate: true,
+      onCreated: (id) => { for (const handler of cliSessionCreatedHandlers) handler(id); },
+    });
+    setChat("presentation", meta.id, "cli");
+    setChat("presentation", "new", "chat");
+    await openConversationTerminal(meta.id);
+  } catch (e) {
+    const failedWorktree = worktree;
+    if (failedWorktree && !chat.sessions.some((s) => s.worktree?.path === failedWorktree.path)) void removeWorktree(projectPath, failedWorktree.path, failedWorktree.branch, true).catch(() => {});
+    toast(`Could not open CLI: ${String(e)}`, "error");
+  } finally { setChat("terminalBusy", "new", false); }
 }
 
 export async function endConversationTerminal() {
@@ -187,6 +236,27 @@ export interface SessionGroup {
   /** Set for project groups (enables the per-group "+" button). */
   projectPath?: string;
   sessions: SessionMeta[];
+}
+
+export interface ProjectSessionStatus {
+  total: number;
+  running: number;
+  waiting: number;
+  failed: number;
+  unread: number;
+}
+
+/** Aggregate live project activity without hiding pinned sessions in their own group. */
+export function projectSessionStatus(path: string): ProjectSessionStatus {
+  const sessions = chat.sessions.filter((s) => s.project_path === path && !s.archived);
+  return sessions.reduce<ProjectSessionStatus>((status, session) => {
+    status.total++;
+    if (isRunning(session.id)) status.running++;
+    if (pendingInputCount(session.id) > 0) status.waiting++;
+    if (session.status === "error" && !isRunning(session.id)) status.failed++;
+    if (chat.attention[session.id]) status.unread++;
+    return status;
+  }, { total: 0, running: 0, waiting: 0, failed: 0, unread: 0 });
 }
 
 function dateBucket(ts: number): { key: string; label: string; order: number } {
@@ -316,6 +386,7 @@ function handleLiveEntry(id: string, entry: ChatEntry) {
     const previous = chat.views[id]?.runtime?.terminal_id;
     if (previous && previous !== entry.event.state.terminal_id) {
       if (!chat.terminalBusy[id]) setChat("terminalViews", id, previous);
+      if (!entry.event.state.terminal_id) void refreshSessions();
       bumpGitStatus();
     }
   }
@@ -808,9 +879,9 @@ export interface StartTurnOptions {
   onCreated?: (id: string) => void;
 }
 
-/** Create a session and run its first turn. Throws on failure; the session is
- *  left in place (with the error in its transcript) if only the send fails. */
-export async function startSessionTurn(o: StartTurnOptions): Promise<SessionMeta> {
+type CreateSessionOptions = Omit<StartTurnOptions, "prompt" | "contextFrom" | "attachments">;
+
+async function createSession(o: CreateSessionOptions): Promise<SessionMeta> {
   const meta = await chatCreateSession({
     project_path: o.projectPath,
     cwd: o.worktree?.path ?? o.projectPath,
@@ -833,6 +904,13 @@ export async function startSessionTurn(o: StartTurnOptions): Promise<SessionMeta
     pushNav(meta.id);
     syncStoreToSession(meta);
   }
+  return meta;
+}
+
+/** Create a session and run its first turn. Throws on failure; the session is
+ *  left in place (with the error in its transcript) if only the send fails. */
+export async function startSessionTurn(o: StartTurnOptions): Promise<SessionMeta> {
+  const meta = await createSession(o);
   try {
     await chatSend({
       session_id: meta.id,
@@ -1098,7 +1176,14 @@ export function agentTuning(agentId: string): AgentTuning | undefined {
     const c = runtime?.config_options.find((c) => c.category === category || c.id === category || (category === "thought_level" && c.id === "effort"));
     return (c?.options ?? []).flatMap((o) => o.options ?? (o.value ? [{ value: o.value, name: o.name ?? o.value }] : [])).map((o) => ({ id: o.value, label: o.name }));
   };
-  return { models: choices("model"), efforts: choices("thought_level") };
+  const models = choices("model");
+  const efforts = choices("thought_level");
+  if (agentId === "cursor") {
+    const known = new Set(models.map((model) => model.id));
+    const cliModels = discoveredTuning(agentId, chat.composer.agentId === agentId ? chat.composer.model : null).models;
+    return { models: [...models, ...cliModels.filter((model) => !known.has(model.id))], efforts };
+  }
+  return { models, efforts };
 }
 /** Latest context-window usage reported in the active conversation. */
 export function contextUsage(): { used: number; size: number; cost: number | null } | undefined {

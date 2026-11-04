@@ -5,8 +5,8 @@ import { readPref, writePref } from "./appPrefs";
 // ── Model / effort catalog ────────────────────────────────────────────────────
 // Nothing is bundled: each CLI is asked which models it offers (`list_agent_models`)
 // when the model picker opens. The last answer is persisted in preferences.json so
-// the picker shows it instantly next time and stays usable offline. Claude and
-// Cursor use their native ACP catalogs instead (see `agentTuning` in chat.ts).
+// the picker shows it instantly next time and stays usable offline. Claude uses
+// its native ACP catalog; Cursor merges ACP options with its CLI catalog.
 
 export interface AgentTuningOption {
   id: string;

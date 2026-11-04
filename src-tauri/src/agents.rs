@@ -273,6 +273,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_complete_cursor_model_list() {
+        let models = super::parse_model_lines("Available models:\n  auto  Auto\n  sonnet-5  Sonnet 5\n  gpt-6 - GPT-6\n", Some("Available models:"));
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["auto", "sonnet-5", "gpt-6"]);
+        assert_eq!(models[2].label, "GPT-6");
+    }
+
+    #[test]
     fn parses_ollama_list_names() {
         let out = "NAME            ID      SIZE    MODIFIED\nllama3.2:3b     abc     2.0 GB  2 days ago\nqwen2.5-coder:7b  def  4.7 GB  1 week ago\n";
         assert_eq!(parse_ollama_list(out), vec!["llama3.2:3b", "qwen2.5-coder:7b"]);
@@ -325,7 +332,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "runs the installed agent CLIs"]
     async fn installed_clis_list_models() {
-        for id in ["codex", "opencode", "grok", "agy", "droid", "kimi", "qwen"] {
+        for id in ["codex", "opencode", "grok", "agy", "droid", "kimi", "qwen", "cursor"] {
             let installed = super::find_agent(id).and_then(super::launch_binary).is_some();
             let models = if installed { super::fetch_agent_models(id).await } else { Ok(Vec::new()) };
             let first: Vec<_> = models.iter().flatten().take(3).map(|m| format!("{} = {}", m.id, m.label)).collect();
@@ -418,6 +425,16 @@ pub fn clean_explanation(text: &str) -> String {
         .and_then(|rest| rest.trim_end().strip_suffix("```"))
         .unwrap_or(trimmed);
     unfenced.trim().to_string()
+}
+
+pub fn clean_session_title(text: &str) -> String {
+    let cleaned = clean_explanation(text);
+    let line = cleaned.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    let line = line.strip_prefix("Title:").unwrap_or(line).trim();
+    let line = line.trim_start_matches(|c| matches!(c, '#' | '-' | '*' | '>'));
+    let line = line.trim().trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+    let line = line.trim_end_matches(|c| matches!(c, '.' | '!' | ':' | ';'));
+    line.split_whitespace().take(5).collect::<Vec<_>>().join(" ").chars().take(80).collect()
 }
 
 /// Parse `ollama list` output: a header row, then one model per line with the
@@ -599,12 +616,13 @@ fn parse_model_lines(output: &str, heading: Option<&str>) -> Vec<ModelChoice> {
 
 /// Ask the installed CLI which models it currently offers. Nothing is bundled:
 /// agents without a listing source (Aider) return an empty list and the UI
-/// relies on a custom model id. Claude and Cursor use their native ACP catalogs.
+/// relies on a custom model id. Claude uses its native ACP catalog; Cursor merges
+/// ACP's model-dependent options with this complete CLI catalog.
 pub async fn fetch_agent_models(agent_id: &str) -> Result<Vec<ModelChoice>, String> {
     let def = find_agent(agent_id).ok_or_else(|| format!("Unknown agent: {agent_id}"))?;
     let args: &[&str] = match agent_id {
         "codex" => &["debug", "models"],
-        "opencode" | "grok" | "agy" => &["models"],
+        "opencode" | "grok" | "agy" | "cursor" => &["models"],
         "droid" => &["exec", "--help"],
         "kimi" => &["provider", "list", "--json"],
         "qwen" => {

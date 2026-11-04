@@ -1318,19 +1318,44 @@ input, textarea {
 .sidebar-empty { padding: 18px 12px; font-size: 12.5px; color: var(--fg-subtle); line-height: 1.5; }
 
 .session-group { position: relative; margin-bottom: 6px; }
-.session-group-head { display: flex; align-items: center; gap: 2px; padding-right: 2px; }
+.session-group[data-project-path] {
+  margin-bottom: 8px; padding: 4px;
+  border: 1px solid var(--border-muted); border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-2) 52%, transparent);
+  transition: border-color var(--dur-fast), background var(--dur-fast);
+}
+.session-group[data-project-path]:hover { border-color: var(--border-default); }
+.session-group-active[data-project-path] {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-default));
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface-2));
+}
+.session-group-head { display: flex; align-items: center; gap: 0; padding-right: 0; }
 .session-group-toggle {
-  flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 6px;
   font-size: 12px; font-weight: 600; color: var(--fg-muted); border-radius: var(--radius-md); text-align: left;
 }
 .session-group-toggle:hover { color: var(--fg-default); background: var(--surface-2); }
-.session-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-group-copy { flex: 1; min-width: 0; }
+.session-group-name { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-group[data-project-path] .session-group-name { color: var(--fg-default); font-size: 13px; }
 .session-group-name small, .project-menu-name small { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 12px; font-weight: 400; color: var(--fg-subtle); }
 .project-menu-name { flex: 1; min-width: 0; }
-.session-group-add { opacity: 0; transition: opacity var(--dur-fast); }
+.project-status { display: flex; align-items: center; gap: 5px; min-width: 0; margin-top: 3px; color: var(--fg-subtle); font-size: 10.5px; font-weight: 500; line-height: 1.2; }
+.project-status-dot { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: var(--fg-subtle); }
+.project-status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-status-count { flex: 0 0 auto; margin-left: auto; color: var(--fg-subtle); font-weight: 400; }
+.project-status[data-tone="waiting"] { color: var(--status-mod); }
+.project-status[data-tone="waiting"] .project-status-dot { background: var(--status-mod); }
+.project-status[data-tone="failed"] { color: var(--status-del); }
+.project-status[data-tone="failed"] .project-status-dot { background: var(--status-del); }
+.project-status[data-tone="running"] { color: var(--accent-soft); }
+.project-status[data-tone="running"] .project-status-dot { background: var(--accent); }
+.project-status[data-tone="unread"] { color: var(--accent-soft); }
+.project-status[data-tone="unread"] .project-status-dot { background: var(--accent); }
+.session-group-add { min-width: 26px !important; width: 26px; opacity: 0; transition: opacity var(--dur-fast); }
 .session-group-head:hover .session-group-add, .session-group-head:focus-within .session-group-add { opacity: 1; }
 .project-name-input { margin: 3px 4px; padding: 5px 6px; font-size: 12px; }
-.project-drag-handle { opacity: 0; cursor: grab; touch-action: none; }
+.project-drag-handle { min-width: 22px !important; width: 22px; opacity: 0; cursor: grab; touch-action: none; }
 .session-group-head:hover .project-drag-handle, .session-group-head:focus-within .project-drag-handle { opacity: 1; }
 .project-drag-handle:active { cursor: grabbing; }
 .session-group[data-project-path] .session-group-toggle { touch-action: pan-y; }
@@ -1345,8 +1370,10 @@ input, textarea {
   border-radius: var(--radius-md); cursor: pointer; color: var(--fg-body);
   transition: background var(--dur-fast);
 }
+.session-group[data-project-path] .session-row { padding-left: 16px; }
 .session-row:hover { background: var(--surface-2); }
 .session-row-active, .session-row-active:hover { background: var(--surface-4); color: var(--fg-default); }
+.session-group[data-project-path] .session-row-active { box-shadow: inset 2px 0 0 var(--accent); }
 .session-row-archived { opacity: .6; }
 .session-row-lead { width: 18px; display: grid; place-items: center; flex: 0 0 18px; }
 .session-row-title {

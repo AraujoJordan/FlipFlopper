@@ -1,6 +1,6 @@
 import { Menu, MenuItem, MenuLabel, useValueMotion, useSelectionMotion } from "../ui";
 import { Component, Show, createSignal } from "solid-js";
-import { activeSession, activeView, renameSession, conversationMode, setConversationMode } from "../../lib/chat";
+import { activeSession, activeView, chat, renameSession, conversationMode, setConversationMode } from "../../lib/chat";
 import { layout, openSide, toggleSidebar, toggleSide, type SideTab } from "../../lib/layout";
 import { store } from "../../lib/store";
 import BranchIndicator from "../BranchIndicator";
@@ -31,7 +31,12 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
   const session = () => activeSession();
   const project = () => store.currentProject?.path ?? session()?.project_path ?? null;
 
-  const title = () => session()?.title || (session() ? "New session" : "New session");
+  const title = () => session()?.title || "New session";
+  const cliAgent = () => {
+    const id = session()?.agent_id ?? chat.composer.agentId;
+    const name = store.agents.find((agent) => agent.id === id)?.name ?? id;
+    return name.endsWith("CLI") ? name : `${name} CLI`;
+  };
   const finish = (save: boolean) => {
     const s = session();
     if (save && s) void renameSession(s.id, draft());
@@ -75,12 +80,10 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
       </div>
 
       <div class="session-header-actions">
-        <Show when={session()}>
-          <div class="conversation-mode" role="group" aria-label="Conversation view">
-            <button class="pane-toggle" classList={{ "pane-toggle-on": conversationMode() === "chat" }} aria-pressed={conversationMode() === "chat"} onClick={() => void setConversationMode("chat")}>Chat</button>
-            <button class="pane-toggle" classList={{ "pane-toggle-on": conversationMode() === "cli" }} aria-pressed={conversationMode() === "cli"} onClick={() => void setConversationMode("cli")} title="Use the agent's own terminal interface">CLI</button>
-          </div>
-        </Show>
+        <div class="conversation-mode" role="group" aria-label="Conversation view">
+          <button class="pane-toggle" classList={{ "pane-toggle-on": conversationMode() === "chat" }} aria-pressed={conversationMode() === "chat"} onClick={() => void setConversationMode("chat")}>Chat</button>
+          <button class="pane-toggle" classList={{ "pane-toggle-on": conversationMode() === "cli" }} aria-pressed={conversationMode() === "cli"} onClick={() => void setConversationMode("cli")} title={`Use ${cliAgent()}'s terminal interface`}>{cliAgent()}</button>
+        </div>
         <Show when={project()}>
           <div class="session-header-branch"><BranchIndicator /></div>
         </Show>

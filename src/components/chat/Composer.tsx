@@ -2,7 +2,7 @@ import {
   Component, For, Show, batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
 } from "solid-js";
 import {
-  agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, sendQueuedNow, isRunning, splitMode,
+  agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, sendQueuedNow, isRunning, splitMode, onCliSessionCreated,
 } from "../../lib/chat";
 import { AgentLogo, agentModelsError, agentModelsLoading, hydrateAgentModels, refreshAgentModels } from "../../lib/agentMeta";
 import { listMcpServers, listPromptSkills, openAttachment, searchPromptFiles, type FileEntry, type McpServerInfo, type PermissionMode, type PromptSkill } from "../../lib/ipc";
@@ -131,6 +131,12 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   }
 
   // ── Drafts follow the session ──
+  onCleanup(onCliSessionCreated((id) => {
+    if (draftKey() !== "new") return;
+    drafts.set(id, value());
+    attachmentDrafts.set(id, [...attachments()]);
+    draftMove = { from: "new", to: id };
+  }));
   let lastKey = draftKey();
   createEffect(on(() => chat.activeId, () => {
     drafts.set(lastKey, value());
@@ -627,7 +633,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   function toggleModelMenu() {
     const opening = !modelMenu();
     setModelMenu(opening);
-    if (opening && !native()) void refreshAgentModels(chat.composer.agentId);
+    if (opening && (!native() || chat.composer.agentId === "cursor")) void refreshAgentModels(chat.composer.agentId);
   }
   onMount(() => void hydrateAgentModels());
   const modeInfo = () => MODES.find((m) => m.id === chat.composer.mode) ?? MODES[1];

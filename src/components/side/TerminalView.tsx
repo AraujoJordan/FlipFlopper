@@ -1,6 +1,6 @@
 import { Component, For, Show, createSignal, lazy } from "solid-js";
 import { openTerminal } from "../../lib/ipc";
-import { activeSession, isRunning, canResumeInTerminal, setConversationMode } from "../../lib/chat";
+import { activeSession, isRunning, canOpenInTerminal, setConversationMode } from "../../lib/chat";
 import { addTerminal, effectiveRoot, removeTerminal, setActiveTerminal, store, type TerminalKind } from "../../lib/store";
 import { agentColor } from "../../lib/agentMeta";
 import ValidationButton from "../ValidationButton";
@@ -76,7 +76,7 @@ const TerminalView: Component = () => {
           </button>
         </div>
         <ValidationButton />
-        <Show when={activeSession() && canResumeInTerminal(activeSession()!.id)}>
+        <Show when={activeSession() && canOpenInTerminal(activeSession()!.id)}>
           <button class="icon-btn" disabled={opening() || !!activeSession() && isRunning(activeSession()!.id)} onClick={() => void setConversationMode("cli")} title="Resume this conversation in the middle panel’s CLI view" aria-label="Resume in agent TUI">
             <Icon name="external" size={14} />
           </button>
