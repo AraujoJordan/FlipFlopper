@@ -1,11 +1,10 @@
-import { Component, Show, createSignal, createEffect, onCleanup, lazy } from "solid-js";
-import { layout, MOTION_EVENT, paneIsOverlay, renderedSideWidth, setSideWidth, toggleSide, type SideTab } from "../../lib/layout";
+import { Component, For, Show, createSignal, createEffect, onCleanup, lazy } from "solid-js";
+import { layout, MOTION_EVENT, openSide, paneIsOverlay, renderedSideWidth, setSideWidth, toggleSide, type SideTab } from "../../lib/layout";
 import { useResizable } from "../../lib/useResizable";
 import { Icon, type IconName } from "../shell/Icon";
 import { usePresence, useValueMotion } from "../ui";
 import ChangesView from "./ChangesView";
 import PreviewView from "./PreviewView";
-import TerminalView from "./TerminalView";
 import ExplainView from "./ExplainView";
 import FilesView from "./FilesView";
 import PullsView from "./PullsView";
@@ -16,15 +15,24 @@ const FlowView = lazy(() => import("./FlowView"));
 const TITLES: Record<SideTab, string> = {
   changes: "Changes",
   preview: "Preview",
-  terminal: "Terminal",
   flow: "Flow",
   explain: "Explain",
   files: "Files",
   pulls: "Pull requests",
   sidechat: "Side chat",
 };
+const SHORT_TITLES: Record<SideTab, string> = {
+  changes: "Changes",
+  preview: "Preview",
+  files: "Files",
+  pulls: "Pulls",
+  flow: "Flow",
+  explain: "Explain",
+  sidechat: "Side chat",
+};
+const PANE_TABS: SideTab[] = ["changes", "preview", "files", "pulls", "flow", "explain"];
 const ICONS: Record<SideTab, IconName> = {
-  changes: "diff", preview: "globe", terminal: "terminal", flow: "flow", explain: "help", files: "folder", pulls: "merge", sidechat: "message",
+  changes: "diff", preview: "globe", flow: "flow", explain: "help", files: "folder", pulls: "merge", sidechat: "message",
 };
 
 /** Right-hand pane. Each tab stays mounted after its first visit, so terminals
@@ -91,7 +99,24 @@ const SidePane: Component = () => {
       />
       <div class="side-pane-surface">
       <div class="side-pane-head" data-window-header>
-        <span ref={heading} class="side-pane-title"><Icon name={ICONS[layout.sideTab]} size={16} />{TITLES[layout.sideTab]}</span>
+        <div ref={heading as unknown as HTMLDivElement} class="side-pane-tabs" role="tablist" aria-label="Workspace views">
+          <For each={layout.sideTab === "sidechat" || seen("sidechat") ? [...PANE_TABS, "sidechat" as SideTab] : PANE_TABS}>
+            {(tab) => (
+              <button
+                type="button"
+                role="tab"
+                class="side-pane-tab"
+                classList={{ "side-pane-tab-on": layout.sideTab === tab }}
+                aria-selected={layout.sideTab === tab}
+                title={TITLES[tab]}
+                onClick={() => openSide(tab)}
+              >
+                <Icon name={ICONS[tab]} size={14} />
+                <span class="side-pane-tab-label">{SHORT_TITLES[tab]}</span>
+              </button>
+            )}
+          </For>
+        </div>
         <button class="icon-btn" onClick={() => toggleSide()} title="Close pane" aria-label="Close pane">
           <Icon name="x" size={15} />
         </button>
@@ -102,9 +127,6 @@ const SidePane: Component = () => {
         </div>
         <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "preview" }}>
           <Show when={seen("preview")}><PreviewView /></Show>
-        </div>
-        <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "terminal" }}>
-          <Show when={seen("terminal") && !layout.terminalDrawer}><TerminalView /></Show>
         </div>
         <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "flow" }}>
           <Show when={seen("flow")}><FlowView /></Show>

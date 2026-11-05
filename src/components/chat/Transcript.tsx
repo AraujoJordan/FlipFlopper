@@ -317,7 +317,7 @@ const Transcript: Component = () => {
               </>
             )}
           </For>
-          <Show when={chat.activeId}>
+          <Show when={chat.activeId && (running() || pendingInputCount(chat.activeId!) > 0 || queue().length > 0 || !!goal())}>
             <div class="thread-status-line" classList={{ "thread-status-working": running(), "thread-status-attention": pendingInputCount(chat.activeId!) > 0 }}>
               <span class="thread-status-dot" />
               <span>{running() ? "Working" : pendingInputCount(chat.activeId!) > 0 ? "Needs your input" : "Ready"}</span>

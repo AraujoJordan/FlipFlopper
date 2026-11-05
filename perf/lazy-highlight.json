@@ -1,0 +1,14 @@
+{
+  "label": "lazy-highlight",
+  "at": "2026-11-05T12:56:47.944Z",
+  "buildMs": 13136,
+  "distBytes": 7876608,
+  "jsFiles": 105,
+  "jsBytes": 6826345,
+  "cssBytes": 187609,
+  "mainChunk": "index-5pzDgJtb.js",
+  "mainBytes": 715593,
+  "mainGzipBytes": 220796,
+  "mainParseMs": 0.3,
+  "mainParseMinMs": 0.3
+}

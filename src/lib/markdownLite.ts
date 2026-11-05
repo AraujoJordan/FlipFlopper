@@ -1,86 +1,5 @@
-import hljs from "highlight.js/lib/core";
+import { highlight } from "./highlight";
 import { INLINE_MATH, renderMath } from "./math";
-import javascript from "highlight.js/lib/languages/javascript";
-import typescript from "highlight.js/lib/languages/typescript";
-import json from "highlight.js/lib/languages/json";
-import bash from "highlight.js/lib/languages/bash";
-import shell from "highlight.js/lib/languages/shell";
-import python from "highlight.js/lib/languages/python";
-import rust from "highlight.js/lib/languages/rust";
-import go from "highlight.js/lib/languages/go";
-import java from "highlight.js/lib/languages/java";
-import kotlin from "highlight.js/lib/languages/kotlin";
-import swift from "highlight.js/lib/languages/swift";
-import c from "highlight.js/lib/languages/c";
-import cpp from "highlight.js/lib/languages/cpp";
-import csharp from "highlight.js/lib/languages/csharp";
-import css from "highlight.js/lib/languages/css";
-import scss from "highlight.js/lib/languages/scss";
-import xml from "highlight.js/lib/languages/xml";
-import yaml from "highlight.js/lib/languages/yaml";
-import markdown from "highlight.js/lib/languages/markdown";
-import sql from "highlight.js/lib/languages/sql";
-import diff from "highlight.js/lib/languages/diff";
-import ruby from "highlight.js/lib/languages/ruby";
-import php from "highlight.js/lib/languages/php";
-import dart from "highlight.js/lib/languages/dart";
-import ini from "highlight.js/lib/languages/ini";
-import dockerfile from "highlight.js/lib/languages/dockerfile";
-import groovy from "highlight.js/lib/languages/groovy";
-import gradle from "highlight.js/lib/languages/gradle";
-import powershell from "highlight.js/lib/languages/powershell";
-import lua from "highlight.js/lib/languages/lua";
-import makefile from "highlight.js/lib/languages/makefile";
-import graphql from "highlight.js/lib/languages/graphql";
-import objectivec from "highlight.js/lib/languages/objectivec";
-import scala from "highlight.js/lib/languages/scala";
-import plaintext from "highlight.js/lib/languages/plaintext";
-
-hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("typescript", typescript);
-hljs.registerLanguage("json", json);
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("shell", shell);
-hljs.registerLanguage("python", python);
-hljs.registerLanguage("rust", rust);
-hljs.registerLanguage("go", go);
-hljs.registerLanguage("java", java);
-hljs.registerLanguage("kotlin", kotlin);
-hljs.registerLanguage("swift", swift);
-hljs.registerLanguage("c", c);
-hljs.registerLanguage("cpp", cpp);
-hljs.registerLanguage("csharp", csharp);
-hljs.registerLanguage("css", css);
-hljs.registerLanguage("scss", scss);
-hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("yaml", yaml);
-hljs.registerLanguage("markdown", markdown);
-hljs.registerLanguage("sql", sql);
-hljs.registerLanguage("diff", diff);
-hljs.registerLanguage("ruby", ruby);
-hljs.registerLanguage("php", php);
-hljs.registerLanguage("dart", dart);
-hljs.registerLanguage("ini", ini);
-hljs.registerLanguage("dockerfile", dockerfile);
-hljs.registerLanguage("groovy", groovy);
-hljs.registerLanguage("gradle", gradle);
-hljs.registerLanguage("powershell", powershell);
-hljs.registerLanguage("lua", lua);
-hljs.registerLanguage("makefile", makefile);
-hljs.registerLanguage("graphql", graphql);
-hljs.registerLanguage("objectivec", objectivec);
-hljs.registerLanguage("scala", scala);
-hljs.registerLanguage("plaintext", plaintext);
-
-// Common fence labels that aren't highlight.js language names.
-for (const [alias, target] of Object.entries({
-  js: "javascript", jsx: "javascript", ts: "typescript", tsx: "typescript", sh: "bash", zsh: "bash",
-  py: "python", rs: "rust", golang: "go", kt: "kotlin", cs: "csharp", html: "xml", yml: "yaml",
-  md: "markdown", rb: "ruby", toml: "ini", docker: "dockerfile", "objective-c": "objectivec", ps1: "powershell", text: "plaintext",
-})) {
-  hljs.registerAliases(alias, { languageName: target });
-}
-
 
 // Small, dependency-free Markdown → HTML for assistant messages. All input is
 // HTML-escaped before any markup is added, so the output is safe to assign to
@@ -91,14 +10,7 @@ export function escapeHtml(text: string): string {
 }
 
 export function highlightCode(code: string, lang: string | null | undefined): string {
-  if (lang && hljs.getLanguage(lang)) {
-    try {
-      return hljs.highlight(code, { language: lang }).value;
-    } catch {
-      /* fall through to escaped plain text */
-    }
-  }
-  return escapeHtml(code);
+  return highlight(code, lang) ?? escapeHtml(code);
 }
 
 /** Split highlighted HTML into lines, closing spans that cross a line break and re-opening them on the next. */

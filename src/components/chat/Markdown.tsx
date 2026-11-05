@@ -1,6 +1,7 @@
 import { Component, createEffect, createMemo, createSignal, onMount } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { buildPreviewDocument, mermaidSourceOf, renderMarkdownLite, visualSourceOf } from "../../lib/markdownLite";
+import { codeLanguages, languageVersion, preloadCodeLanguages } from "../../lib/highlight";
 import { openConversationFile } from "../../lib/attachments";
 import { animateElement, toast } from "../ui";
 import { writeClipboardText } from "../../lib/native";
@@ -121,7 +122,15 @@ function fillMermaid(root: HTMLDivElement | undefined, scheme: "light" | "dark")
 
 /** Renders assistant markdown, including places outside the transcript. */
 const Markdown: Component<{ text: string }> = (props) => {
-  const html = createMemo(() => { renderMathEnabled(); return renderMarkdownLite(maskForDisplay(props.text)); });
+  const html = createMemo(() => {
+    renderMathEnabled();
+    const text = maskForDisplay(props.text);
+    preloadCodeLanguages(text);
+    // Subscribe only to the grammars this message uses (a grammar that loads
+    // elsewhere must not re-render the whole transcript).
+    for (const language of codeLanguages(text)) languageVersion(language);
+    return renderMarkdownLite(text);
+  });
   const isMac = navigator.platform.toLowerCase().includes("mac");
   let root: HTMLDivElement | undefined;
 

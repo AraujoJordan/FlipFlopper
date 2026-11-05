@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.25.0 - 2026-11-05
+
+### Added
+
+- **Project-aware icons**:
+  - Sidebar project avatars now use the launcher/app icon the project already ships: Android mipmaps, Apple AppIcon asset catalogs/ICNS/Icon Composer bundles, Tauri and Electron bundle icons, Flutter/Expo/React Native/KMP assets, Godot, browser and VS Code extension icons, and web favicons/manifests.
+  - ICO and ICNS containers are decoded on demand; BMP-only ICO frames become PNG. SVG icons are embedded as data URLs.
+  - Project Settings shows the detected source and offers **Re-detect**. Custom images/letters/colors still override, and missing or unreadable icons fall back to the existing monogram.
+- **Startup performance**:
+  - Theme-correct first paint via a synchronous boot canvas and a capped layout restore before the window is revealed.
+  - Heavy panels (terminal drawer, side pane, command palette) and syntax highlighting load lazily.
+  - Background agent/installer/import/update probes are deferred; the tool catalog caches version probes and applies a per-CLI timeout.
+  - `scripts/perf.mjs`, `scripts/startup-bench.mjs`, `FF_PERF=1` marks and `docs/perf.md` document measured before/after results.
+
+### Changed
+
+- The side pane no longer hosts a Terminal tab; use the bottom drawer (⌘J) or the header terminal button.
+- The thread status line only appears while a turn is active or work is queued; finished turns show their duration.
+
 ## 0.24.0 - 2026-11-05
 
 ### Added

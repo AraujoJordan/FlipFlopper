@@ -1,0 +1,14 @@
+{
+  "label": "baseline-rebuild",
+  "at": "2026-11-05T12:34:09.688Z",
+  "buildMs": null,
+  "distBytes": 7790592,
+  "jsFiles": 65,
+  "jsBytes": 6817392,
+  "cssBytes": 187609,
+  "mainChunk": "index-BvqdRm1J.js",
+  "mainBytes": 1065197,
+  "mainGzipBytes": 319402,
+  "mainParseMs": 0.4,
+  "mainParseMinMs": 0.4
+}

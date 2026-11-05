@@ -1,4 +1,4 @@
-import { Component, Show, createEffect, createSignal, lazy, onCleanup, onMount } from "solid-js";
+import { Component, Show, Suspense, createEffect, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -25,7 +25,7 @@ import {
   type NativeMenuState,
 } from "./lib/ipc";
 import { cancelTurn, chat, initChat, markLeft, markReturned, onTurnEnd, runAutoSettle, selectSession, setSnoozeClock, isRunning, setYolo, startNewSession, conversationMode, conversationTerminal, conversationTerminalView, conversationTerminalBusy, setConversationMode, endConversationTerminal, canOpenInTerminal } from "./lib/chat";
-import { PANEL_INSET, PANEL_GAP, hydrateLayout, watchMotionPreferences, watchLayoutSizes, paneIsOverlay, sidebarIsOverlay, renderedSidebarWidth, layout, openSide, resetZoom, setLayout, setSidebarWidth, stepZoom, toggleSide, toggleSidebar } from "./lib/layout";
+import { PANEL_INSET, PANEL_GAP, openTerminalDrawer, hydrateLayout, watchMotionPreferences, watchLayoutSizes, paneIsOverlay, sidebarIsOverlay, renderedSidebarWidth, layout, openSide, resetZoom, setLayout, setSidebarWidth, stepZoom, toggleSide, toggleSidebar } from "./lib/layout";
 import { openProjectPath, forgetRecentProject, pickAndOpenProject, projectCreated } from "./lib/projects";
 import { watchNativeAppearance, isMacDesktop, handleWindowHeaderMouseDown, handleWindowHeaderDoubleClick } from "./lib/native";
 import { initAppPrefs } from "./lib/appPrefs";
@@ -41,22 +41,21 @@ import { loadOpenInApps } from "./lib/openIn";
 import { hydrateStashes } from "./lib/stash";
 import { hydrateKeybindings } from "./lib/keybindings";
 import { hydrateProjectScripts } from "./lib/scripts";
-import { hydratePaletteHistory } from "./lib/palette";
+import { hydratePaletteHistory, paletteOpen } from "./lib/palette";
 import { REFRESH_MS, refreshPrStatus } from "./lib/prStatus";
 import { hydrateImporter, scanImportable } from "./lib/importer";
 import { addPaths, dragActive, setDragActive } from "./lib/attachments";
 import { cycleSession, installGlobalShortcuts, registerShortcutHandler, runAction } from "./lib/shortcuts";
 import { checkForUpdates, isUpdaterEnabled } from "./lib/updater";
 import { useResizable } from "./lib/useResizable";
+import { mark as perfMark } from "./lib/perf";
 import Sidebar from "./components/shell/Sidebar";
 import SessionHeader from "./components/shell/SessionHeader";
-import TerminalDrawer from "./components/TerminalDrawer";
 import Transcript from "./components/chat/Transcript";
 import Composer from "./components/chat/Composer";
 import UsageLimitBanner from "./components/chat/UsageLimitBanner";
 import WorktreeSetupCards from "./components/chat/WorktreeSetupCard";
 import EmptyState from "./components/chat/EmptyState";
-import SidePane from "./components/side/SidePane";
 import { Icon } from "./components/shell/Icon";
 import ShortcutHelp from "./components/ShortcutHelp";
 import SchedulesDialog from "./components/SchedulesDialog";
@@ -92,7 +91,6 @@ import { SquashPushDialogHost } from "./components/git/SquashPushDialog";
 import { WorktreeCloseDialogHost } from "./components/git/WorktreeCloseDialog";
 import ImportDialog from "./components/ImportDialog";
 import PromptLinkDialog from "./components/PromptLinkDialog";
-import CommandPalette from "./components/shell/CommandPalette";
 import { togglePalette } from "./lib/palette";
 import { ToastHost, ConfirmHost, confirmDialog, toast, Presence, usePresence, useThemeMotion } from "./components/ui";
 import "./App.css";
@@ -101,6 +99,9 @@ import "./App.css";
 // the gate a lazy component that's always rendered (just internally hidden)
 // would fetch its chunk at startup anyway.
 const ConversationTerminal = lazy(() => import("./components/TerminalPane"));
+const TerminalDrawer = lazy(() => import("./components/TerminalDrawer"));
+const SidePane = lazy(() => import("./components/side/SidePane"));
+const CommandPalette = lazy(() => import("./components/shell/CommandPalette"));
 const ProjectPicker = lazy(() => import("./components/ProjectPicker"));
 const NewProjectWizard = lazy(() => import("./components/NewProjectWizard"));
 const SettingsPanel = lazy(() => import("./components/SettingsPanel"));
@@ -271,7 +272,7 @@ const App: Component = () => {
       case "menu-toggle-side-pane": toggleSide(); return;
       case "menu-show-changes": setGitPanelTab("changes"); toggleSide("changes"); return;
       case "menu-show-preview": toggleSide("preview"); return;
-      case "menu-show-terminal": toggleSide("terminal"); return;
+      case "menu-show-terminal": openTerminalDrawer(); return;
       case "menu-show-flow": toggleSide("flow"); return;
       case "menu-show-explain": toggleSide("explain"); return;
       case "menu-show-files": toggleSide("files"); return;
@@ -327,15 +328,32 @@ const App: Component = () => {
   });
 
   onMount(async () => {
-    // Apply the native frame color before showing, without waiting for a paint
-    // frame (hidden webviews may not paint). The backend retains its show fallback.
-    void appearance.ready.then(() => win.show()).then(() => win.setFocus()).catch((error) => console.error("Window activation failed:", error));
+    perfMark("js:mounted");
+    // Restore the layout (theme included) before revealing the window so the first
+    // visible frame already matches the persisted appearance. index.html painted the
+    // boot canvas synchronously, so nothing white shows while this read is in
+    // flight. The native frame theme is applied by `applyNow()` after `show()`:
+    // theming a hidden macOS window blocks and would hold the reveal behind it.
+    const layoutHydration = hydrateLayout().catch((error) => console.error("Layout restore failed:", error));
     void initAppPrefs();
+    // Never hold the window behind a slow preference read; the boot canvas covers it.
+    const layoutReady = Promise.race([layoutHydration, new Promise<void>((resolve) => setTimeout(resolve, 250))]);
+    void layoutReady.then(async () => {
+      // A hidden WebView may not have painted a frame, so paint the native window
+      // background in the chosen theme before the first reveal.
+      await appearance.primeBackground();
+      perfMark("js:show-request");
+      return win.show();
+    }).then(() => {
+      perfMark("js:shown");
+      appearance.applyNow();
+      return win.setFocus();
+    }).catch((error) => console.error("Window activation failed:", error));
 
     const [, , , , , , , , , , agents, recents] = await Promise.all([
       hydrateSettings(),
       hydrateStorePreferences(),
-      hydrateLayout(),
+      layoutHydration,
       hydrateOrchestratorPersistence(),
       hydrateSnoozeOptions(),
       hydrateThreadDetails(),
@@ -349,7 +367,9 @@ const App: Component = () => {
     setStore("agents", agents);
     setStore("recentProjects", recents);
 
+    perfMark("js:hydrated");
     await initChat();
+    perfMark("js:chat-ready");
     await hydrateAutoPull();
     await hydrateCustomModels();
     await hydrateUnread(new Set(chat.sessions.map((session) => session.id)));
@@ -360,6 +380,7 @@ const App: Component = () => {
       await openProjectPath(recents[0].path);
     }
     setStore("restoringWorkspace", false);
+    perfMark("js:ready");
 
     // A prompt/thread link can arrive on the command line or be left pending by
     // a previous launch. Open it only after sessions and recents are ready.
@@ -382,13 +403,16 @@ const App: Component = () => {
       }).catch(() => {});
     }, 1_500);
     onCleanup(() => clearInterval(openLinkTimer));
-    void hydrateImporter().then(scanImportable);
+    // Background scans are useful but not needed for the first paint; keep them
+    // out of the startup window so typing and navigation stay snappy.
+    setTimeout(() => void hydrateImporter().then(scanImportable), 3_000);
 
-    // Backfill agent versions (spawns `--version` per installed agent).
-    void getAgents(true).then((full) => setStore("agents", full));
+    // Backfill agent versions (spawns `--version` per installed agent) once the
+    // first interactions have settled.
+    setTimeout(() => void getAgents(true).then((full) => setStore("agents", full)), 2_500);
 
-    // Silent background update check (Windows/Linux only).
-    void checkForUpdates({ silent: true }).then((info) => {
+    // Silent background update check (Windows/Linux only), after startup.
+    setTimeout(() => void checkForUpdates({ silent: true }).then((info) => {
       if (info) {
         toast(`FlipFlopper ${info.version} is available`, "info", {
           actionLabel: "Update",
@@ -396,7 +420,7 @@ const App: Component = () => {
           sticky: true,
         });
       }
-    });
+    }), 6_000);
 
     startGitPolling();
 
@@ -575,8 +599,7 @@ const App: Component = () => {
                 >
                   <Transcript />
                 </Show>
-                <TerminalDrawer />
-                <div class="dock" style={{ display: conversationTerminal() ? "none" : undefined }}>
+                <div class="dock" classList={{ "dock-above-terminal": layout.terminalDrawer }} style={{ display: conversationTerminal() ? "none" : undefined }}>
                   <UsageLimitBanner />
                   <Composer onOpenProjects={() => setPickerOpen(true)} />
                 </div>
@@ -586,6 +609,10 @@ const App: Component = () => {
                     <button class="ui-btn ui-btn-outline" onClick={() => void endConversationTerminal()}>End CLI</button>
                   </div>
                 </Show>
+                {/* Footer terminal panel: docked to the bottom of the conversation column,
+                    below the composer (T3 Code layout), so the prompt stays directly above it.
+                    Always mounted; the drawer hides itself through its own presence timing. */}
+                <Suspense fallback={null}><TerminalDrawer /></Suspense>
               </div>
               <div ref={cliSurface} class="conversation-surface" style={{ display: cliPresent() ? "flex" : "none" }}>
                 <div class="conversation-cli-note">
@@ -605,7 +632,7 @@ const App: Component = () => {
               </div>
             </div>
           </section>
-          <SidePane />
+          <Suspense fallback={null}><SidePane /></Suspense>
         </div>
       </main>
 
@@ -632,7 +659,7 @@ const App: Component = () => {
       <SquashPushDialogHost />
       <WorktreeCloseDialogHost />
       <ImportDialog />
-      <CommandPalette />
+      <Show when={paletteOpen()}><Suspense fallback={null}><CommandPalette /></Suspense></Show>
 
       <Presence when={pickerOpen()}>
         <ProjectPicker

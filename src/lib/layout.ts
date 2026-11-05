@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { readPref, writePref } from "./appPrefs";
 import { CUSTOM_THEME_PROPERTIES, customThemeTokens, normalizeCustomTheme, type CustomTheme } from "./theme";
 
-export type SideTab = "changes" | "preview" | "terminal" | "flow" | "explain" | "files" | "pulls" | "sidechat";
+export type SideTab = "changes" | "preview" | "flow" | "explain" | "files" | "pulls" | "sidechat";
 export type ThemePref = "system" | "light" | "dark";
 export type MotionPref = "system" | "reduced" | "off";
 export type ChatWidth = "comfortable" | "wide" | "full";
@@ -115,6 +115,8 @@ interface LayoutState {
 }
 
 const KEY = "flipflopper:layout";
+/** Mirrored for index.html's first paint; keep the literal in sync with it. */
+const BOOT_THEME_KEY = "flipflopper:boot-theme";
 
 const DEFAULTS: LayoutState = {
   sidebarOpen: true,
@@ -183,6 +185,17 @@ function persist() {
   writePref(KEY, { ...layout });
 }
 
+/** Mirror the resolved appearance for index.html's boot canvas. preferences.json
+ *  is read asynchronously, so this keeps the first paint (and the capped reveal
+ *  fallback) on the persisted theme instead of the system palette. */
+function syncBootTheme() {
+  try {
+    localStorage.setItem(BOOT_THEME_KEY, layout.customTheme ? layout.customTheme.appearance : layout.theme);
+  } catch {
+    // Storage can be unavailable; the boot script then follows the system theme.
+  }
+}
+
 export function applyTheme(theme: ThemePref) {
   const root = document.documentElement;
   root.dataset.themeSwitching = "true";
@@ -192,6 +205,7 @@ export function applyTheme(theme: ThemePref) {
   // pass through mismatched contrast during a theme change.
   void root.offsetHeight;
   delete root.dataset.themeSwitching;
+  syncBootTheme();
   // Terminals read theme tokens at creation; tell them to re-read.
   window.dispatchEvent(new Event("flipflopper:theme-changed"));
 }
@@ -429,6 +443,7 @@ export function applyCustomTheme(theme: CustomTheme | null = layout.customTheme)
   } else {
     style.removeProperty("color-scheme");
   }
+  syncBootTheme();
   window.dispatchEvent(new Event("flipflopper:theme-changed"));
 }
 
@@ -495,6 +510,11 @@ export function resetZoom() {
 export async function hydrateLayout() {
   const persisted = await readPref<Partial<LayoutState>>(KEY, {}, () => ({}));
   const saved = persisted && typeof persisted === "object" && !Array.isArray(persisted) ? persisted : {};
+  // The terminal used to be a side-pane tab; move that saved state to the footer drawer.
+  if ((saved as { sideTab?: string }).sideTab === "terminal") {
+    (saved as { sideTab?: string }).sideTab = "changes";
+    (saved as { terminalDrawer?: boolean }).terminalDrawer = true;
+  }
   const paths = (value: unknown) => Array.isArray(value) ? [...new Set(value.filter((p): p is string => typeof p === "string" && !!p))] : [];
   const names = saved.projectNames;
   const projectNames = Object.fromEntries(names && typeof names === "object" && !Array.isArray(names)
@@ -540,6 +560,13 @@ export function setSideWidth(px: number) {
 const TERMINAL_DRAWER_MIN = 150;
 const TERMINAL_DRAWER_MAX = 640;
 
+/** Open the bottom terminal panel (the only terminal surface). */
+export function openTerminalDrawer() {
+  if (sidebarIsOverlay()) setLayout("sidebarOpen", false);
+  setLayout("terminalDrawer", true);
+  persist();
+}
+
 /** Open or close the bottom terminal drawer. */
 export function toggleTerminalDrawer() {
   setLayout("terminalDrawer", (open) => !open);
@@ -558,7 +585,6 @@ export function toggleSide(tab?: SideTab) {
     setLayout("sideOpen", false);
   } else {
     if (tab) setLayout("sideTab", tab);
-    if (tab === "terminal") setLayout("terminalDrawer", false);
     setLayout("sideOpen", tab ? true : !layout.sideOpen);
   }
   if (layout.sideOpen && sidebarIsOverlay()) setLayout("sidebarOpen", false);
@@ -567,7 +593,6 @@ export function toggleSide(tab?: SideTab) {
 
 export function openSide(tab: SideTab) {
   if (sidebarIsOverlay()) setLayout("sidebarOpen", false);
-  if (tab === "terminal") setLayout("terminalDrawer", false);
   setLayout({ sideOpen: true, sideTab: tab });
   persist();
 }

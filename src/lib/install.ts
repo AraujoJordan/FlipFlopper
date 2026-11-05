@@ -1,12 +1,12 @@
 import { createSignal } from "solid-js";
 import { homeDir } from "@tauri-apps/api/path";
 import { getAgents, getToolCatalog, installTool, onPtyExit } from "./ipc";
-import { openSide } from "./layout";
+import { openTerminalDrawer } from "./layout";
 import { addTerminal, setStore, store } from "./store";
 import { toast } from "../components/ui";
 
 // Installing a coding agent runs the tool catalog's install command in a
-// terminal tab (so the user sees and can answer the installer), then re-detects
+// terminal drawer (so the user sees and can answer the installer), then re-detects
 // agents when it exits. Agent ids match tool-catalog ids.
 
 const [installable, setInstallable] = createSignal<Set<string>>(new Set());
@@ -36,7 +36,7 @@ export async function installAgent(agentId: string) {
     const cwd = store.currentProject?.path ?? (await homeDir());
     const sessionId = await installTool(agentId, cwd);
     addTerminal({ sessionId, label: `Install · ${name}`, kind: "install" });
-    openSide("terminal");
+    openTerminalDrawer();
     const done = await onPtyExit(sessionId, async () => {
       done();
       setInstalling((s) => { const n = new Set(s); n.delete(agentId); return n; });

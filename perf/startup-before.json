@@ -1,0 +1,8 @@
+{
+  "label": "before",
+  "at": "2026-11-05T06:37:00Z",
+  "source": "production bundle (vite preview on :1433, isolated perf identifier), single recorded run",
+  "windowShownMs": 6001,
+  "readyMs": 6210,
+  "note": "Dominant cost: get_tool_catalog ran a --version probe for every developer tool synchronously on the Tauri main thread, blocking window show and all IPC for ~5 s."
+}

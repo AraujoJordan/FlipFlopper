@@ -22,7 +22,7 @@ import { DEFAULT_PROXY, applyNetworkProxy, effectiveProxy, networkProxy, maskSec
 import { playSnapshotSound } from "../lib/snapshotFeedback";
 import { shortcutGroups } from "../lib/shortcuts";
 import { store, addTerminal, setStore, effectiveRoot } from "../lib/store";
-import { openSide, restoreSidebarProject } from "../lib/layout";
+import { openTerminalDrawer, restoreSidebarProject } from "../lib/layout";
 import { homeDir } from "@tauri-apps/api/path";
 import { checkForUpdates, isUpdaterEnabled } from "../lib/updater";
 import { AgentLogo } from "../lib/agentMeta";
@@ -33,7 +33,6 @@ import { installAgent, installable, installing, loadInstallable } from "../lib/i
 import { Checkbox, Menu, MenuDivider, MenuItem, MenuLabel, Spinner, confirmDialog, toast, useValueMotion, useSelectionMotion } from "./ui";
 import ProjectScriptsSettings from "./ProjectScriptsSettings";
 import BrowserProfilesSettings from "./BrowserProfilesSettings";
-import WorktreeCleanupSettings from "./WorktreeCleanupSettings";
 import SnoozeOptionsSettings from "./SnoozeOptionsSettings";
 import { openLicenses } from "./LicensesDialog";
 import { openModelCatalog } from "./ModelCatalogDialog";
@@ -197,7 +196,7 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
       const cwd = effectiveRoot() ?? await homeDir();
       const terminal = await openTerminal(cwd);
       addTerminal({ sessionId: terminal, label: `${action === "login" ? "Sign in" : "Update"} · ${agentId === "claude" ? "Claude Code" : "Cursor"}`, kind: "shell" });
-      openSide("terminal"); props.onClose();
+      openTerminalDrawer(); props.onClose();
       const command = agentId === "claude" ? action === "login" ? "claude auth login" : "claude update" : action === "login" ? "cursor-agent login" : "cursor-agent update";
       await ptySendLine(terminal, command);
     } catch (error) { toast(`Could not open CLI sign-in: ${String(error)}`, "error"); }
@@ -500,11 +499,6 @@ const SettingsPanel: Component<{ open: boolean; onClose: () => void }> = (props)
                 <input class="ui-field" style={{ width: "240px" }} aria-label="Git writing style" placeholder="Use Conventional Commits"
                   value={gitWritingInstructions()} onInput={(event) => setGitWritingInstructions(event.currentTarget.value)} />
               </Row>
-              <div class="settings-block">
-                <div class="settings-row-title">Worktree cleanup</div>
-                <div class="settings-row-hint">Remove worktrees belonging to archived sessions that have been idle for a while. Branches are kept; sessions return to the project checkout.</div>
-                <WorktreeCleanupSettings />
-              </div>
             </Show>
 
             <Show when={section() === "browser"}>

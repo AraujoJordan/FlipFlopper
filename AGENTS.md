@@ -3,6 +3,12 @@
 Cross-tool AI agent instructions for this repository. `CLAUDE.md`, `AGY.md`,
 and `GEMINI.md` are symlinks to this file, so keep it accurate and practical.
 
+- Performance: `scripts/perf.mjs` (bundle/build metrics, `--build --label name` → `perf/<name>.json`)
+  and `scripts/startup-bench.mjs` (isolated 3-run startup benchmark; needs `vite preview` on
+  port 1433). Startup marks are opt-in with `FF_PERF=1`; methodology and numbers are in
+  `docs/perf.md`. Keep heavy IPC off the main thread: sync `#[tauri::command] fn` handlers run
+  on Tauri's main thread and can delay window show (this caused a ~5 s startup stall).
+
 ## Project Snapshot
 
 FlipFlopper is a cross-platform desktop app that presents CLI AI coding agents
@@ -270,7 +276,8 @@ Currently implemented:
   `data-focus-area` regions.
 - More T3 Code-style polish: **auto-archive idle sessions** (`settleCandidates`: opt-in after 3–30
   days, never pinned/running/waiting/scheduled/goal-active/snoozed ones, one Undo for the batch),
-  **⌘⇧T reopen** the last archived session, project **monograms** in the sidebar, GitHub-style
+  **⌘⇧T reopen** the last archived session, project **monograms** and detected launcher/web icons
+  in the sidebar, GitHub-style
   `> [!NOTE]` **alerts**, trackpad **swipe** back/forward (`swipeStep`; ignored over horizontally
   scrollable content), **type-to-focus** (a printable key with nothing focused lands in the
   composer), clickable `path:line` **terminal links** (`findFileReferences` + xterm link provider →
@@ -364,7 +371,12 @@ Currently implemented:
 - **Project settings** (`components/ProjectSettingsDialog.tsx`, from a project's context menu and
   the palette): display name, a custom monogram (one or two letters plus a hue from the palette,
   stored in `layout.projectIcons` and used by the sidebar), pin/unpin, reveal or open the checkout,
-  and remove-from-sidebar. Names and icons never move the folder.
+  and remove-from-sidebar. The avatar otherwise uses the project's own launcher/app icon
+  (`project_icon.rs`: Android mipmaps, Apple `AppIcon.appiconset`/ICNS/single-layer Icon Composer
+  `.icon`, Tauri and Electron bundle icons, Flutter/Expo/React Native/KMP assets, Godot, browser
+  extensions and web favicons, with ICO/BMP frames converted to PNG), re-detected when the project
+  opens and from the dialog; an unreadable or missing icon falls back to the letter. A saved letter
+  or hue deliberately keeps the monogram. Names and icons never move the folder.
 - Command palette (⌘K): sessions by title, message-content search over all
   transcripts (`chat_search`), projects and actions. Prefix `>` lists commands
   only. **⌘P** opens the file picker (`search_prompt_files`) and **⌘⇧F** searches
@@ -468,6 +480,9 @@ Currently implemented:
   `tauri.conf.json` enables decorations; `tauri.macos.conf.json` uses an overlay native
   title bar with hidden title text, integrating conversation/review headers into the top row.
   The window remains opaque; native appearance and background track the Circuit theme.
+  `index.html` paints the dark/light canvas synchronously from the theme mirrored in
+  localStorage (`flipflopper:boot-theme`), and the window is revealed only after the saved
+  layout is restored (capped at 250 ms), so a pinned theme never flashes the system palette.
   Native traffic lights retain their standard position. CSS reserves their physical size
   across zoom, collapsed/overlay sidebars and fullscreen. Only blank header space starts
   native dragging; controls stay interactive. `window_titlebar_double_click` respects the
@@ -512,7 +527,9 @@ Currently implemented:
   duration and even-pace markers in provider limit windows; composer `#` pull-request search;
   bulk title regeneration; a per-thread status line; project image icons alongside monograms and
   emoji; Files → Save a copy.
-- Conversation parity: a resizable bottom terminal drawer (⌘J, reusing cached xterms), response
+- Conversation parity: a resizable bottom terminal drawer (⌘J, reusing cached xterms) is the only
+  terminal surface — the header Terminal button, command palette, `/terminal`, scripts and install
+  actions all open it, and a saved side-pane terminal tab migrates into it; response
   streaming modes (live or when finished), a composer `#` pull-request picker, line comments from
   the file viewer, bulk title regeneration, a per-thread status line with goal/queue state, fork
   lineage with parent/child links in Thread details, a fallback model offered after a provider
@@ -530,6 +547,9 @@ Currently implemented:
 
 Known gaps / current quirks:
 
+- Project icons cover the common app shells above; Android vector-only adaptive icons (no raster
+  foreground), layered Icon Composer bundles, Unity player-icon settings and Linux `.desktop`/Windows
+  package manifests are not derived and fall back to the letter.
 - The system-wide SnapShots shortcut still needs `tauri-plugin-global-shortcut`, a
   new crate that requires an explicit dependency decision. SnapShots otherwise run
   from the composer, `/snapshot` and the palette.
@@ -665,6 +685,7 @@ src/
   lib/palette.ts             command palette open state
   lib/install.ts             install agents via the tool catalog
   lib/projects.ts            open/pick/forget project, project-created seeding
+  lib/projectIcons.ts        per-session cache for detected project icons (IPC)
   lib/gitStatus.ts           shared git status/sync poll (header badge + Changes)
   lib/orchestrator.ts        flow canvas on sessions (see Project Snapshot)
   lib/explain.ts             Explain tab state: provider choice, per-session text
@@ -690,7 +711,7 @@ src/
   components/
     shell/                   Sidebar, SessionHeader, ThreadDetailsCard, Icon, CommandPalette
     BrowserProfilesSettings.tsx  Settings → Browser profiles
-    ProjectIconView.tsx      project monogram/image avatar
+    ProjectIconView.tsx      project avatar: saved image, detected project icon, or monogram
     chat/                    AgentInteraction (live native request cards),
                              Transcript, MessageItem, ToolCallRow, InlineDiff,
                              Markdown, Composer, RichEditor, McpAppCard, TaskStrip, FindBar, WelcomeWizard, TimelineMinimap, EmptyState, AttachmentChip,
@@ -738,6 +759,7 @@ src-tauri/src/
   provider_limits.rs         Claude/Codex/Cursor account-window adapters
   project.rs                 read-only inspection, clone, opt-in local agent setup, recents,
                              skills, prompt file search
+  project_icon.rs            bounded launcher/app icon detection; ICO/ICNS/BMP extraction
   git.rs / review.rs         shell-based git ops; diff parser for DiffPane
   worktree.rs                isolated git worktrees (pure git plumbing)
   runner.rs                  run/validation target detection

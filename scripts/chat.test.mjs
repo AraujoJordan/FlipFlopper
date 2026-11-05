@@ -79,6 +79,8 @@ async function loadMarkdown() {
   const module = new SourceTextModule(source);
   await module.link((specifier) => specifier === "./math"
     ? new SyntheticModule(["INLINE_MATH", "renderMath"], function () { this.setExport("INLINE_MATH", math.INLINE_MATH); this.setExport("renderMath", math.renderMath); })
+    : specifier === "./highlight"
+    ? new SyntheticModule(["highlight"], function () { this.setExport("highlight", () => null); })
     : new SyntheticModule(["default"], function () {
       this.setExport("default", specifier === "highlight.js/lib/core" ? hljs : () => {});
     }));
@@ -552,6 +554,18 @@ async function motionFixture(saved = {}) {
 }
 const settle = async () => { for (let i=0;i<8;i++) await Promise.resolve(); };
 
+test('a saved terminal side tab migrates to the footer drawer', async () => {
+  const f = await motionFixture({ sideTab: 'terminal', terminalDrawer: false });
+  try {
+    assert.equal(f.layout.layout.sideTab, 'changes', 'the retired side tab falls back to Changes');
+    assert.equal(f.layout.layout.terminalDrawer, true, 'the terminal opens in the footer drawer instead');
+    f.layout.toggleTerminalDrawer();
+    assert.equal(f.layout.layout.terminalDrawer, false);
+    f.layout.openTerminalDrawer();
+    assert.equal(f.layout.layout.terminalDrawer, true, 'the helper opens the footer panel');
+  } finally { f.dispose(); }
+});
+
 test('transcript module is pure and chat re-exports the same reducer', async () => {
   const transcript = await loadFrontend('../src/lib/transcript.ts', {});
   const chat = await loadChat({ './transcript': transcript });
@@ -862,6 +876,7 @@ test('native frame appearance coalesces theme changes and follows system colors'
   });
   const watcher = native.watchNativeAppearance(() => preference);
   try {
+    watcher.applyNow();
     await settle();
     preference = 'dark'; color = '#0F1417';
     f.window.dispatchEvent(new Event('flipflopper:theme-changed'));
@@ -900,7 +915,8 @@ test('native appearance failures remain observable and later changes can recover
   });
   const watcher = native.watchNativeAppearance(() => 'dark', () => { errors++; });
   try {
-    await watcher.ready;
+    watcher.applyNow();
+    await settle();
     assert.equal(errors, 1);
     fail = false;
     f.window.dispatchEvent(new Event('flipflopper:theme-changed')); await settle();
@@ -2945,6 +2961,21 @@ test('auto-pull preferences resolve project overrides over the default', async (
   assert.deepEqual(mod.autoPullPrefs(), { enabled: false, projects: { '/a': true, '/b': false } }, 'invalid saved values are dropped');
   assert.equal(mod.resolveAutoPull('/a'), true);
   assert.equal(mod.resolveAutoPull(null), false);
+});
+
+test('highlight grammars resolve aliases and stay unloaded until requested', async () => {
+  const mod = await loadFrontend('../src/lib/highlight.ts', {
+    'solid-js': solid,
+    'highlight.js/lib/core': { default: { registerLanguage() {}, registerAliases() {}, highlight() { return { value: 'x' }; }, getLanguage() { return false; } } },
+  });
+  assert.equal(mod.canonicalLanguage('js'), 'javascript');
+  assert.equal(mod.canonicalLanguage('TS'), 'typescript');
+  assert.equal(mod.canonicalLanguage('sh'), 'bash');
+  assert.equal(mod.canonicalLanguage('html'), 'xml');
+  assert.equal(mod.canonicalLanguage('yaml'), 'yaml');
+  assert.equal(mod.canonicalLanguage('not-a-language'), null);
+  assert.equal(mod.canonicalLanguage(null), null);
+  assert.equal(mod.highlight('const a = 1', 'not-a-language'), null, 'unknown grammars fall back to escaped text');
 });
 
 test('local server discovery normalizes and dedupes terminal URLs', async () => {

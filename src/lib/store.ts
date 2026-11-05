@@ -1,7 +1,7 @@
 import { createStore } from "solid-js/store";
 import type { AgentInfo, ProjectInfo, RunTarget } from "./ipc";
 import { getCurrentBranch, ptyKill } from "./ipc";
-import { openSide } from "./layout";
+import { openTerminalDrawer, openSide } from "./layout";
 import { disposeCachedTerminal } from "./terminalCache";
 import { readLegacyJson, readPref, writePref } from "./appPrefs";
 
@@ -188,7 +188,7 @@ export function setRunTargets(targets: RunTarget[]) {
 export function addTerminal(tab: TerminalTab) {
   setStore("terminals", (t) => [...t, tab]);
   setStore("activeTerminalId", tab.sessionId);
-  openSide("terminal");
+  openTerminalDrawer();
 }
 
 export function setActiveTerminal(sessionId: string) {

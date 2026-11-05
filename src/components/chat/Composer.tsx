@@ -20,7 +20,7 @@ import { clearPendingPromptLink, copyPromptLink, openPromptLink, setPromptLinkOp
 import { clearGoal, pauseGoal, resumeGoal, sessionGoal, startGoal } from "../../lib/goals";
 import { AgentLogo, agentModelsError, agentModelsLoading, hydrateAgentModels, refreshAgentModels } from "../../lib/agentMeta";
 import { addCustomModel, customModelsFor, mergeModelChoices } from "../../lib/customModels";
-import { listMcpServers, listPromptSkills, listPullRequests, openAttachment, searchPromptFiles, gitListBranches, type BranchInfo, type FileEntry, type McpServerInfo, type PermissionMode, type PromptSkill, type PrSummary } from "../../lib/ipc";import { openSide, toggleFocusView } from "../../lib/layout";
+import { listMcpServers, listPromptSkills, listPullRequests, openAttachment, searchPromptFiles, gitListBranches, type BranchInfo, type FileEntry, type McpServerInfo, type PermissionMode, type PromptSkill, type PrSummary } from "../../lib/ipc";import { openSide, openTerminalDrawer, toggleFocusView } from "../../lib/layout";
 import { followUpBehavior, richTextComposer, sendShortcut } from "../../lib/settings";
 import RichEditor, { type RichEditorHandle } from "./RichEditor";
 import { registerShortcutHandler, runAction } from "../../lib/shortcuts";
@@ -502,7 +502,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
       { name: "review", detail: "Open the Changes pane", icon: "diff", badge: "App", aliases: ["changes", "diff", "status"], run: () => openSide("changes") },
       { name: "preview", detail: "Open the Preview pane", icon: "globe", badge: "App", run: () => openSide("preview") },
       { name: "pulls", detail: "Browse GitHub pull requests for this project", icon: "merge", badge: "App", aliases: ["prs", "pull-requests"], run: () => openSide("pulls") },
-      { name: "terminal", detail: "Open the terminal pane", icon: "terminal", badge: "App", aliases: ["shell", "bash"], run: () => openSide("terminal") },
+      { name: "terminal", detail: "Open the terminal panel", icon: "terminal", badge: "App", aliases: ["shell", "bash"], run: () => openTerminalDrawer() },
       { name: "flow", detail: "Open the multi-agent Flow canvas", icon: "flow", badge: "App", run: () => openSide("flow") },
       { name: "files", detail: "Browse the project's files (read-only)", icon: "folder", badge: "App", aliases: ["browse", "tree"], run: () => openSide("files") },
       { name: "explain", detail: "Open the Explain pane", icon: "document", badge: "App", run: () => openSide("explain") },

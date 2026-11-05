@@ -4,6 +4,35 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FlipFlopper</title>
+    <!-- The window is created hidden and revealed after the first render. Paint
+         the themed canvas here so the WebView never presents its default white
+         while the async preferences store is still loading. The fallback colors
+         mirror the built-in Circuit themes' --surface-0 (src/App.css). -->
+    <style id="boot-appearance">
+      html {
+        --boot-surface-0: #0f1417;
+        /* Once src/App.css is parsed this resolves to the real theme token
+           (custom themes included); before that the local fallback paints the
+           system appearance. */
+        background-color: var(--surface-0, var(--boot-surface-0));
+        color-scheme: dark;
+      }
+      @media (prefers-color-scheme: light) {
+        html:not([data-theme="dark"]) { --boot-surface-0: #e7eef0; color-scheme: light; }
+      }
+      html[data-theme="light"] { --boot-surface-0: #e7eef0; color-scheme: light; }
+    </style>
+    <script>
+      // src/lib/layout.ts mirrors the resolved theme here because preferences.json
+      // is read asynchronously. Running before the bundle keeps a pinned dark theme
+      // from starting on the light system palette and flashing white.
+      try {
+        var bootTheme = localStorage.getItem("flipflopper:boot-theme");
+        if (bootTheme === "dark" || bootTheme === "light") {
+          document.documentElement.dataset.theme = bootTheme;
+        }
+      } catch (_) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

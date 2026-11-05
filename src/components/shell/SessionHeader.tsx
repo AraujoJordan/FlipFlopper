@@ -1,7 +1,7 @@
 import { Menu, MenuDivider, MenuItem, MenuLabel, useValueMotion, useSelectionMotion } from "../ui";
 import { Component, Show, createSignal } from "solid-js";
 import { activeSession, activeView, chat, renameSession, conversationMode, setConversationMode } from "../../lib/chat";
-import { layout, openSide, toggleFocusView, toggleSidebar, toggleSide, type SideTab } from "../../lib/layout";
+import { layout, openSide, toggleFocusView, toggleSidebar, toggleSide, toggleTerminalDrawer, type SideTab } from "../../lib/layout";
 import BranchIndicator from "../BranchIndicator";
 import ThreadDetailsCard from "./ThreadDetailsCard";
 import { Icon, type IconName } from "./Icon";
@@ -20,6 +20,7 @@ import { isMuted, setSessionMuted } from "../../lib/muted";
 import { writeClipboardText } from "../../lib/native";
 import { chatTranscriptPath } from "../../lib/ipc";
 import { copyThreadLink } from "../../lib/promptLinks";
+import { AgentLogo } from "../../lib/agentMeta";
 
 const MOD = navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl+";
 const SHIFT = navigator.platform.toLowerCase().includes("mac") ? "⇧" : "Shift+";
@@ -27,7 +28,6 @@ const SHIFT = navigator.platform.toLowerCase().includes("mac") ? "⇧" : "Shift+
 const PANE_BUTTONS: { tab: SideTab; icon: IconName; label: string; keys?: string }[] = [
   { tab: "changes", icon: "diff", label: "Changes", keys: `${MOD}${SHIFT}G` },
   { tab: "preview", icon: "globe", label: "Preview" },
-  { tab: "terminal", icon: "terminal", label: "Terminal", keys: `${MOD}J` },
   { tab: "flow", icon: "flow", label: "Flow" },
   { tab: "explain", icon: "help", label: "Explain" },
   { tab: "files", icon: "folder", label: "Files" },
@@ -55,8 +55,10 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
 
   const title = () => session()?.title || "New session";
   const usageLabel = () => formatUsage(sessionUsage(activeView()));
+  const cliAgentId = () => session()?.agent_id ?? chat.composer.agentId;
+  const cliAgentIcon = () => store.agents.find((agent) => agent.id === cliAgentId())?.icon ?? null;
   const cliAgent = () => {
-    const id = session()?.agent_id ?? chat.composer.agentId;
+    const id = cliAgentId();
     const name = store.agents.find((agent) => agent.id === id)?.name ?? id;
     return name.endsWith("CLI") ? name : `${name} CLI`;
   };
@@ -141,7 +143,10 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
         </button>
         <div class="conversation-mode" role="group" aria-label="Conversation view">
           <button class="pane-toggle" classList={{ "pane-toggle-on": conversationMode() === "chat" }} aria-pressed={conversationMode() === "chat"} onClick={() => void setConversationMode("chat")}>Chat</button>
-          <button class="pane-toggle" classList={{ "pane-toggle-on": conversationMode() === "cli" }} aria-pressed={conversationMode() === "cli"} onClick={() => void setConversationMode("cli")} title={`Use ${cliAgent()}'s terminal interface`}>{cliAgent()}</button>
+          <button class="pane-toggle pane-toggle-cli" classList={{ "pane-toggle-on": conversationMode() === "cli" }} aria-pressed={conversationMode() === "cli"} aria-label={cliAgent()} onClick={() => void setConversationMode("cli")} title={`Use ${cliAgent()}'s terminal interface`}>
+            <AgentLogo agentId={cliAgentId()} icon={cliAgentIcon()} size={13} radius={3} />
+            <span>CLI</span>
+          </button>
         </div>
         <Show when={project()}>
           <div class="session-header-branch"><BranchIndicator /></div>
@@ -158,7 +163,7 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
           </Show>
         </Show>
         <div ref={toggles} class="pane-toggles">
-          {PANE_BUTTONS.slice(0, 3).map((b) => (
+          {PANE_BUTTONS.slice(0, 2).map((b) => (
             <button
               class={`pane-toggle${b.tab === "changes" ? " pane-toggle-labeled" : ""}`}
               classList={{ "pane-toggle-on": layout.sideOpen && layout.sideTab === b.tab }}
@@ -174,12 +179,16 @@ const SessionHeader: Component<{ changeCount: number }> = (props) => {
               </Show>
             </button>
           ))}
+          <button class="pane-toggle" classList={{ "pane-toggle-on": layout.terminalDrawer }}
+            onClick={toggleTerminalDrawer} title={`Terminal (${MOD}J)`} aria-label="Terminal" aria-pressed={layout.terminalDrawer}>
+            <Icon name="terminal" size={15} />
+          </button>
           <button ref={moreAnchor} class="pane-toggle" aria-label="More tools" title="More tools" aria-haspopup="menu" aria-expanded={moreOpen()}
             classList={{ "pane-toggle-on": layout.sideOpen && (layout.sideTab === "flow" || layout.sideTab === "explain" || layout.sideTab === "files" || layout.sideTab === "pulls" || layout.sideTab === "sidechat") }}
             onClick={() => setMoreOpen((v) => !v)}><Icon name="more" size={18} /></button>
           <Menu open={moreOpen()} onClose={() => setMoreOpen(false)} anchorRef={moreAnchor} align="right" width={220}>
             <MenuLabel>Tools</MenuLabel>
-            {PANE_BUTTONS.slice(3).map((b) => (
+            {PANE_BUTTONS.slice(2).map((b) => (
               <MenuItem onSelect={() => { setMoreOpen(false); layout.sideOpen && layout.sideTab === b.tab ? toggleSide() : openSide(b.tab); }}>
                 <Icon name={b.icon} size={16} /><span style={{ flex: 1 }}>{b.label}</span>
                 <Show when={layout.sideOpen && layout.sideTab === b.tab}><Icon name="check" size={14} /></Show>

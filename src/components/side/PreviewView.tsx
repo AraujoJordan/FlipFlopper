@@ -1,7 +1,7 @@
 import { Component, For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { androidCliInfo, type AndroidCliInfo, capturePreviewRegion, closePreviewInspector, closePreviewPicker, closePreviewProfile, getSessionUrl, listListeningServers, navigatePreviewInspector, navigatePreviewProfile, onPreviewPick, onPreviewPickCancel, onPreviewUrl, onPtyExit, openPreviewInspector, openPreviewPicker, openPreviewProfile, openPreviewProfileDevtools, setPreviewInspectorBounds, setPreviewProfileBounds, startPreviewRecording, stopPreviewRecording, type ListeningServer, type PreviewPick } from "../../lib/ipc";
-import { layout, openSide } from "../../lib/layout";
+import { layout, openSide, openTerminalDrawer } from "../../lib/layout";
 import { effectiveRoot, readRunTargets, setRunSessionId, setStore, store } from "../../lib/store";
 import { addPaths } from "../../lib/attachments";
 import { addComposerContext } from "../../lib/composerContexts";
@@ -647,7 +647,7 @@ const PreviewView: Component = () => {
             <p>{tabs().length === 0 ? "Start your app to preview it here." : "This tab has no URL yet."}</p>
             <p class="pane-empty-sub">
               Pick a run target above, or enter a URL and press Enter. Server output appears in the{" "}
-              <button class="link-btn" onClick={() => openSide("terminal")}>Terminal</button> tab.
+              <button class="link-btn" onClick={() => openTerminalDrawer()}>Terminal</button> tab.
             </p>
             <button type="button" class="ui-btn ui-btn-outline" onClick={() => openTab(null)}>
               <Icon name="plus" size={13} /> New tab

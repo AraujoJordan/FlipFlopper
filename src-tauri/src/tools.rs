@@ -509,20 +509,32 @@ fn get_tool_version(binary: &str) -> Option<String> {
         return None;
     }
 
-    Command::new(binary)
+    let mut child = Command::new(binary)
         .arg("--version")
         .env("PATH", augmented_path_string()).envs(crate::env::proxy_env())
-        .output()
-        .ok()
-        .map(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() {
-                String::from_utf8_lossy(&o.stderr).trim().to_string()
-            } else {
-                s
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    // A single misbehaving CLI must not hold the catalog hostage.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
             }
-        })
-        .filter(|s| !s.is_empty())
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let text = if stdout.is_empty() { String::from_utf8_lossy(&output.stderr).trim().to_string() } else { stdout };
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn tool_binary(entry: &ToolEntry) -> Option<String> {
@@ -532,6 +544,22 @@ fn tool_binary(entry: &ToolEntry) -> Option<String> {
 // ────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────
+
+/// Cached catalog: version probes spawn one short-lived process per tool, so a
+/// Settings/Welcome visit should not pay for a fresh full probe every time.
+pub fn list_tools_cached(ttl_secs: u64) -> Vec<ToolInfo> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, Vec<ToolInfo>)>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache.lock().unwrap();
+    if let Some((at, tools)) = guard.as_ref() {
+        if at.elapsed() < std::time::Duration::from_secs(ttl_secs) {
+            return tools.clone();
+        }
+    }
+    let tools = list_tools();
+    *guard = Some((std::time::Instant::now(), tools.clone()));
+    tools
+}
 
 pub fn list_tools() -> Vec<ToolInfo> {
     let os = current_os();

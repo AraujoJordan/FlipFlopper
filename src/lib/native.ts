@@ -34,7 +34,7 @@ export async function handleWindowHeaderDoubleClick(event: MouseEvent) {
  * serialized so a slow theme update cannot overwrite a more recent choice. */
 export function watchNativeAppearance(theme: () => ThemePref, onError?: () => void) {
   if (!isMacDesktop()) {
-    return { ready: Promise.resolve(), dispose() {} };
+    return { ready: Promise.resolve(), primeBackground: () => Promise.resolve(), applyNow: () => {}, dispose() {} };
   }
   const win = getCurrentWindow();
   const media = window.matchMedia("(prefers-color-scheme: light)");
@@ -42,8 +42,22 @@ export function watchNativeAppearance(theme: () => ThemePref, onError?: () => vo
   let revision = 0;
   let applied: ThemePref | undefined;
   let reported = false;
+  let visible = false;
   let pending = Promise.resolve();
+  /** Window background only; unlike `setTheme` this is safe before `show()`. The
+   *  hidden WebView may not have painted a frame, so this color is what the first
+   *  reveal shows. */
+  const setBackground = () => {
+    const color = getComputedStyle(document.documentElement).getPropertyValue("--surface-0").trim();
+    // API 2.11.1 sends `color`, but Rust 2.11.4's setter expects `value`.
+    // Use the existing window command directly until the helper is corrected.
+    return invoke("plugin:window|set_background_color", { label: win.label, value: color });
+  };
   const sync = () => {
+    // `setTheme` on a hidden macOS window blocks for seconds and holds `show()`
+    // behind it. The boot canvas in index.html already paints the right color, so
+    // the native frame is themed by `applyNow()` once the window is up.
+    if (!visible) return pending;
     const current = ++revision;
     pending = pending.then(async () => {
       if (disposed || current !== revision) return;
@@ -53,10 +67,7 @@ export function watchNativeAppearance(theme: () => ThemePref, onError?: () => vo
         applied = preference;
       }
       if (disposed || current !== revision) return;
-      const color = getComputedStyle(document.documentElement).getPropertyValue("--surface-0").trim();
-      // API 2.11.1 sends `color`, but Rust 2.11.4's setter expects `value`.
-      // Use the existing window command directly until the helper is corrected.
-      await invoke("plugin:window|set_background_color", { label: win.label, value: color });
+      await setBackground();
     }).catch((error) => {
       console.error("Native window appearance sync failed:", error);
       if (!disposed && !reported) { reported = true; onError?.(); }
@@ -67,7 +78,11 @@ export function watchNativeAppearance(theme: () => ThemePref, onError?: () => vo
   window.addEventListener("flipflopper:theme-changed", sync);
   media.addEventListener("change", systemChanged);
   return {
-    ready: sync(),
+    // Never theme a hidden macOS window: `setTheme` blocks for seconds there and
+    // delays `show()`. The caller applies the first theme after the window is up.
+    ready: Promise.resolve(),
+    primeBackground: () => setBackground().catch((error) => console.error("Native window background priming failed:", error)),
+    applyNow: () => { visible = true; void sync(); },
     dispose() {
       disposed = true;
       window.removeEventListener("flipflopper:theme-changed", sync);

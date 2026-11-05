@@ -1,0 +1,28 @@
+{
+  "at": "2026-11-05T13:02:10.012Z",
+  "runs": [
+    {
+      "run": 1,
+      "setupMs": 302,
+      "shownMs": 684,
+      "readyMs": 890
+    },
+    {
+      "run": 2,
+      "setupMs": 297,
+      "shownMs": 678,
+      "readyMs": 882
+    },
+    {
+      "run": 3,
+      "setupMs": 282,
+      "shownMs": 703,
+      "readyMs": 927
+    }
+  ],
+  "medians": {
+    "setupMs": 297,
+    "shownMs": 684,
+    "readyMs": 890
+  }
+}

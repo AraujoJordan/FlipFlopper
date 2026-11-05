@@ -23,6 +23,20 @@ export interface ProjectInfo {
   is_git: boolean;
 }
 
+/** A project's own launcher/app icon, found by the backend. */
+export interface ProjectIconInfo {
+  /** Project type that supplied it: android, ios, tauri, web, … */
+  kind: string;
+  /** Human-readable label for project settings. */
+  label: string;
+  /** Project-relative path of the source asset. */
+  source: string;
+  /** Absolute file for the asset protocol (raster or an extracted PNG frame). */
+  path: string | null;
+  /** Inline SVG data URL when the source is vector art. */
+  data_url: string | null;
+}
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -287,6 +301,10 @@ export const getAgents = (includeVersions = true): Promise<AgentInfo[]> =>
 
 export const openProject = (path: string): Promise<ProjectInfo> =>
   invoke("open_project", { path });
+
+/** Detect the default icon the project already ships (launcher icon, favicon, …). */
+export const detectProjectIcon = (projectPath: string): Promise<ProjectIconInfo | null> =>
+  invoke("detect_project_icon", { projectPath });
 
 export const setupProject = (path: string): Promise<ProjectInfo> =>
   invoke("setup_project", { path });

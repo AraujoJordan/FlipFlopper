@@ -11,6 +11,7 @@ import { openProjectPath, removeSidebarProject } from "../lib/projects";
 import { openIn, quickEditor } from "../lib/openIn";
 import { writeClipboardText } from "../lib/native";
 import { pickFiles, publishRepository } from "../lib/ipc";
+import { detectedProjectIcon, ensureProjectIcon, refreshProjectIcon } from "../lib/projectIcons";
 import { projectAutoPullOverride, setProjectAutoPull } from "../lib/autoPull";
 import { defaultRepositoryName, isValidRepositoryName } from "../lib/repoUrl";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -52,13 +53,27 @@ const ProjectSettingsDialog: Component = () => {
     setLetter(saved?.letter ?? "");
     setHue(saved?.hue ?? null);
     setImage(saved?.image ?? null);
+    void ensureProjectIcon(current);
   });
 
-  const preview = () => projectMonogram(draftName().trim() || name() || "Project", {
+  const detected = () => {
+    const current = path();
+    if (!current || image() || letter().trim() || hue() !== null) return null;
+    return detectedProjectIcon(current) ?? null;
+  };
+  const noDetectedIcon = () => {
+    const current = path();
+    return Boolean(current) && !image() && !letter().trim() && hue() === null && detectedProjectIcon(current!) === null;
+  };
+
+  // Keep the raw overrides: passing projectMonogram() here would look like a
+  // custom letter and suppress the detected project icon in the preview.
+  const preview = (): ProjectIcon => ({
     ...(letter().trim() ? { letter: letter().trim() } : {}),
     ...(hue() !== null ? { hue: hue()! } : {}),
     ...(image() ? { image: image()! } : {}),
   });
+  const monogram = () => projectMonogram(draftName().trim() || name() || "Project", preview());
   const defaults = () => projectDefaults(path());
   const usesDefaults = () => Object.keys(defaults()).length > 0;
 
@@ -128,7 +143,7 @@ const ProjectSettingsDialog: Component = () => {
           onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { event.stopPropagation(); if (event.key === "Escape") close(); }}
           ref={(el) => queueMicrotask(() => el.focus())}>
           <header class="project-settings-head">
-            <ProjectIconView name={draftName().trim() || name() || "Project"} icon={preview()} class="project-settings-preview" />
+            <ProjectIconView name={draftName().trim() || name() || "Project"} icon={preview()} path={path()} class="project-settings-preview" />
             <div class="project-settings-heading">
               <strong>Project settings{isProjectPinned(path() ?? "") ? " · Pinned" : ""}</strong>
               <span title={path() ?? undefined}>{name() || "Project"} · {chat.sessions.filter((session) => session.project_path === path()).length} session{chat.sessions.filter((session) => session.project_path === path()).length === 1 ? "" : "s"}</span>
@@ -154,7 +169,7 @@ const ProjectSettingsDialog: Component = () => {
             <section class="project-settings-section" aria-label="Icon">
               <div class="project-settings-label">Icon</div>
               <div class="project-settings-row">
-                <input class="ui-field project-settings-letter" aria-label="Monogram letters" maxLength={4} placeholder={preview().letter} value={letter()}
+                <input class="ui-field project-settings-letter" aria-label="Monogram letters" maxLength={4} placeholder={monogram().letter} value={letter()}
                   onInput={(event) => setLetter(event.currentTarget.value)}
                   onChange={() => saveIcon({ ...(letter().trim() ? { letter: letter().trim() } : {}), ...(hue() !== null ? { hue: hue()! } : {}) })} />
                 <span class="project-settings-hint" style={{ flex: 1 }}>One or two letters, numbers or emoji.</span>
@@ -170,8 +185,21 @@ const ProjectSettingsDialog: Component = () => {
                     ...(hue() !== null ? { hue: hue()! } : {}),
                   })}>Remove image</button>
                 </Show>
+                <button type="button" class="ui-btn ui-btn-ghost" title="Look for a newly added launcher, bundle or web icon"
+                  onClick={() => { const current = path(); if (current) void refreshProjectIcon(current); }}>Re-detect</button>
               </div>
-              <div class="project-settings-hint">A local image is shown in the sidebar and this header. Letters, numbers and emoji still work.</div>
+              <Show when={detected()}>
+                {(icon) => (
+                  <div class="project-settings-detected">
+                    <Icon name="sparkle" size={12} />
+                    <span title={`${icon().label} · ${icon().source}`}>Using {icon().label}: <code>{icon().source}</code></span>
+                  </div>
+                )}
+              </Show>
+              <Show when={noDetectedIcon()}>
+                <div class="project-settings-hint">No launcher, bundle or web icon found; the folder's first letter is used.</div>
+              </Show>
+              <div class="project-settings-hint">A local image wins. A custom letter or color switches to the monogram. Automatic uses the project's own app icon, then the folder's first letter.</div>
               <div class="project-settings-swatches" role="group" aria-label="Monogram color">
                 <For each={MONOGRAM_HUES}>
                   {(value) => (

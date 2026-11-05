@@ -351,7 +351,9 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
             </Show>
           </span>
         </Show>
-        <Show when={!running() && props.message.status === "done"}><span class="msg-done"><Icon name="check" size={12} /> Done</span></Show>
+        <Show when={!running() && timing()}>
+          {(t) => <span class="msg-turn-duration" title="Turn duration">{formatDuration(t().totalMs)}</span>}
+        </Show>
       </div>
 
       <Show when={deferredText()}>

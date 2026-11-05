@@ -4,7 +4,7 @@
 import { createSignal } from "solid-js";
 import { readPref, writePref } from "./appPrefs";
 import { addTerminal, store } from "./store";
-import { openSide } from "./layout";
+import { openTerminalDrawer } from "./layout";
 import { openTerminal, ptySendLine } from "./ipc";
 import { toast } from "../components/ui";
 
@@ -95,7 +95,7 @@ export async function runProjectScript(script: ProjectScript, projectPath?: stri
   try {
     const sessionId = await openTerminal(project, store.activeCwd ?? project);
     addTerminal({ sessionId, label: script.name, kind: "shell" });
-    openSide("terminal");
+    openTerminalDrawer();
     await ptySendLine(sessionId, script.command);
   } catch (error) {
     toast(`Couldn't run ${script.name}: ${String(error)}`, "error");
@@ -111,7 +111,7 @@ export async function runTerminalCommand(command: string, label = "Command") {
   try {
     const sessionId = await openTerminal(project, store.activeCwd ?? project);
     addTerminal({ sessionId, label, kind: "shell" });
-    openSide("terminal");
+    openTerminalDrawer();
     await ptySendLine(sessionId, text);
   } catch (error) {
     toast(`Couldn't run this command: ${String(error)}`, "error");

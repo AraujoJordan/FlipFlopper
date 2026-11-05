@@ -347,7 +347,7 @@ fn run_stdio_server(server: &StdioServer, project_path: &str, tool: &str, argume
             "params": {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": { "name": "FlipFlopper", "version": "0.24.0" }
+                "clientInfo": { "name": "FlipFlopper", "version": "0.25.0" }
             }
         }))?;
         let initialized = read_response(&receiver, 1, deadline)?;
@@ -441,7 +441,7 @@ fn initialize_request() -> Value {
         "params": {
             "protocolVersion": "2025-06-18",
             "capabilities": {},
-            "clientInfo": { "name": "FlipFlopper", "version": "0.24.0" }
+            "clientInfo": { "name": "FlipFlopper", "version": "0.25.0" }
         }
     })
 }

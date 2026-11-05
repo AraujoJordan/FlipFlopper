@@ -14,3 +14,5 @@ commands. Start there.
 
 - [T3 Code UI/UX parity](./t3-parity.md) — what is covered from the T3 Code comparison and the
   remaining backlog for continuing the port.
+
+- [Performance notes](./perf.md) — startup benchmark, measured before/after, and how to reproduce.

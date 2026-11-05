@@ -10,7 +10,7 @@ import { openIn, quickEditor } from "../../lib/openIn";
 import { exportConversation } from "../../lib/exportTranscript";
 import { chatSearch, getAgents, searchPromptFiles, searchProjectContent, type ContentMatch, type FileEntry } from "../../lib/ipc";
 import { setImportOpen, pendingCandidates } from "../../lib/importer";
-import { cycleTheme, isProjectPinned, layout, setTheme, toggleFocusView, toggleProjectPin, toggleSide, toggleSidebar, type ThemePref } from "../../lib/layout";
+import { cycleTheme, isProjectPinned, layout, setTheme, toggleFocusView, toggleProjectPin, toggleSide, toggleSidebar, toggleTerminalDrawer, type ThemePref } from "../../lib/layout";
 import { paletteOpen, paletteMode, paletteSeed, setPaletteMode, setPaletteOpen } from "../../lib/palette";
 import { openProjectPath } from "../../lib/projects";
 import { runAction } from "../../lib/shortcuts";
@@ -142,7 +142,7 @@ const CommandPalette: Component = () => {
     { id: "a-sidebar", section: "Actions", label: layout.sidebarOpen ? "Hide sidebar" : "Show sidebar", keys: `${MOD}B`, icon: "sidebar", run: act(toggleSidebar) },
     { id: "a-changes", section: "Actions", label: "Show changes", keys: `${MOD}${SHIFT}G`, icon: "diff", run: act(() => toggleSide("changes")) },
     { id: "a-preview", section: "Actions", label: "Show preview", icon: "globe", run: act(() => toggleSide("preview")) },
-    { id: "a-terminal", section: "Actions", label: "Show terminal", keys: `${MOD}J`, icon: "terminal", run: act(() => toggleSide("terminal")) },
+    { id: "a-terminal", section: "Actions", label: layout.terminalDrawer ? "Hide terminal" : "Show terminal", keys: `${MOD}J`, icon: "terminal", run: act(toggleTerminalDrawer) },
     { id: "a-browse", section: "Actions", label: "Browse files", icon: "folder", run: act(() => toggleSide("files")) },
     { id: "a-pulls", section: "Actions", label: "Pull requests", icon: "merge", run: act(() => toggleSide("pulls")) },
     { id: "a-sidechats", section: "Actions", label: "Side chats", icon: "message", run: act(() => toggleSide("sidechat")) },

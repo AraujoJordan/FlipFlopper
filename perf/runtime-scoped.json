@@ -1,0 +1,14 @@
+{
+  "label": "runtime-scoped",
+  "at": "2026-11-05T13:01:29.008Z",
+  "buildMs": null,
+  "distBytes": 7876608,
+  "jsFiles": 105,
+  "jsBytes": 6826709,
+  "cssBytes": 187609,
+  "mainChunk": "index-g4okZyHy.js",
+  "mainBytes": 715945,
+  "mainGzipBytes": 220943,
+  "mainParseMs": 0.3,
+  "mainParseMinMs": 0.3
+}

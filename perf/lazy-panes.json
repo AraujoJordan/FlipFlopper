@@ -1,0 +1,14 @@
+{
+  "label": "lazy-panes",
+  "at": "2026-11-05T12:53:18.349Z",
+  "buildMs": 13026,
+  "distBytes": 7802880,
+  "jsFiles": 70,
+  "jsBytes": 6824658,
+  "cssBytes": 187609,
+  "mainChunk": "index-D_xiaLjR.js",
+  "mainBytes": 838298,
+  "mainGzipBytes": 254153,
+  "mainParseMs": 0.4,
+  "mainParseMinMs": 0.3
+}

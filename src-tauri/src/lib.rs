@@ -11,6 +11,7 @@ mod mcp_client;
 mod office;
 mod open_in;
 mod project;
+mod project_icon;
 mod provider_limits;
 mod pty;
 mod review;
@@ -683,6 +684,19 @@ async fn run_blocking<T: Send + 'static>(
 // PTY commands
 // ════════════════════════════════════════════════
 
+/// Dev startup timing: printed to stderr when the frontend calls it.
+/// Startup diagnostics are opt-in: set FF_PERF=1 when launching to see them.
+fn perf_enabled() -> bool {
+    std::env::var_os("FF_PERF").is_some()
+}
+
+#[tauri::command]
+fn perf_mark(label: String, wall: f64, ms: f64) {
+    if !perf_enabled() { return; }
+    let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|value| value.as_millis()).unwrap_or(0);
+    eprintln!("[perf] {label} wall={wall:.0} js={ms:.1} rust={epoch}");
+}
+
 #[tauri::command]
 fn pty_input(state: State<'_, PtyManager>, session_id: String, data: String) -> Result<(), String> {
     pty::send_input(&state, &session_id, &data)
@@ -762,6 +776,12 @@ async fn open_project(path: String) -> Result<ProjectInfo, String> {
         Ok(info)
     })
     .await?
+}
+
+/// Find the default launcher/app icon a project already ships, for its sidebar avatar.
+#[tauri::command]
+async fn detect_project_icon(project_path: String) -> Result<Option<project_icon::ProjectIconInfo>, String> {
+    run_blocking(move || project_icon::detect(&project_path)).await?
 }
 
 #[tauri::command]
@@ -1685,8 +1705,10 @@ async fn generate_worktree_commit_message(worktree_path: String, source_branch: 
 // ════════════════════════════════════════════════
 
 #[tauri::command]
-fn get_tool_catalog() -> Vec<ToolInfo> {
-    tools::list_tools()
+async fn get_tool_catalog() -> Vec<ToolInfo> {
+    // Version probing spawns processes; keep it off the main thread so it can
+    // never delay window show or other IPC.
+    run_blocking(|| tools::list_tools_cached(60)).await.unwrap_or_default()
 }
 
 #[tauri::command]
@@ -3044,6 +3066,11 @@ async fn trigger_haptic(app: tauri::AppHandle, pattern: String) -> Result<(), St
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let started = std::time::Instant::now();
+    if perf_enabled() {
+        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|value| value.as_millis()).unwrap_or(0);
+        eprintln!("[perf] rust:run-start wall={epoch}");
+    }
     env::install_augmented_path();
 
     tauri::Builder::default()
@@ -3083,12 +3110,16 @@ pub fn run() {
         .manage(PendingBridges::default())
         .manage(OpenLinks::default())
         .manage(PreviewRecording::default())
-        .setup(|app| {
+        .setup(move |app| {
             if let Ok(resources) = app.path().resource_dir() { chat::acp::set_resource_dir(resources); }
             chat::recover_interrupted_sessions();
             let handle = app.handle();
             if let Ok(menu) = build_app_menu(handle) {
                 let _ = app.set_menu(menu);
+            }
+            if perf_enabled() {
+                let setup_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|value| value.as_millis()).unwrap_or(0);
+                eprintln!("[perf] rust:setup wall={setup_epoch} took={:.1}", started.elapsed().as_secs_f64() * 1000.0);
             }
 
             // Arm the main-window show fallback (the frontend's own
@@ -3134,6 +3165,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // PTY
+            perf_mark,
             pty_input,
             pty_resize,
             pty_kill,
@@ -3143,6 +3175,7 @@ pub fn run() {
             get_agents,
             // Project
             open_project,
+            detect_project_icon,
             setup_project,
             get_recent_projects,
             remove_recent_project,

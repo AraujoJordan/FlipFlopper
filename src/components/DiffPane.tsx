@@ -4,6 +4,7 @@ import {
 } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { escapeHtml, highlightCode } from "../lib/markdownLite";
+import { languageVersion, preloadLanguage } from "../lib/highlight";
 import {
   basename, buildPatchForFile, buildSelectionPrompt, formatColonRange,
   formatLineRange, formatMediaBytes, formatMediaSizeDelta, formatSnippetDetails,
@@ -1291,10 +1292,13 @@ const UnifiedRow: Component<RowInteractionProps & {
     line().kind === "del" ? DEL_SIGN :
     "transparent";
 
-  const html = () =>
-    props.lineCount <= MAX_HIGHLIGHT_LINES
+  const html = () => {
+    languageVersion(props.lang);
+    preloadLanguage(props.lang);
+    return props.lineCount <= MAX_HIGHLIGHT_LINES
       ? highlightCode(line().content, props.lang)
       : escapeHtml(line().content);
+  };
 
   return (
     <div
@@ -1424,6 +1428,8 @@ const SplitCell: Component<{
 
   const html = () => {
     if (!line()) return "";
+    languageVersion(props.lang);
+    preloadLanguage(props.lang);
     if (props.lineCount > MAX_HIGHLIGHT_LINES) return escapeHtml(line()!.content);
     return highlightCode(line()!.content, props.lang);
   };

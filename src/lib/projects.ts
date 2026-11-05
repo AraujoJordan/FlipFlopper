@@ -3,6 +3,7 @@ import { projectName, setDraftProject } from "./chat";
 import { hideSidebarProject, restoreSidebarProject } from "./layout";
 import { setPendingPromptSeed, setStore, updateCurrentBranch } from "./store";
 import { confirmDialog, toast } from "../components/ui";
+import { refreshProjectIcon } from "./projectIcons";
 
 export async function refreshRecentProjects() {
   try {
@@ -20,6 +21,8 @@ export async function openProjectPath(path: string): Promise<ProjectInfo | null>
     restoreSidebarProject(path);
     setStore("currentProject", info);
     setDraftProject(info);
+    // Re-read the project's own icon so a newly added launcher/favicon shows up.
+    void refreshProjectIcon(path);
     void updateCurrentBranch();
     void refreshRecentProjects();
     return info;

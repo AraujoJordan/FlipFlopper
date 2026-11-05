@@ -1,0 +1,14 @@
+{
+  "label": "after",
+  "at": "2026-11-05T12:50:24.956Z",
+  "buildMs": null,
+  "distBytes": 7790592,
+  "jsFiles": 65,
+  "jsBytes": 6817831,
+  "cssBytes": 187609,
+  "mainChunk": "index-BQoDfEP9.js",
+  "mainBytes": 1065636,
+  "mainGzipBytes": 319587,
+  "mainParseMs": 0.5,
+  "mainParseMinMs": 0.4
+}

@@ -227,11 +227,12 @@ const ProjectStatus: Component<{ path: string }> = (props) => {
     return "idle";
   };
   return (
-    <span class="project-status" data-tone={tone()} title={summary()}>
-      <span class="project-status-dot" />
-      <span class="project-status-text">{summary()}</span>
-      <span class="project-status-count">{status().total} session{status().total === 1 ? "" : "s"}</span>
-    </span>
+    <Show when={tone() !== "idle"}>
+      <span class="project-status" data-tone={tone()} title={summary()}>
+        <span class="project-status-dot" />
+        <span class="project-status-text">{summary()}</span>
+      </span>
+    </Show>
   );
 };
 
@@ -631,35 +632,50 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
             <Icon name="chevronRight" size={15} />
           </button>
         </div>
-      </div>
-
-      <button class="new-session-btn" onClick={() => newConversation()}>
-        <Icon name="plus" size={15} />
-        New session
-        <kbd>⌘N</kbd>
-      </button>
-
-      <div class="sidebar-search">
-        <Icon name="search" size={14} />
-        <input
-          ref={searchInput}
-          placeholder="Search sessions and projects"
-          value={query()}
-          onInput={(e) => setQuery(e.currentTarget.value)}
-          onKeyDown={(e) => { if (e.key === "Escape" && query()) { e.stopPropagation(); setQuery(""); } }}
-          spellcheck={false}
-        />
-        <Show when={query()}>
-          <button class="icon-btn" onClick={() => setQuery("")} aria-label="Clear search"><Icon name="x" size={12} /></button>
-        </Show>
-      </div>
-
-      <div class="sidebar-filters">
-        <button ref={filterAnchor} class="filter-pill" classList={{ "filter-pill-active": !!layout.projectFilter }} onClick={() => setFilterOpen((v) => !v)} title="Session view options" aria-label="Session view options" aria-haspopup="menu" aria-expanded={filterOpen()}>
-          <Icon name="list" size={15} /> <span>{layout.projectFilter ? filterLabel() : layout.sidebarGroup === "project" ? "Projects" : "Recent sessions"}</span> <Icon name="chevronDown" size={12} />
+        <button class="new-session-btn" onClick={() => newConversation()} title="New session (⌘N)" aria-label="New session">
+          <Icon name="plus" size={14} />
+          <span>New</span>
+          <kbd>⌘N</kbd>
         </button>
-        <Show when={layout.projectFilter}><button class="icon-btn" aria-label="Clear project filter" title="Show all projects" onClick={() => setProjectFilter(null)}><Icon name="x" size={14} /></button></Show>
-        <Menu open={filterOpen()} onClose={() => setFilterOpen(false)} anchorRef={filterAnchor} width={240}>
+      </div>
+
+      <div class="sidebar-search-row">
+        <div class="sidebar-search">
+          <Icon name="search" size={14} />
+          <input
+            ref={searchInput}
+            placeholder="Search sessions and projects"
+            value={query()}
+            onInput={(e) => setQuery(e.currentTarget.value)}
+            onKeyDown={(e) => { if (e.key === "Escape" && query()) { e.stopPropagation(); setQuery(""); } }}
+            spellcheck={false}
+          />
+          <Show when={query()}>
+            <button class="icon-btn" onClick={() => setQuery("")} aria-label="Clear search"><Icon name="x" size={12} /></button>
+          </Show>
+        </div>
+        <button
+          ref={filterAnchor}
+          class="filter-pill"
+          classList={{ "filter-pill-active": !!layout.projectFilter || layout.sidebarGroup !== "project" || showArchived() || showSnoozed() || layout.workingGroup }}
+          onClick={() => setFilterOpen((v) => !v)}
+          title={`View: ${layout.projectFilter ? filterLabel() : layout.sidebarGroup === "project" ? "Projects" : "Recent sessions"}`}
+          aria-label="Session view options"
+          aria-haspopup="menu"
+          aria-expanded={filterOpen()}
+        >
+          <Icon name="list" size={14} />
+          <Show when={layout.projectFilter}>
+            <span class="filter-pill-label">{filterLabel()}</span>
+          </Show>
+          <Icon name="chevronDown" size={11} />
+        </button>
+        <Show when={layout.projectFilter}>
+          <button class="icon-btn" aria-label="Clear project filter" title="Show all projects" onClick={() => setProjectFilter(null)}>
+            <Icon name="x" size={13} />
+          </button>
+        </Show>
+        <Menu open={filterOpen()} onClose={() => setFilterOpen(false)} anchorRef={filterAnchor} align="right" width={240}>
           <MenuLabel>Group sessions by</MenuLabel>
           <For each={["project", "date"] as const}>{(group) => (
             <MenuItem onSelect={() => { setSidebarGroup(group); setFilterOpen(false); }}>
@@ -820,10 +836,15 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
                       style={{ transform: collapsed()[group.key] ? "none" : "rotate(90deg)", transition: "transform var(--dur-fast)" }}
                     />
                     <Show when={group.projectPath} fallback={<Icon name={group.key === "pinned" ? "sparkle" : group.key === "working" ? "refresh" : group.key === "scratch" ? "document" : "history"} size={14} />}>
-                      <ProjectIconView name={group.label} icon={group.projectPath ? layout.projectIcons[group.projectPath] : null} />
+                      <ProjectIconView name={group.label} icon={group.projectPath ? layout.projectIcons[group.projectPath] : null} path={group.projectPath} />
                     </Show>
                     <span class="session-group-copy">
-                      <span class="session-group-name"><Show when={group.projectPath && isProjectPinned(group.projectPath)}><Icon name="sparkle" size={11} /></Show>{group.label}<Show when={group.projectPath && projectSuffix(group.projectPath, group.label)}>{(suffix) => <small>{suffix()}</small>}</Show></span>
+                      <span class="session-group-name">
+                        <Show when={group.projectPath && isProjectPinned(group.projectPath)}><Icon name="sparkle" size={11} /></Show>
+                        {group.label}
+                        <Show when={group.projectPath && projectSuffix(group.projectPath, group.label)}>{(suffix) => <small>{suffix()}</small>}</Show>
+                        <Show when={group.sessions.length > 0}><span class="session-group-count">{group.sessions.length}</span></Show>
+                      </span>
                       <Show when={group.projectPath}>{(path) => <ProjectStatus path={path()} />}</Show>
                     </span>
                   </button>
@@ -929,14 +950,14 @@ const Sidebar: Component<{ onOpenSettings: () => void; onOpenProjects: () => voi
             </button>
           )}
         </Show>
-        <button class="sidebar-foot-btn" onClick={props.onOpenProjects}>
-          <Icon name="folderPlus" size={15} /> Projects
-        </button>
         <div class="sidebar-foot-row">
-          <button class="sidebar-foot-btn" onClick={props.onOpenSettings}>
-            <Icon name="settings" size={15} /> Settings
+          <button class="sidebar-foot-btn" onClick={props.onOpenProjects} title="Projects">
+            <Icon name="folderPlus" size={14} /> Projects
           </button>
-          <button class="icon-btn" onClick={cycleTheme} title={`Theme: ${layout.theme} (click to change)`} aria-label="Change theme">
+          <button class="sidebar-foot-btn" onClick={props.onOpenSettings} title="Settings (⌘,)">
+            <Icon name="settings" size={14} /> Settings
+          </button>
+          <button ref={themeButton} class="icon-btn" onClick={cycleTheme} title={`Theme: ${layout.theme} (click to change)`} aria-label="Change theme">
             <Icon name={themeIcon()} size={15} />
           </button>
           <button class="icon-btn" onClick={() => openPalette()} title="Search everything (⌘K)" aria-label="Search everything">

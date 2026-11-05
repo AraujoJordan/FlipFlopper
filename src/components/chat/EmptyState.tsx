@@ -1,4 +1,4 @@
-import { Component, For, Show, onMount, createEffect } from "solid-js";
+import { Component, For, Show, createEffect, onCleanup } from "solid-js";
 import { chat } from "../../lib/chat";
 import { openProjectPath } from "../../lib/projects";
 import { store } from "../../lib/store";
@@ -17,7 +17,13 @@ const EmptyState: Component<{ onOpenProjects: () => void; onNewProject: () => vo
   const recents = () => store.recentProjects.filter((p) => !layout.hiddenProjects.includes(p.path)).slice(0, 3);
   const noAgents = () => store.agents.length > 0 && !store.agents.some((a) => a.installed && a.chat_supported);
   const suggestions = () => store.agents.filter((a) => a.chat_supported && !a.installed && installable().has(a.id)).slice(0, 4);
-  onMount(() => void loadInstallable());
+  // Install suggestions are not needed to paint; probing every catalog entry
+  // spawns processes, so keep that off the startup path.
+  createEffect(() => {
+    if (store.restoringWorkspace) return;
+    const timer = setTimeout(() => void loadInstallable(), 1500);
+    onCleanup(() => clearTimeout(timer));
+  });
 
   let empty: HTMLDivElement | undefined;
   createEffect(() => {
