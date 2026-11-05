@@ -7,6 +7,39 @@ const escape = (text: string): string =>
 
 const mark = (text: string): string => `<span class="md-mark">${escape(text)}</span>`;
 
+/** A bare link pasted or typed into the composer. Markdown emphasis inside a
+ *  URL path (`flip_flopper_app`) must stay literal, and its slashes must never
+ *  be mistaken for the slash command at the start of a line. */
+const BARE_URL = /^(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s<>"'`*]+/i;
+
+/** Keep prose punctuation outside the URL span: `See https://x.dev.` ends at
+ *  the host, not at the sentence's full stop. Bracket depth is counted once so
+ *  a very long pasted URL stays linear. */
+function trimBareUrl(url: string): string {
+  let end = url.length;
+  let parens = 0;
+  let brackets = 0;
+  let braces = 0;
+  for (let i = 0; i < end; i += 1) {
+    const char = url[i];
+    if (char === "(") parens += 1;
+    else if (char === ")") parens -= 1;
+    else if (char === "[") brackets += 1;
+    else if (char === "]") brackets -= 1;
+    else if (char === "{") braces += 1;
+    else if (char === "}") braces -= 1;
+  }
+  while (end > 0) {
+    const last = url[end - 1];
+    if (/[.,;:!?]/.test(last)) end -= 1;
+    else if (last === ")" && parens < 0) { parens += 1; end -= 1; }
+    else if (last === "]" && brackets < 0) { brackets += 1; end -= 1; }
+    else if (last === "}" && braces < 0) { braces += 1; end -= 1; }
+    else break;
+  }
+  return url.slice(0, end);
+}
+
 /** Find a closing delimiter that is not escaped, starting at `from`. */
 function closing(text: string, delimiter: string, from: number): number {
   let at = from;
@@ -26,6 +59,10 @@ function inline(text: string, lineStart = false): string {
   let i = 0;
   const mention = /^@#?[A-Za-z0-9_./\\:-]+/;
   const command = /^\/[A-Za-z0-9_:-]+/;
+  // A slash command only counts at the start of the line (leading indentation is
+  // allowed), matching the composer's token parser. URL path segments and
+  // absolute paths are not commands.
+  const commandAt = lineStart ? (/^\s*/.exec(text)?.[0].length ?? 0) : -1;
   while (i < text.length) {
     const rest = text.slice(i);
     if (text[i] === "\\" && i + 1 < text.length) {
@@ -40,6 +77,16 @@ function inline(text: string, lineStart = false): string {
       if (end > i + run.length) {
         html += mark(run) + `<code class="md-rich-code">${escape(text.slice(i + run.length, end))}</code>` + mark(run);
         i = end + run.length;
+        continue;
+      }
+    }
+
+    const url = BARE_URL.exec(rest)?.[0];
+    if (url) {
+      const trimmed = trimBareUrl(url);
+      if (trimmed.length > 0) {
+        html += `<span class="md-rich-url">${escape(trimmed)}</span>`;
+        i += trimmed.length;
         continue;
       }
     }
@@ -88,9 +135,10 @@ function inline(text: string, lineStart = false): string {
       }
     }
 
-    if (lineStart && text[i] === "/") {
+    if (i === commandAt && text[i] === "/") {
       const token = command.exec(rest)?.[0];
-      if (token) {
+      // `/Users/me` and `/api/v1` are absolute paths, not `/Users` commands.
+      if (token && text[i + token.length] !== "/") {
         html += `<span class="md-rich-command">${escape(token)}</span>`;
         i += token.length;
         continue;

@@ -57,7 +57,7 @@ async function loadChat(overrides = {}) {
   globalThis.requestAnimationFrame = () => 1;
   globalThis.cancelAnimationFrame = () => {};
   const transcript = overrides["./transcript"] ?? await loadFrontend("../src/lib/transcript.ts", {});
-  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { discoveredTuning: () => ({ models: [], efforts: [] }) }, "./store": { store: { agents: [{ id: "claude", installed: true }] } }, "./layout": { layout: {projectNames:{},projectOrder:[],hiddenProjects:[]}, openSide() {} }, "./transcript": transcript, "./unread": { markRead() {} }, "./settings": { defaultAgentId: () => null, defaultModel: () => null, notificationMode: () => "off", notifyOnlyUnfocused: () => false, settleKeepPr: () => false, titleInstructions: () => "", worktreePrefix: () => "flipflopper/" }, "./linkedPrs": { linkedPrsFor: () => [] }, "./forkLineage": { recordFork() {} }, ...overrides };
+  const mocks = { "solid-js": solid, "solid-js/store": solidStore, "./agentMeta": { discoveredTuning: () => ({ models: [], efforts: [] }) }, "./store": { store: { agents: [{ id: "claude", installed: true }] }, bumpGitStatus() {}, setStore() {} }, "./layout": { layout: {projectNames:{},projectOrder:[],hiddenProjects:[]}, openSide() {} }, "./terminalCache": { disposeCachedTerminal() {} }, "./transcript": transcript, "./unread": { markRead() {} }, "./settings": { defaultAgentId: () => null, defaultModel: () => null, notificationMode: () => "off", notifyOnlyUnfocused: () => false, settleKeepPr: () => false, titleInstructions: () => "", worktreePrefix: () => "flipflopper/" }, "./linkedPrs": { linkedPrsFor: () => [] }, "./forkLineage": { recordFork() {} }, ...overrides };
   const module = new SourceTextModule(source);
   await module.link((specifier) => {
     const names = imports.get(specifier);
@@ -138,10 +138,12 @@ test("webview reload restores only a request owned by the live backend turn", as
 });
 
 test("CLI presentation reuses the native terminal and preserves the transcript", async () => {
-  let opens = 0;
+  let opens = 0, syncs = 0;
   const module = await loadChat({ "./ipc": {
     chatOpenTerminal: async () => { opens++; return "pty"; },
     chatRuntimeState: async () => ({ ...runtime(), active_turn_id: null, terminal_id: "pty" }),
+    chatSyncTerminal: async () => { syncs++; },
+    chatListSessions: async () => [{ id: "s", agent_id: "claude", native_ids: { claude: "native" } }],
   } });
   module.setChat("sessions", [{ id: "s", agent_id: "claude", native_ids: { claude: "native" } }]);
   module.setChat("activeId", "s");
@@ -153,6 +155,8 @@ test("CLI presentation reuses the native terminal and preserves the transcript",
   assert.equal(module.conversationMode(), "cli");
   assert.equal(module.conversationTerminal(), "pty");
   await module.setConversationMode("chat");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(syncs, 1, "switching to Chat imports the live CLI history");
   assert.equal(module.conversationTerminal(), "pty", "view changes must not kill the CLI");
   await module.setConversationMode("cli");
   assert.equal(opens, 1);
@@ -172,6 +176,8 @@ test("CLI can create a fresh session before the first chat turn", async () => {
       onChatEntry: async () => () => {},
       chatOpenTerminal: async () => { opens++; return "pty"; },
       chatRuntimeState: async () => ({ ...runtime(), active_turn_id: null, terminal_id: "pty" }),
+      chatSyncTerminal: async () => {},
+      chatListSessions: async () => [meta],
     },
   });
   const off = module.onCliSessionCreated((id) => { created = id; });
@@ -186,6 +192,57 @@ test("CLI can create a fresh session before the first chat turn", async () => {
   assert.equal(module.conversationTerminal(), "pty");
   await module.setConversationMode("cli");
   assert.equal(opens, 1);
+});
+
+test("sending from Chat hands the live CLI back without losing its history", async () => {
+  const meta = { id: "s", project_path: "/project", cwd: "/project", agent_id: "claude", native_ids: {}, mode: "auto_edit", yolo: false };
+  let closes = 0, sent;
+  const module = await loadChat({
+    "../components/ui": { toast() {}, confirmDialog: async () => true },
+    "./ipc": {
+      chatCloseTerminal: async () => { closes++; },
+      chatSyncTerminal: async () => {},
+      chatRuntimeState: async () => ({ ...runtime(), active_turn_id: null, terminal_id: null }),
+      chatSend: async (args) => { sent = args; return "turn"; },
+      chatListSessions: async () => [meta],
+    },
+  });
+  module.setChat("sessions", [meta]);
+  module.setChat("activeId", "s");
+  const view = module.reduceTranscript(waiting());
+  view.running = false;
+  view.runtime.terminal_id = "pty";
+  module.setChat("views", "s", view);
+  assert.equal(await module.submitPrompt("Continue in chat"), true);
+  assert.equal(closes, 1, "the CLI is ended only when Chat actually takes over");
+  assert.equal(sent?.prompt, "Continue in chat");
+  assert.equal(module.chat.views.s.runtime.terminal_id, null);
+  assert.equal(module.chat.presentation.s, "chat");
+});
+
+test("switching to Chat while a new-session CLI launches keeps the latest choice", async () => {
+  const meta = { id: "fresh", project_path: "/project", cwd: "/project", agent_id: "claude", native_ids: {}, mode: "auto_edit", yolo: false };
+  let resolveCreate, opens = 0;
+  const module = await loadChat({
+    "./store": { store: { agents: [{ id: "claude", installed: true }], currentProject: { path: "/project" } }, setStore() {}, bumpGitStatus() {} },
+    "./appPrefs": { writePref() {} },
+    "./ipc": {
+      chatCreateSession: () => new Promise((resolve) => { resolveCreate = () => resolve(meta); }),
+      onChatEntry: async () => () => {},
+      chatOpenTerminal: async () => { opens++; return "pty"; },
+      chatRuntimeState: async () => ({ ...runtime(), active_turn_id: null, terminal_id: "pty" }),
+      chatSyncTerminal: async () => {},
+      chatListSessions: async () => [meta],
+    },
+  });
+  module.setChat("draftProject", "/project");
+  const cli = module.setConversationMode("cli");
+  await module.setConversationMode("chat");
+  resolveCreate();
+  await cli;
+  assert.equal(module.chat.activeId, "fresh");
+  assert.equal(module.chat.presentation.fresh, "chat", "the latest Chat choice wins over the slow launch");
+  assert.equal(opens, 0, "Chat must not open a CLI it no longer asked for");
 });
 
 test("request resolution and turn completion do not replay or duplicate tools", async () => {
@@ -2780,6 +2837,16 @@ test('swipes, monograms, alerts and reopening archived sessions', async () => {
   const shortcuts = await loadFrontend('../src/lib/shortcuts.ts', {
     'solid-js': solid, './chat': {}, './layout': {}, './palette': {}, './store': {},
   });
+  // The rich composer is contenteditable: "?" must insert, not open the shortcut help.
+  const within = (tagName, props = {}) => ({ tagName, isContentEditable: false, closest: () => null, ...props });
+  assert.equal(shortcuts.isEditableTarget(within('DIV', { isContentEditable: true })), true, 'contenteditable rich composer');
+  assert.equal(shortcuts.isEditableTarget(within('SPAN', { closest: (selector) => selector.includes('contenteditable') ? {} : null })), true, 'descendant of a contenteditable');
+  assert.equal(shortcuts.isEditableTarget(within('TEXTAREA')), true);
+  assert.equal(shortcuts.isEditableTarget(within('INPUT')), true);
+  assert.equal(shortcuts.isEditableTarget(within('SELECT')), true);
+  assert.equal(shortcuts.isEditableTarget(within('BUTTON')), false, 'buttons keep app-wide shortcuts');
+  assert.equal(shortcuts.isEditableTarget(within('DIV')), false);
+  assert.equal(shortcuts.isEditableTarget(null), false);
   const state = () => ({ sum: 0, at: 0, lockedUntil: 0 });
   let s = state();
   assert.equal(shortcuts.swipeStep(s, -60, 2, 0), null);
@@ -3264,6 +3331,22 @@ test('rich composer styles Markdown without changing the source or enabling HTML
   assert.equal(rich.richTextSource(hostile), '<img src=x onerror=alert(1)> [x](javascript:alert(1))');
   assert.doesNotMatch(hostile, /<img src=x/);
   assert.match(hostile, /&lt;img src=x/);
+});
+
+test('rich composer keeps pasted URLs and absolute paths whole', async () => {
+  const rich = await loadFrontend('../src/lib/richText.ts', {});
+  const url = 'https://github.com/acme/flip_flopper/blob/main/src/foo_bar.tsx';
+  const source = `Paste ${url} and /api/v1/users, or (https://example.com/a_(b)).`;
+  const html = rich.renderRichMarkdown(source);
+  assert.equal(rich.richTextSource(html), source, 'URL text round-trips exactly');
+  assert.ok(html.includes(`<span class="md-rich-url">${url}</span>`), 'the whole URL is one literal span');
+  assert.doesNotMatch(html, /md-rich-command/, 'URL path segments are not slash commands');
+  assert.doesNotMatch(html, /md-rich-em/, 'underscores in URL paths are not emphasis');
+  assert.match(html, /md-rich-url">https:\/\/example\.com\/a_\(b\)<\/span>\)\./, 'prose punctuation stays outside the URL');
+  assert.doesNotMatch(rich.renderRichMarkdown('/api/v1/users'), /md-rich-command/, 'a pasted absolute path is not a command');
+  assert.doesNotMatch(rich.renderRichMarkdown('/Users/me/dev/file.ts'), /md-rich-command/);
+  assert.doesNotMatch(rich.renderRichMarkdown('Use /test here'), /md-rich-command/, 'a slash mid-line is not a command');
+  assert.equal((rich.renderRichMarkdown('  /clear please\n/agent:compact').match(/md-rich-command/g) ?? []).length, 2, 'line-leading commands still style');
 });
 
 test('project scripts validate, persist, edit and remove per checkout', async () => {

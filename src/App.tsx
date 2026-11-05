@@ -599,16 +599,19 @@ const App: Component = () => {
                 >
                   <Transcript />
                 </Show>
-                <div class="dock" classList={{ "dock-above-terminal": layout.terminalDrawer }} style={{ display: conversationTerminal() ? "none" : undefined }}>
+                <div class="dock" classList={{ "dock-above-terminal": layout.terminalDrawer }}>
+                  <Show when={conversationTerminal()}>
+                    <div class="dock-notice">
+                      <div class="conversation-cli-note">
+                        <span>{cliHistorySynced() ? "The CLI is still running. Sending a message here ends it and continues the same conversation in Chat." : "The CLI is still running. Sending a message here ends it; its earlier messages stay in the CLI's own history."}</span>
+                        <button class="ui-btn ui-btn-outline" onClick={() => void setConversationMode("cli")}>Show CLI</button>
+                        <button class="ui-btn ui-btn-outline" onClick={() => void endConversationTerminal()}>End CLI</button>
+                      </div>
+                    </div>
+                  </Show>
                   <UsageLimitBanner />
                   <Composer onOpenProjects={() => setPickerOpen(true)} />
                 </div>
-                <Show when={conversationTerminal()}>
-                  <div class="conversation-cli-note">The CLI is still running in the background. End it to send chat messages.
-                    <button class="ui-btn ui-btn-outline" onClick={() => void setConversationMode("cli")}>Show CLI</button>
-                    <button class="ui-btn ui-btn-outline" onClick={() => void endConversationTerminal()}>End CLI</button>
-                  </div>
-                </Show>
                 {/* Footer terminal panel: docked to the bottom of the conversation column,
                     below the composer (T3 Code layout), so the prompt stays directly above it.
                     Always mounted; the drawer hides itself through its own presence timing. */}
@@ -616,7 +619,7 @@ const App: Component = () => {
               </div>
               <div ref={cliSurface} class="conversation-surface" style={{ display: cliPresent() ? "flex" : "none" }}>
                 <div class="conversation-cli-note">
-                  <span>The agent's native interface stays running while you switch views. {cliHistorySynced() ? "CLI activity is added to Chat when the CLI exits." : "CLI messages remain in native history and are not mirrored in Chat."}</span>
+                  <span>The agent's native interface stays running while you switch views. {cliHistorySynced() ? "CLI activity is imported into Chat when you switch back." : "CLI messages remain in native history and are not mirrored in Chat."}</span>
                   <Show when={conversationTerminal()}><button class="ui-btn ui-btn-outline" onClick={() => void endConversationTerminal()}>End CLI</button></Show>
                   <Show when={!conversationTerminal() && conversationTerminalView()}><button class="ui-btn ui-btn-outline" disabled={conversationTerminalBusy()} onClick={() => void setConversationMode("cli")}>Resume CLI</button></Show>
                 </div>

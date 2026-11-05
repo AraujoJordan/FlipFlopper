@@ -129,11 +129,22 @@ const BASE_GROUPS: ShortcutGroup[] = [
   },
 ];
 
+/** Editable surfaces own printable keys. The rich composer is a contenteditable
+ *  div, so a tag-name check alone would let app-wide shortcuts steal "?", ⌘Z,
+ *  Escape and Ctrl+Enter while the user is typing in it. */
+export function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target as Partial<HTMLElement> | null;
+  if (!el || typeof el.tagName !== "string") return false;
+  if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT") return true;
+  if (el.isContentEditable) return true;
+  return typeof el.closest === "function" && !!el.closest("[contenteditable]:not([contenteditable='false'])");
+}
+
 function classifyTarget(target: EventTarget | null) {
-  const el = target instanceof Element ? target : null;
+  const el = typeof Element !== "undefined" && target instanceof Element ? target : null;
   return {
     inTerminal: !!el?.closest(".xterm"),
-    inInput: el ? el.tagName === "INPUT" || el.tagName === "TEXTAREA" : false,
+    inInput: isEditableTarget(target),
   };
 }
 

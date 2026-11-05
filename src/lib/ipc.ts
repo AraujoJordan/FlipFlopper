@@ -1295,6 +1295,8 @@ export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenF
 
 export const chatOpenTerminal = (sessionId: string): Promise<string> => invoke("chat_open_terminal", { sessionId });
 export const chatCloseTerminal = (sessionId: string): Promise<void> => invoke("chat_close_terminal", { sessionId });
+/** Import CLI activity into Chat without ending the interactive terminal. */
+export const chatSyncTerminal = (sessionId: string): Promise<void> => invoke("chat_sync_terminal", { sessionId });
 export const chatDetachNative = (sessionId: string): Promise<void> => invoke("chat_detach_native", { sessionId });
 /** Start a fresh agent conversation on the next message while keeping the visible transcript. */
 export const chatRestartSession = (sessionId: string): Promise<SessionMeta> => invoke("chat_restart_session", { sessionId });

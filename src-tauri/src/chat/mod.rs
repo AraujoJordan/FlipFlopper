@@ -340,26 +340,59 @@ impl ChatManager {
     pub fn sync_terminal(&self, session_id: &str, terminal: OwnedTerminal, app: Emitter) {
         let Some(checkpoint) = terminal.history else { return };
         let Some(update) = import::sync_history(&checkpoint) else { return };
+        self.apply_history_update(session_id, &update, &app);
+    }
+
+    /// Import CLI activity without stopping the interactive process, so
+    /// switching to Chat shows the same conversation instead of an empty
+    /// transcript. Serialized with start/stop handoffs by the session lock.
+    pub fn sync_terminal_live(&self, session_id: &str, app: Emitter) -> Result<(), String> {
+        let operation = self.session_operation(session_id);
+        let _handoff = operation.lock().unwrap();
+        let (terminal_id, checkpoint) = {
+            let mut terminals = self.terminals.lock().unwrap();
+            let Some(terminal) = terminals.get_mut(session_id) else { return Ok(()) };
+            (terminal.id.clone(), terminal.history.take())
+        };
+        let Some(checkpoint) = checkpoint else { return Ok(()) };
+        let update = import::sync_history(&checkpoint);
+        let mut next = checkpoint;
+        if let Some(update) = &update {
+            self.apply_history_update(session_id, update, &app);
+            if let Some(updated) = &update.next { next = updated.clone(); }
+        }
+        let mut terminals = self.terminals.lock().unwrap();
+        if let Some(terminal) = terminals.get_mut(session_id) {
+            if terminal.id == terminal_id { terminal.history = Some(next); }
+        }
+        Ok(())
+    }
+
+    fn apply_history_update(&self, session_id: &str, update: &import::HistoryUpdate, app: &Emitter) {
         if store::get_session(session_id).is_none() { return; }
         let fallback_title = update.entries.iter().find_map(|entry| match entry {
             Entry::User { text, .. } => Some(first_line(text, 60)),
             _ => None,
         });
         let mut imported = 0;
-        for entry in update.entries {
-            if let Err(error) = emit_entry(&app, session_id, &entry) {
+        for entry in &update.entries {
+            if let Err(error) = emit_entry(app, session_id, entry) {
                 eprintln!("Failed to sync CLI transcript: {error}");
                 break;
             }
             imported += 1;
         }
-        let agent_id = checkpoint.agent_id.clone();
+        let agent_id = update.agent_id.clone();
         let updated_at = if update.last_ts > 0 { update.last_ts } else { store::now_ms() };
         if let Err(error) = store::update_session(session_id, |meta| {
             meta.native_ids.insert(agent_id.clone(), update.native_id.clone());
             meta.entry_count = meta.entry_count.saturating_add(imported);
             meta.agent_last_entry.insert(agent_id.clone(), meta.entry_count);
             meta.updated_at = updated_at;
+            // The CLI may have moved the native conversation forward. Drop a
+            // stale ACP binding so the next Chat turn resumes the CLI one.
+            let stale_binding = meta.acp_sessions.get(&agent_id).is_some_and(|binding| binding.session_id != update.native_id);
+            if stale_binding { meta.acp_sessions.remove(&agent_id); }
             if !meta.title_locked {
                 if let Some(title) = &update.title { meta.title = title.clone(); }
                 else if meta.title.is_empty() {
@@ -373,6 +406,10 @@ impl ChatManager {
 
     pub fn terminal_exited(&self, terminal_id: &str, app: Emitter) -> Option<String> {
         let owner = self.terminals.lock().unwrap().iter().find(|(_, terminal)| terminal.id == terminal_id).map(|(owner, _)| owner.clone())?;
+        // Wait for an in-flight live sync to put its checkpoint back before
+        // removing the terminal, so the final sync cannot miss a turn.
+        let operation = self.session_operation(&owner);
+        let _handoff = operation.lock().unwrap();
         let terminal = self.terminals.lock().unwrap().remove(&owner)?;
         terminal.ptys.sessions.lock().unwrap().remove(&terminal.id);
         self.sync_terminal(&owner, terminal, app);
@@ -1190,6 +1227,44 @@ mod tests {
         store::update_session(&manual.id, |meta| meta.title_locked = true).unwrap();
         manager.sync_terminal(&manual.id, OwnedTerminal { id: "pty-manual".into(), ptys: crate::pty::PtyManager::new(), history: Some(checkpoint(5)) }, Arc::new(|_, _| {}));
         assert_eq!(store::get_session(&manual.id).unwrap().title, "My title");
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn live_cli_sync_imports_new_activity_and_keeps_the_terminal() {
+        let _env = store::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-cli-live-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&data).unwrap();
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let native = data.join("live-native.jsonl");
+        std::fs::write(&native, concat!(
+            r#"{"type":"user","timestamp":"2026-10-22T09:00:00Z","message":{"content":"Old prompt"}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-22T09:00:01Z","message":{"content":[{"type":"text","text":"Old answer"}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-10-22T09:01:00Z","message":{"content":"First CLI prompt"}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-22T09:01:01Z","message":{"content":[{"type":"text","text":"First CLI answer"}]}}"#, "\n",
+        )).unwrap();
+        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: None }).unwrap();
+        let history = import::HistoryCheckpoint { agent_id: "claude".into(), cwd: "/test".into(), native_id: None, path: Some(native.clone()), line_offset: 2, started_at: 0, previous_entries: Vec::new() };
+        let manager = ChatManager::default();
+        manager.terminals.lock().unwrap().insert(meta.id.clone(), OwnedTerminal { id: "pty-live".into(), ptys: crate::pty::PtyManager::new(), history: Some(history) });
+        manager.sync_terminal_live(&meta.id, Arc::new(|_, _| {})).unwrap();
+        assert_eq!(manager.runtime_state(&meta.id).terminal_id.as_deref(), Some("pty-live"), "sync must not stop the CLI");
+        let users = |entries: Vec<Entry>| entries.into_iter().filter_map(|entry| match entry { Entry::User { text, .. } => Some(text), _ => None }).collect::<Vec<_>>();
+        assert_eq!(users(store::load_entries(&meta.id)), ["First CLI prompt"]);
+        assert_eq!(manager.terminals.lock().unwrap().get(&meta.id).unwrap().history.as_ref().unwrap().line_offset, 4, "checkpoint advances past imported lines");
+
+        let mut contents = std::fs::read_to_string(&native).unwrap();
+        contents.push_str(concat!(
+            r#"{"type":"user","timestamp":"2026-10-22T09:02:00Z","message":{"content":"Second CLI prompt"}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-22T09:02:01Z","message":{"content":[{"type":"text","text":"Second CLI answer"}]}}"#, "\n",
+        ));
+        std::fs::write(&native, contents).unwrap();
+        manager.sync_terminal_live(&meta.id, Arc::new(|_, _| {})).unwrap();
+        assert_eq!(users(store::load_entries(&meta.id)), ["First CLI prompt", "Second CLI prompt"], "only the new CLI turn is appended");
+        assert_eq!(manager.terminals.lock().unwrap().get(&meta.id).unwrap().history.as_ref().unwrap().line_offset, 6);
+
         match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
         let _ = std::fs::remove_dir_all(data);
     }

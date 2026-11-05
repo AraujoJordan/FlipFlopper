@@ -101,14 +101,18 @@ Currently implemented:
   a fresh agent; sessions with a native id resume it for Claude, Codex, Cursor,
   agy, Qwen, OpenCode, Kimi and Droid (interactive Droid uses `-r`). Both launch
   directly in the effective session cwd. `ChatManager` owns the PTY handoff under
-  the session operation lock; chat sends and clearing are blocked while the CLI
-  owns the conversation. Switching views preserves the live CLI, its scrollback
+  the session operation lock. Switching to Chat imports new CLI activity without
+  ending the process; sending a Chat message ends the CLI, imports the remainder
+  and releases ownership. Clearing stays blocked while the CLI runs. Switching
+  views preserves the live CLI, its scrollback
   and composer drafts; exiting or End CLI releases ownership. Claude/Codex use
-  append-only JSONL line checkpoints. Cursor, agy, Qwen, Kimi and Droid reconcile
+  append-only JSONL line checkpoints; a live sync waits for a stable file and
+  advances the offset so switching mid-write retries instead of skipping a turn.
+  Cursor, agy, Qwen, Kimi and Droid reconcile
   normalized native JSONL snapshots so rewrites do not duplicate old entries;
   OpenCode uses its official `session list`/`export` commands rather than reading
   its mutable database. All seven save fresh `native_ids` and emit only new CLI
-  entries into Chat after exit; changed pre-checkpoint snapshots are skipped.
+  entries into Chat while switching or after exit; changed pre-checkpoint snapshots are skipped.
   Native titles rename unlocked sessions in the sidebar/header, while
   `title_locked` preserves manual names; agents without a title use the first
   imported prompt. Native CLI permissions/settings apply. `runtime.terminal_id` restores ownership

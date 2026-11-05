@@ -89,6 +89,14 @@ fn lines_of(path: &Path) -> Option<impl Iterator<Item = String>> {
     Some(BufReader::new(file).lines().map_while(Result::ok))
 }
 
+/// Cheap stability check for append-only CLI history. A live CLI may append
+/// while Chat reads it; retry that sync instead of advancing past a line that
+/// was only half written.
+fn file_stamp(path: &Path) -> Option<(u64, Option<std::time::SystemTime>)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.len(), metadata.modified().ok()))
+}
+
 /// Claude encodes a project path as every non-alphanumeric char → `-`.
 fn claude_encode_path(path: &str) -> String {
     path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
@@ -420,10 +428,14 @@ pub struct HistoryCheckpoint {
 }
 
 pub struct HistoryUpdate {
+    pub agent_id: String,
     pub native_id: String,
     pub entries: Vec<Entry>,
     pub last_ts: u64,
     pub title: Option<String>,
+    /// Checkpoint to use for the next sync. `None` keeps the current one so a
+    /// read that raced a native write is retried instead of skipped.
+    pub next: Option<HistoryCheckpoint>,
 }
 
 fn histories(agent: &str, cwd: &str) -> Vec<ImportCandidate> {
@@ -483,10 +495,10 @@ fn entry_fingerprint(entry: &Entry) -> Value {
     value
 }
 
-fn snapshot_suffix(previous: &[Entry], current: Vec<Entry>) -> Vec<Entry> {
-    let prefix_matches = previous.iter().zip(&current).all(|(a, b)| entry_fingerprint(a) == entry_fingerprint(b));
+fn snapshot_suffix(previous: &[Entry], current: &[Entry]) -> Vec<Entry> {
+    let prefix_matches = previous.iter().zip(current).all(|(a, b)| entry_fingerprint(a) == entry_fingerprint(b));
     if prefix_matches && current.len() >= previous.len() {
-        current.into_iter().skip(previous.len()).collect()
+        current[previous.len()..].to_vec()
     } else {
         // Rewind/compaction can rewrite native history. Do not duplicate or
         // silently replace Chat entries when the old snapshot no longer matches.
@@ -524,15 +536,55 @@ pub fn sync_history(checkpoint: &HistoryCheckpoint) -> Option<HistoryUpdate> {
         }
     }?;
     let (native_id, path) = resolved;
+    let title = native_title(&checkpoint.agent_id, &checkpoint.cwd, &native_id, &path);
+    let append_only = matches!(checkpoint.agent_id.as_str(), "claude" | "codex");
+    let before = append_only.then(|| file_stamp(&path)).flatten();
     let converted = match checkpoint.agent_id.as_str() {
         "claude" => convert_claude_from(&path, checkpoint.line_offset),
         "codex" => convert_codex_from(&path, checkpoint.line_offset),
         _ => convert_snapshot(&checkpoint.agent_id, &path),
     };
-    let (entries, _, last_ts) = converted.unwrap_or_default();
-    let entries = if matches!(checkpoint.agent_id.as_str(), "claude" | "codex") { entries } else { snapshot_suffix(&checkpoint.previous_entries, entries) };
-    let title = native_title(&checkpoint.agent_id, &checkpoint.cwd, &native_id, &path);
-    Some(HistoryUpdate { native_id, entries, last_ts, title })
+    let Some((current, _, last_ts)) = converted else {
+        // Resolve the native id/title even when there is no displayable
+        // activity yet, but keep the checkpoint so the next sync retries.
+        return Some(HistoryUpdate {
+            agent_id: checkpoint.agent_id.clone(),
+            native_id,
+            entries: Vec::new(),
+            last_ts: 0,
+            title,
+            next: None,
+        });
+    };
+    let next_offset = if append_only {
+        lines_of(&path).map(|lines| lines.count()).unwrap_or(checkpoint.line_offset)
+    } else {
+        checkpoint.line_offset
+    };
+    if append_only && before != file_stamp(&path) {
+        return Some(HistoryUpdate {
+            agent_id: checkpoint.agent_id.clone(),
+            native_id,
+            entries: Vec::new(),
+            last_ts: 0,
+            title,
+            next: None,
+        });
+    }
+    let mut next = checkpoint.clone();
+    next.native_id = Some(native_id.clone());
+    next.path = Some(path);
+    let entries = if append_only {
+        next.line_offset = next_offset;
+        next.previous_entries = Vec::new();
+        current
+    } else {
+        let suffix = snapshot_suffix(&checkpoint.previous_entries, &current);
+        next.line_offset = 0;
+        next.previous_entries = current;
+        suffix
+    };
+    Some(HistoryUpdate { agent_id: checkpoint.agent_id.clone(), native_id, entries, last_ts, title, next: Some(next) })
 }
 
 /// Builds a transcript, opening a turn at the first agent output after a user
@@ -1021,8 +1073,12 @@ fn sync_opencode(checkpoint: &HistoryCheckpoint) -> Option<HistoryUpdate> {
         opencode_histories(&checkpoint.cwd).into_iter().find(|session| session.updated_at >= checkpoint.started_at.saturating_sub(1000)).map(|session| session.native_id)
     })?;
     let (current, _, last_ts, title) = opencode_export(&native_id)?;
-    let entries = snapshot_suffix(&checkpoint.previous_entries, current);
-    Some(HistoryUpdate { native_id, entries, last_ts, title })
+    let entries = snapshot_suffix(&checkpoint.previous_entries, &current);
+    let mut next = checkpoint.clone();
+    next.native_id = Some(native_id.clone());
+    next.line_offset = 0;
+    next.previous_entries = current;
+    Some(HistoryUpdate { agent_id: checkpoint.agent_id.clone(), native_id, entries, last_ts, title, next: Some(next) })
 }
 
 // ── Import ───────────────────────────────────────────────────────────────────
@@ -1241,11 +1297,12 @@ mod tests {
             r#"{"role":"assistant","message":{"content":[{"type":"text","text":"New answer"}]}}"#,
         ]);
         let previous = convert_cursor(&before).unwrap().0;
-        let suffix = snapshot_suffix(&previous, convert_cursor(&after).unwrap().0);
+        let current = convert_cursor(&after).unwrap().0;
+        let suffix = snapshot_suffix(&previous, &current);
         assert!(suffix.iter().any(|entry| matches!(entry, Entry::User { text, .. } if text == "New prompt")));
         assert!(!suffix.iter().any(|entry| matches!(entry, Entry::User { text, .. } if text == "Before")));
         let rewritten = write_tmp("snapshot-rewritten.jsonl", &[r#"{"role":"user","message":{"content":[{"type":"text","text":"Rewound"}]}}"#]);
-        assert!(snapshot_suffix(&previous, convert_cursor(&rewritten).unwrap().0).is_empty());
+        assert!(snapshot_suffix(&previous, &convert_cursor(&rewritten).unwrap().0).is_empty());
     }
 
     #[test]

@@ -1481,6 +1481,8 @@ input, textarea {
 .terminal-drawer-body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
 .terminal-drawer-body > .terminal-view { flex: 1; min-width: 0; }
 .dock .composer { width: 100%; max-width: var(--conversation-max); margin: 0 auto; padding: 0 24px; }
+.dock-notice { width: 100%; max-width: var(--conversation-max); margin: 0 auto; padding: 0 24px 8px; }
+.dock-notice .conversation-cli-note { border: 1px solid var(--border-muted); border-radius: 10px; background: var(--surface-2); padding: 8px 12px; }
 
 /* ── Transcript ── */
 .transcript-wrap { flex: 1; min-height: 0; position: relative; display: flex; }
@@ -2698,6 +2700,7 @@ math { font-family: "STIX Two Math", "Latin Modern Math", "Cambria Math", math, 
   .session-header-branch { max-width: 80px; }
   .session-header-live { display: none; }
   .dock .composer { padding: 0 12px; }
+  .dock-notice { padding: 0 12px 8px; }
   .transcript-inner { padding: 20px 12px; }
   .empty-state-inner { padding: 0 12px; }
   .composer-model { max-width: 130px; }

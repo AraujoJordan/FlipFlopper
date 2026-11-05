@@ -7,6 +7,7 @@ import {
   regenerateSessionTitle,
   chatOpenTerminal,
   chatCloseTerminal,
+  chatSyncTerminal,
   chatRuntimeState,
   chatSetMode,
   chatRespond,
@@ -164,9 +165,25 @@ export const canOpenInTerminal = (id: string) => {
   return !!session && !!store.agents.find((agent) => agent.id === session.agent_id)?.installed;
 };
 
-async function openConversationTerminal(id: string) {
-  if (chat.views[id]?.runtime?.terminal_id || chat.terminalBusy[id]) return;
-  if (isRunning(id) || !canOpenInTerminal(id)) return;
+/** Import CLI activity while its process keeps running, so Chat is never an
+ *  empty shell of a conversation the user just had in the terminal. */
+const syncingTerminals = new Set<string>();
+async function syncConversationTerminal(id: string) {
+  if (!chat.views[id]?.runtime?.terminal_id || syncingTerminals.has(id)) return;
+  syncingTerminals.add(id);
+  try {
+    await chatSyncTerminal(id);
+    await refreshSessions();
+  } catch (e) {
+    toast(`Couldn't import the CLI conversation: ${String(e)}`, "error");
+  } finally { syncingTerminals.delete(id); }
+}
+
+async function openConversationTerminal(id: string): Promise<boolean> {
+  if (chat.views[id]?.runtime?.terminal_id) return true;
+  if (chat.terminalBusy[id]) return false;
+  if (isRunning(id)) { toast("Finish or stop the current turn before opening CLI mode.", "info"); return false; }
+  if (!canOpenInTerminal(id)) { toast("Install the selected agent to use its CLI.", "error"); return false; }
   setChat("terminalBusy", id, true);
   try {
     const terminal = await chatOpenTerminal(id);
@@ -174,66 +191,18 @@ async function openConversationTerminal(id: string) {
     if (previous && previous !== terminal) disposeCachedTerminal(previous);
     setChat("terminalViews", id, terminal);
     setChat("views", id, "runtime", await chatRuntimeState(id));
-  } catch (e) { toast(`Could not open CLI: ${String(e)}`, "error"); }
+    // The user may have switched to Chat while the terminal was opening.
+    if (chat.presentation[id] === "chat") void syncConversationTerminal(id);
+    return true;
+  } catch (e) { toast(`Could not open CLI: ${String(e)}`, "error"); return false; }
   finally { setChat("terminalBusy", id, false); }
 }
 
-const cliSessionCreatedHandlers = new Set<(id: string) => void>();
-export function onCliSessionCreated(handler: (id: string) => void) {
-  cliSessionCreatedHandlers.add(handler);
-  return () => { cliSessionCreatedHandlers.delete(handler); };
-}
-
-export async function setConversationMode(mode: "chat" | "cli") {
-  const key = presentationKey();
-  setChat("presentation", key, mode);
-  if (mode !== "cli") return;
-  if (chat.activeId) {
-    await openConversationTerminal(chat.activeId);
-    return;
-  }
-  if (chat.terminalBusy.new) return;
-  const projectPath = chat.draftProject ?? store.currentProject?.path;
-  if (!projectPath) { toast("Choose a project first", "error"); return; }
-  const c = chat.composer;
-  if (!store.agents.find((agent) => agent.id === c.agentId)?.installed) {
-    toast(`${c.agentId} is not installed`, "error");
-    return;
-  }
-  setChat("terminalBusy", "new", true);
-  let worktree: WorktreeRef | undefined;
-  try {
-    if (c.worktree) {
-      const info = await createWorktree(projectPath, c.agentId, worktreePrefix(), c.worktreeBase);
-      worktree = { path: info.worktree_path, branch: info.branch, source_branch: info.source_branch };
-      await runWorktreeSetup(projectPath, info.worktree_path);
-    }
-    const meta = await createSession({
-      projectPath,
-      worktree,
-      agentId: c.agentId,
-      model: c.model,
-      effort: c.effort,
-      mode: c.mode,
-      yolo: c.yolo,
-      activate: true,
-      onCreated: (id) => { for (const handler of cliSessionCreatedHandlers) handler(id); },
-    });
-    setChat("presentation", meta.id, "cli");
-    setChat("presentation", "new", "chat");
-    await openConversationTerminal(meta.id);
-  } catch (e) {
-    const failedWorktree = worktree;
-    if (failedWorktree && !chat.sessions.some((s) => s.worktree?.path === failedWorktree.path)) void removeWorktree(projectPath, failedWorktree.path, failedWorktree.branch, true).catch(() => {});
-    toast(`Could not open CLI: ${String(e)}`, "error");
-  } finally { setChat("terminalBusy", "new", false); }
-}
-
-export async function endConversationTerminal() {
-  const id = chat.activeId;
-  const terminal = conversationTerminal();
-  if (!id || !terminal || chat.terminalBusy[id]) return;
-  if (!await confirmDialog("End the CLI process? Any running work will stop. Its saved native conversation remains available.", "End CLI")) return;
+/** Close the CLI and import the rest of its transcript before Chat takes over. */
+async function closeConversationTerminal(id: string, announce = false): Promise<boolean> {
+  const terminal = chat.views[id]?.runtime?.terminal_id ?? chat.terminalViews[id];
+  if (!terminal) return true;
+  if (chat.terminalBusy[id]) { toast("The CLI is still starting. Try again in a moment.", "info"); return false; }
   setChat("terminalBusy", id, true);
   try {
     await chatCloseTerminal(id);
@@ -241,10 +210,99 @@ export async function endConversationTerminal() {
     setChat("terminalViews", produce((views) => { delete views[id]; }));
     setChat("views", id, "runtime", await chatRuntimeState(id));
     setChat("presentation", id, "chat");
-    setChat("terminalViews", produce((views) => { delete views[id]; }));
     bumpGitStatus();
-  } catch (e) { toast(String(e), "error"); }
-  finally { setChat("terminalBusy", id, false); }
+    void refreshSessions();
+    if (announce) toast("CLI ended. Continuing this conversation in Chat.", "info");
+    return true;
+  } catch (e) {
+    toast(`Couldn't end the CLI: ${String(e)}`, "error");
+    return false;
+  } finally { setChat("terminalBusy", id, false); }
+}
+
+const cliSessionCreatedHandlers = new Set<(id: string) => void>();
+export function onCliSessionCreated(handler: (id: string) => void) {
+  cliSessionCreatedHandlers.add(handler);
+  return () => { cliSessionCreatedHandlers.delete(handler); };
+}
+/** One in-flight new-session CLI launch; repeated Chat/CLI clicks must not spawn
+ *  a second agent while the first session is still being created. */
+let newSessionOpening: Promise<void> | null = null;
+
+export async function setConversationMode(mode: "chat" | "cli") {
+  const key = presentationKey();
+  setChat("presentation", key, mode);
+  if (mode === "chat") {
+    // The CLI keeps running; import what it has done so the transcript is not
+    // empty when the user lands on Chat.
+    const id = chat.activeId;
+    if (id) void syncConversationTerminal(id);
+    return;
+  }
+  if (chat.activeId) {
+    const id = chat.activeId;
+    if (chat.views[id]?.runtime?.terminal_id || chat.terminalBusy[id]) return;
+    const opened = await openConversationTerminal(id);
+    if (!opened && chat.presentation[id] === "cli") setChat("presentation", id, "chat");
+    return;
+  }
+  if (newSessionOpening) return;
+  const projectPath = chat.draftProject ?? store.currentProject?.path;
+  if (!projectPath) {
+    toast("Choose a project first", "error");
+    setChat("presentation", "new", "chat");
+    return;
+  }
+  const c = chat.composer;
+  if (!store.agents.find((agent) => agent.id === c.agentId)?.installed) {
+    toast(`${c.agentId} is not installed`, "error");
+    setChat("presentation", "new", "chat");
+    return;
+  }
+  newSessionOpening = (async () => {
+    setChat("terminalBusy", "new", true);
+    let worktree: WorktreeRef | undefined;
+    try {
+      if (c.worktree) {
+        const info = await createWorktree(projectPath, c.agentId, worktreePrefix(), c.worktreeBase);
+        worktree = { path: info.worktree_path, branch: info.branch, source_branch: info.source_branch };
+        await runWorktreeSetup(projectPath, info.worktree_path);
+      }
+      const meta = await createSession({
+        projectPath,
+        worktree,
+        agentId: c.agentId,
+        model: c.model,
+        effort: c.effort,
+        mode: c.mode,
+        yolo: c.yolo,
+        activate: true,
+        onCreated: (id) => { for (const handler of cliSessionCreatedHandlers) handler(id); },
+      });
+      // A slow launch must respect what the user chose while it was working:
+      // clicking Chat during creation opens the new session in Chat instead.
+      const keepCli = (chat.presentation["new"] ?? "cli") === "cli";
+      setChat("presentation", meta.id, keepCli ? "cli" : "chat");
+      setChat("presentation", "new", "chat");
+      if (keepCli) {
+        const opened = await openConversationTerminal(meta.id);
+        if (!opened) setChat("presentation", meta.id, "chat");
+      }
+    } catch (e) {
+      const failedWorktree = worktree;
+      if (failedWorktree && !chat.sessions.some((s) => s.worktree?.path === failedWorktree.path)) void removeWorktree(projectPath, failedWorktree.path, failedWorktree.branch, true).catch(() => {});
+      toast(`Could not open CLI: ${String(e)}`, "error");
+      setChat("presentation", "new", "chat");
+    } finally { setChat("terminalBusy", "new", false); }
+  })();
+  try { await newSessionOpening; } finally { newSessionOpening = null; }
+}
+
+export async function endConversationTerminal() {
+  const id = chat.activeId;
+  if (!id || !conversationTerminal() || chat.terminalBusy[id]) return;
+  if (!await confirmDialog("End the CLI process? Any running work will stop. Its saved native conversation remains available.", "End CLI")) return;
+  await closeConversationTerminal(id);
 }
 
 // ── Selectors ────────────────────────────────────────────────────────────────
@@ -445,7 +503,12 @@ function handleLiveEntry(id: string, entry: ChatEntry) {
     const previous = chat.views[id]?.runtime?.terminal_id;
     if (previous && previous !== entry.event.state.terminal_id) {
       if (!chat.terminalBusy[id]) setChat("terminalViews", id, previous);
-      if (!entry.event.state.terminal_id) void refreshSessions();
+      if (!entry.event.state.terminal_id) {
+        void refreshSessions();
+        // The CLI ended (typed exit or forced stop): return to the imported
+        // Chat transcript instead of leaving a dead terminal on screen.
+        if (chat.presentation[id] === "cli") setChat("presentation", id, "chat");
+      }
       bumpGitStatus();
     }
   }
@@ -580,7 +643,7 @@ export async function sendQueuedNow(id: string, index = 0) {
     return;
   }
   setChat("queued", id, (q) => q.filter((_, i) => i !== index));
-  await sendTurn(id, item.text, item.attachments, false, item.references);
+  await sendTurn(id, item.text, item.attachments, false, item.references, undefined, true);
 }
 
 // ── Loading ──────────────────────────────────────────────────────────────────
@@ -689,6 +752,9 @@ export async function selectSession(id: string) {
       setStore("currentProject", info);
     }
     await ensureLoaded(id);
+    // A session whose CLI was left running should open with its imported
+    // history in Chat, regardless of which presentation it was left in.
+    if (chat.views[id]?.runtime?.terminal_id) void syncConversationTerminal(id);
   } catch (e) {
     toast(`Couldn't open session: ${String(e)}`, "error");
   }
@@ -954,7 +1020,10 @@ export function setComposerAgent(agentId: string) {
  *  since they belong to the agent being replaced). */
 export interface SendOverrides { agentId: string; mode: PermissionMode; yolo: boolean; model?: string | null }
 
-async function sendTurn(sessionId: string, text: string, attachments: Attachment[] = [], recoverContext = false, references: string[] = [], overrides?: SendOverrides): Promise<boolean> {
+async function sendTurn(sessionId: string, text: string, attachments: Attachment[] = [], recoverContext = false, references: string[] = [], overrides?: SendOverrides, handoffCli = false): Promise<boolean> {
+  if (handoffCli && chat.views[sessionId]?.runtime?.terminal_id) {
+    if (!await closeConversationTerminal(sessionId, true)) return false;
+  }
   if (chat.terminalBusy[sessionId] || chat.views[sessionId]?.runtime?.terminal_id) {
     toast("Exit the CLI before sending chat messages in this conversation.", "info"); return false;
   }
@@ -989,7 +1058,12 @@ async function sendTurn(sessionId: string, text: string, attachments: Attachment
     const runtime = await chatRuntimeState(sessionId).catch(() => undefined);
     if (runtime) setChat("views", sessionId, "runtime", runtime);
     if (!recoverContext && String(e).includes("NATIVE_SESSION_UNAVAILABLE") && await confirmDialog("The CLI cannot load its saved session. Continue in a new native conversation with this transcript as context?", "Continue from transcript")) {
-      return sendTurn(sessionId, text, attachments, true, references, overrides);
+      return sendTurn(sessionId, text, attachments, true, references, overrides, false);
+    }
+    // The CLI can start between the check above and this send. End it and
+    // retry once so switching surfaces never strands the prompt.
+    if (handoffCli && String(e).includes("Exit the CLI") && await closeConversationTerminal(sessionId, true)) {
+      return sendTurn(sessionId, text, attachments, recoverContext, references, overrides, false);
     }
     toast(String(e), "error");
     return false;
@@ -1151,7 +1225,7 @@ export async function retryLastTurn(sessionId: string) {
   }
   if (!prompt) return;
   if (agentId && agentId !== chat.composer.agentId) setComposerAgent(agentId);
-  await sendTurn(sessionId, prompt, attachments);
+  await sendTurn(sessionId, prompt, attachments, false, [], undefined, true);
 }
 
 /** Send from the composer: creates the session on first use. Returns false if
@@ -1206,7 +1280,7 @@ export async function submitPrompt(text: string, attachments: Attachment[] = [],
       toast("Queued — it will send when the current turn finishes");
       return true;
     }
-    return sendTurn(id, prompt, attachments, false, references);
+    return sendTurn(id, prompt, attachments, false, references, undefined, true);
   }
 
   let projectPath = chat.draftProject ?? store.currentProject?.path;

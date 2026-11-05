@@ -2493,6 +2493,14 @@ async fn chat_close_terminal(app: tauri::AppHandle, session_id: String) -> Resul
     Ok(())
 }
 
+/// Import CLI activity into Chat while its terminal keeps running.
+#[tauri::command]
+async fn chat_sync_terminal(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
+    let sync_app = app.clone();
+    let owner = session_id.clone();
+    run_blocking(move || sync_app.state::<std::sync::Arc<chat::ChatManager>>().sync_terminal_live(&owner, chat_emitter(&sync_app))).await?
+}
+
 fn chat_emitter(app: &tauri::AppHandle) -> chat::Emitter {
     let app = app.clone();
     std::sync::Arc::new(move |session_id, entry| {
@@ -3340,6 +3348,7 @@ pub fn run() {
             chat_restart_session,
             chat_open_terminal,
             chat_close_terminal,
+            chat_sync_terminal,
             chat_respond,
             agent_runtime_info,
             chat_cancel,
