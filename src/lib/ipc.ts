@@ -910,3 +910,23 @@ export const chatSetMode = (sessionId: string, mode: PermissionMode, yolo: boole
 export const chatRespond = (sessionId: string, turnId: string, requestId: string, response: InteractionResponse): Promise<void> =>
   invoke("chat_respond", { sessionId, turnId, requestId, response });
 export const agentRuntimeInfo = (agentId: string): Promise<AgentRuntimeInfo> => invoke("agent_runtime_info", { agentId });
+
+
+export interface AndroidCliInfo {
+  version: string | null;
+  previews: boolean;
+  inspect: boolean;
+  modules: string[];
+  error: string | null;
+}
+export interface AndroidPreviewFunction { methodFqn: string; name?: string; group?: string }
+export interface AndroidCliResult {
+  previews?: AndroidPreviewFunction[];
+  artifacts?: Attachment[];
+  context?: { checkout: string; device: string; target: string; preview: string; capture_started_ms: number; capture_finished_ms: number; data: unknown };
+}
+export const androidCliInfo = (projectPath: string): Promise<AndroidCliInfo> => invoke("android_cli_info", { projectPath });
+export const androidCliBegin = (): Promise<string> => invoke("android_cli_begin");
+export const androidCliCancel = (id: string): Promise<void> => invoke("android_cli_cancel", { id });
+export const androidCliRun = (id: string, projectPath: string, action: "list" | "render" | "inspect", target = "", fqn = "", serial = ""): Promise<AndroidCliResult> =>
+  invoke("android_cli_run", { id, projectPath, action, target, fqn, serial });

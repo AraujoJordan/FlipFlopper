@@ -1,8 +1,8 @@
 import { Component, For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { getSessionUrl, onPreviewUrl, onPtyExit } from "../../lib/ipc";
+import { androidCliInfo, type AndroidCliInfo, getSessionUrl, onPreviewUrl, onPtyExit } from "../../lib/ipc";
 import { openSide } from "../../lib/layout";
-import { readRunTargets, setRunSessionId, store } from "../../lib/store";
+import { effectiveRoot, readRunTargets, setRunSessionId, store } from "../../lib/store";
 import { useValueMotion, animateElement } from "../ui";
 import RunButton from "../RunButton";
 import AndroidPreview from "./AndroidPreview";
@@ -49,6 +49,15 @@ const PreviewView: Component = () => {
     })();
   }));
 
+  const [androidProbe, setAndroidProbe] = createSignal(0);
+  const [androidInfo, setAndroidInfo] = createSignal<AndroidCliInfo | null>(null);
+  createEffect(on(() => [effectiveRoot(), androidProbe()] as const, ([root]) => {
+    setAndroidInfo(null);
+    let cancelled = false;
+    if (root) void androidCliInfo(root).then(info => { if (!cancelled) setAndroidInfo(info); }).catch(error => { if (!cancelled) setAndroidInfo({ version: null, previews: false, inspect: false, modules: [], error: String(error) }); });
+    onCleanup(() => { cancelled = true; });
+  }));
+  const [androidVisited, setAndroidVisited] = createSignal(false);
   type TargetLike = { id: string; needs_emulator: string | null; kind: string };
   type View = "web" | "android" | "ios";
   // Targets whose output is not browsable (desktop windows, CLIs, build tools)
@@ -66,6 +75,7 @@ const PreviewView: Component = () => {
   // preview, so a device view wins as the default.
   const views = createMemo(() => {
     const present = new Set(store.runTargets.map(platformOf));
+    if (androidInfo()?.modules.length) present.add("android");
     return (["web", "android", "ios"] as View[]).filter((v) => present.has(v));
   });
   const [chosen, setChosen] = createSignal<View | null>(null);
@@ -86,6 +96,7 @@ const PreviewView: Component = () => {
     const platform = target ? platformOf(target) : null;
     if (platform && platform !== "web") setChosen(platform);
   }, { defer: true }));
+  createEffect(() => { if (view() === "android") setAndroidVisited(true); });
   const VIEW_LABEL: Record<View, string> = { web: "Web", android: "Android", ios: "iOS" };
 
   let address: HTMLDivElement | undefined;
@@ -118,7 +129,9 @@ const PreviewView: Component = () => {
         </button>
         </Show>
       </div>
-      <Show when={view() === "web"} fallback={view() === "android" ? <AndroidPreview /> : <IosPreview />}>
+      <Show when={androidVisited()}><div class="android-retained" style={{ display: view() === "android" ? "flex" : "none" }}><AndroidPreview active={view() === "android"} info={androidInfo()} refreshInfo={() => setAndroidProbe(n => n + 1)} /></div></Show>
+      <Show when={view() === "ios"}><IosPreview /></Show>
+      <div class="android-retained" style={{ display: view() === "web" ? "flex" : "none" }}>
       <Show
         when={url()}
         fallback={
@@ -137,7 +150,7 @@ const PreviewView: Component = () => {
           {() => <iframe class="preview-frame" src={url()!} title="Live preview" onLoad={(event) => void animateElement(event.currentTarget, [{ opacity: .4 }, { opacity: 1 }], 180)} />}
         </For>
       </Show>
-      </Show>
+      </div>
     </div>
   );
 };

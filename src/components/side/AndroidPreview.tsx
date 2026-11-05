@@ -1,6 +1,8 @@
-import { Component, For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { Component, For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js";
 import {
   androidListDevices,
+  androidCliBegin, androidCliCancel, androidCliRun, prepareAttachmentPreview,
+  type AndroidCliInfo, type AndroidCliResult, type AndroidPreviewFunction,
   bootAndroidEmulator,
   detectAndroidEnvironment,
   savePastedAttachment,
@@ -10,13 +12,16 @@ import {
 } from "../../lib/ipc";
 import {
   ANDROID_KEY,
+  androidInspectionNodes,
   blobToBase64,
   canvasToBlob,
   createAutoReconnect,
   createMirror,
   startCanvasRecording,
 } from "../../lib/androidMirror";
-import { addAttachments } from "../../lib/attachments";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { chat } from "../../lib/chat";
+import { addAttachments, attachments, MAX_ATTACHMENTS } from "../../lib/attachments";
 import { layout } from "../../lib/layout";
 import { addTerminal, effectiveRoot, readAndroidDevices, writeAndroidDevice } from "../../lib/store";
 import { Icon } from "../shell/Icon";
@@ -31,7 +36,7 @@ const deviceLabel = (device: AndroidDevice) =>
 
 /** Live Android device/emulator inside the Preview tab: mirrors the screen,
  *  forwards touch/keyboard, and captures screenshots and video. */
-const AndroidPreview: Component = () => {
+const AndroidDevicePreview: Component<{ active: boolean; info: AndroidCliInfo | null }> = (props) => {
   const [env, setEnv] = createSignal<AndroidEnvironment | null>(null);
   const [serial, setSerial] = createSignal<string | null>(null);
   const [booting, setBooting] = createSignal<string | null>(null);
@@ -42,7 +47,7 @@ const AndroidPreview: Component = () => {
 
   const mirror = createMirror(() => canvas);
   const projectPath = () => effectiveRoot() ?? "";
-  const visible = () => layout.sideOpen && layout.sideTab === "preview";
+  const visible = () => props.active && layout.sideOpen && layout.sideTab === "preview";
   const onlineDevices = createMemo(() => (env()?.devices ?? []).filter((d) => d.status === "device"));
 
   async function refreshEnv() {
@@ -57,13 +62,16 @@ const AndroidPreview: Component = () => {
   // `adb devices` only; the full probe (AVDs, scrcpy) is far heavier.
   async function refreshDevices() {
     try {
+      const root = projectPath();
       const devices = await androidListDevices();
+      if (root !== projectPath()) return;
       setEnv((prev) => (prev ? { ...prev, devices } : prev));
     } catch { /* adb missing or busy: keep the last list */ }
   }
 
+  createEffect(on(projectPath, () => { setEnv(null); setSerial(null); void refreshEnv(); }));
+
   onMount(() => {
-    void refreshEnv();
     // Poll so a plugged-in phone or a booting emulator shows up on its own;
     // slow down once a device is streaming.
     let timer: ReturnType<typeof setTimeout>;
@@ -84,9 +92,9 @@ const AndroidPreview: Component = () => {
   createEffect(() => {
     const online = onlineDevices();
     const current = serial();
-    if (current && online.some((d) => d.serial === current)) return;
     const saved = readAndroidDevices()[projectPath()];
     const next = online.find((d) => d.serial === saved)?.serial
+      ?? online.find((d) => d.serial === current)?.serial
       ?? (env()?.selected_device && online.some((d) => d.serial === env()!.selected_device) ? env()!.selected_device : online[0]?.serial)
       ?? null;
     setSerial(next);
@@ -312,6 +320,7 @@ const AndroidPreview: Component = () => {
         <IconButton icon="external" title="Open in scrcpy window" disabled={!serial() || !env()?.scrcpy_path} onClick={() => void openScrcpyWindow()} />
       </div>
 
+      <AndroidCliPanel mode="inspect" info={props.info} serial={serial()} />
       <div class="android-stage">
         <Show
           when={serial()}
@@ -378,6 +387,166 @@ const AndroidPreview: Component = () => {
       </Show>
     </div>
   );
+};
+
+
+/** Retain both presentations; hiding Compose must not dispose the device mirror. */
+const AndroidPreview: Component<{ active: boolean; info: AndroidCliInfo | null; refreshInfo: () => void }> = (props) => {
+  const [mode, setMode] = createSignal<"device" | "compose">("device");
+  const [visited, setVisited] = createSignal(false);
+  createEffect(() => { if (mode() === "compose") setVisited(true); });
+  return <div class="android-preview">
+    <div class="android-bar" role="tablist" aria-label="Android preview mode">
+      <button role="tab" aria-selected={mode() === "device"} class="android-avd-btn" onClick={() => setMode("device")}>Device</button>
+      <button role="tab" aria-selected={mode() === "compose"} class="android-avd-btn" onClick={() => setMode("compose")}>Compose</button>
+      <span class="android-bar-gap" />
+      <button class="link-btn android-cli-version" title="Recheck Android CLI installation" onClick={props.refreshInfo}>{props.info?.version ? `Android CLI ${props.info.version}` : props.info ? "Android CLI unavailable · Retry" : "Checking Android CLI…"}</button>
+    </div>
+    <div class="android-retained" style={{ display: mode() === "device" ? "flex" : "none" }}>
+      <AndroidDevicePreview active={props.active && mode() === "device"} info={props.info} />
+    </div>
+    <Show when={visited()}><div class="android-retained" style={{ display: mode() === "compose" ? "flex" : "none" }}>
+      <AndroidCliPanel mode="compose" info={props.info} serial={null} />
+    </div></Show>
+  </div>;
+};
+
+const AndroidCliPanel: Component<{ mode: "compose" | "inspect"; info: AndroidCliInfo | null; serial: string | null }> = (props) => {
+  const [target, setTarget] = createSignal(":app");
+  const [previews, setPreviews] = createSignal<AndroidPreviewFunction[]>([]);
+  const [fqn, setFqn] = createSignal("");
+  const [result, setResult] = createSignal<AndroidCliResult | null>(null);
+  const [imagePath, setImagePath] = createSignal("");
+  const [selectedNode, setSelectedNode] = createSignal(-1);
+  const [imageSize, setImageSize] = createSignal<[number, number]>([0, 0]);
+  const nodes = createMemo(() => props.mode === "inspect" ? androidInspectionNodes(result()?.context?.data) : []);
+  createEffect(on(result, () => { setSelectedNode(-1); setImageSize([0, 0]); }));
+  const [busy, setBusy] = createSignal("");
+  const [error, setError] = createSignal("");
+  const [owner, setOwner] = createSignal("");
+  let generation = 0;
+  let job: string | null = null;
+  const conversation = () => `${effectiveRoot() ?? ""}:${chat.activeId ?? `new:${chat.draftProject ?? ""}`}`;
+  const supported = () => props.mode === "compose" ? props.info?.previews : props.info?.inspect;
+  const images = () => result()?.artifacts?.filter(a => a.kind === "image") ?? [];
+  const [source] = createResource(imagePath, async path => {
+    if (!path) return null;
+    try { return await prepareAttachmentPreview(path); }
+    catch (e) { if (path === imagePath()) setError(String(e)); return null; }
+  });
+  function cancel() {
+    generation++;
+    if (job) void androidCliCancel(job).catch(e => toast(String(e), "error"));
+    job = null;
+    setBusy("");
+  }
+  function reset() {
+    cancel(); setResult(null); setImagePath(""); setPreviews([]); setFqn(""); setError(""); setTarget(":app");
+  }
+  createEffect(on(() => [effectiveRoot(), props.serial] as const, reset));
+  createEffect(on(() => props.info?.modules.join("|"), () => {
+    if (props.info?.modules.length && target() === ":app" && !previews().length && !busy()) setTarget(props.info.modules.includes(":app") ? ":app" : props.info.modules[0]);
+  }));
+  onCleanup(cancel);
+  async function run(action: "list" | "render" | "inspect") {
+    if (busy()) return;
+    const root = effectiveRoot();
+    if (!root) return;
+    const token = ++generation;
+    const request = { target: target(), fqn: fqn(), serial: props.serial ?? "" };
+    const destination = conversation();
+    setBusy(action); setError("");
+    try {
+      const id = await androidCliBegin();
+      if (token !== generation) await androidCliCancel(id);
+      else job = id;
+      // Always consume the reserved job, including cancellation during begin.
+      const next = await androidCliRun(id, root, action, request.target, request.fqn, request.serial);
+      if (token !== generation || root !== effectiveRoot()) return;
+      if (action === "list") {
+        const found = next.previews ?? [];
+        setPreviews(found); setFqn(found[0]?.methodFqn ?? "");
+        if (!found.length) setError("No Compose previews found in this target.");
+      } else {
+        setResult(next); setOwner(destination);
+        setImagePath(next.artifacts?.find(a => a.kind === "image")?.path ?? "");
+      }
+    } catch (e) { if (token === generation) setError(String(e)); }
+    finally { if (token === generation) { setBusy(""); job = null; } }
+  }
+  const [attaching, setAttaching] = createSignal(false);
+  async function attach() {
+    const all = result()?.artifacts ?? [];
+    // MultiPreview may render many variants. Attach the selected image and its
+    // component tree, with shared provenance, rather than overflowing the composer.
+    const data = result()?.context?.data as { results?: { imagePath?: string; componentTreePath?: string }[] } | undefined;
+    const selected = data?.results?.find(r => r.imagePath === imagePath());
+    const items = all.filter(a => a.path === imagePath() || a.path === selected?.componentTreePath || a.name === "context.json");
+    const node = nodes()[selectedNode()];
+    const destination = owner();
+    if (destination !== conversation()) { toast("Return to the conversation that requested this capture", "info"); return; }
+    if (items.length + (node ? 1 : 0) + attachments().length > MAX_ATTACHMENTS) { setError(`This capture needs ${items.length} attachment slots. Remove attachments first.`); return; }
+    setAttaching(true);
+    try {
+      if (node) {
+        const content = new Blob([JSON.stringify({ selected_element: node.properties, capture: result()?.context?.capture_started_ms, device: result()?.context?.device }, null, 2)], { type: "application/json" });
+        items.push(await savePastedAttachment(await blobToBase64(content), "json"));
+      }
+      // Recheck after saving metadata: the user may have changed conversations.
+      if (destination === conversation() && items.length + attachments().length <= MAX_ATTACHMENTS) { addAttachments(items); toast("Capture attached to chat", "success"); }
+    } catch (e) { setError(String(e)); } finally { setAttaching(false); }
+  }
+  return <section classList={{ "android-cli-panel": true, "android-inspect-panel": props.mode === "inspect" }} aria-label={props.mode === "compose" ? "Compose previews" : "Screen inspection"}>
+    <Show when={supported()} fallback={props.mode === "compose" ? <div class="pane-empty">
+      <p>Compose previews need Android CLI.</p><p class="pane-empty-sub">{props.info?.error ?? "Install or update Android CLI, then recheck using the status above."}</p>
+      <a href="https://developer.android.com/tools/agents/android-cli" target="_blank" rel="noreferrer">Android CLI setup</a>
+    </div> : null}>
+      <div class="android-bar">
+        <Show when={props.mode === "compose"}>
+          <input class="android-select" aria-label="Gradle target" value={target()} list="android-compose-targets" disabled={!!busy()} onChange={e => { reset(); setTarget(e.currentTarget.value); }} />
+          <datalist id="android-compose-targets"><For each={props.info?.modules ?? []}>{m => <option value={m} />}</For></datalist>
+          <button class="android-avd-btn" disabled={!!busy()} onClick={() => void run("list")}>Discover</button>
+        </Show>
+        <Show when={props.mode === "inspect"}>
+          <button class="android-avd-btn" disabled={!!busy() || !props.serial} onClick={() => void run("inspect")}>{result() ? "Refresh inspection" : "Inspect screen"}</button>
+        </Show>
+        <Show when={busy()}><Spinner size={14} /><span>{busy() === "list" ? "Discovering…" : busy() === "render" ? "Rendering…" : "Capturing…"}</span><button class="link-btn" onClick={cancel}>Cancel</button></Show>
+        <Show when={result()}><button class="link-btn" onClick={() => { setResult(null); setImagePath(""); }}>Close</button></Show>
+      </div>
+      <Show when={props.mode === "compose" && previews().length}>
+        <div class="android-bar">
+          <select class="android-select" aria-label="Compose preview function" value={fqn()} disabled={!!busy()} onChange={e => setFqn(e.currentTarget.value)}>
+            <For each={previews()}>{p => <option value={p.methodFqn}>{p.name ? `${p.name} · ` : ""}{p.methodFqn}</option>}</For>
+          </select>
+          <button class="android-avd-btn" disabled={!!busy() || !fqn()} onClick={() => void run("render")}>Render</button>
+        </div>
+      </Show>
+      <Show when={error()}><p class="android-cli-error" role="alert">{error()}</p></Show>
+      <Show when={result()}>
+        <div class="android-cli-results">
+          <Show when={images().length > 1}><select class="android-select" aria-label="Rendered image" value={imagePath()} onChange={e => setImagePath(e.currentTarget.value)}><For each={images()}>{a => <option value={a.path}>{a.name}</option>}</For></select></Show>
+          <Show when={source()}>{src => <div class="android-inspection-image">
+            <img class="android-cli-image" src={convertFileSrc(src().path)} alt={props.mode === "compose" ? "Rendered Compose preview" : "Captured Android screen"} onLoad={e => setImageSize([e.currentTarget.naturalWidth, e.currentTarget.naturalHeight])} />
+            <Show when={props.mode === "inspect" && imageSize()[0] > 0}>
+              <svg class="android-inspection-overlay" viewBox={`0 0 ${imageSize()[0]} ${imageSize()[1]}`} aria-hidden="true">
+                <For each={nodes()}>{(node, index) => <Show when={node.bounds}>{b => <rect x={b()[0]} y={b()[1]} width={b()[2] - b()[0]} height={b()[3] - b()[1]} classList={{ selected: selectedNode() === index() }} onClick={() => setSelectedNode(index())}><title>{node.label}</title></rect>}</Show>}</For>
+              </svg>
+            </Show>
+          </div>}</Show>
+          <Show when={nodes().length}>
+            <select class="android-select" aria-label="Inspect UI element" value={selectedNode()} onChange={e => setSelectedNode(Number(e.currentTarget.value))}>
+              <option value={-1}>Select an element</option><For each={nodes()}>{(node, i) => <option value={i()}>{i() + 1}. {node.label.slice(0, 100)}</option>}</For>
+            </select>
+            <Show when={nodes()[selectedNode()]}>{node => <pre class="android-cli-json">{JSON.stringify(node().properties, null, 2)}</pre>}</Show>
+          </Show>
+          <p class="android-note">Captured {new Date(result()!.context!.capture_started_ms).toLocaleTimeString()}{props.mode === "inspect" ? " · Screenshot and layout captured separately." : " · Refresh after code changes."}</p>
+          <details><summary>{props.mode === "inspect" ? "Screen hierarchy" : "Preview context"}</summary><pre class="android-cli-json">{JSON.stringify(result()?.context, null, 2)}</pre></details>
+          <button class="android-avd-btn" disabled={attaching() || owner() !== conversation()} onClick={() => void attach()}>Attach to chat</button>
+          <Show when={owner() !== conversation()}><p class="android-note">Return to the original conversation to attach this capture.</p></Show>
+        </div>
+      </Show>
+    </Show>
+  </section>;
 };
 
 export default AndroidPreview;

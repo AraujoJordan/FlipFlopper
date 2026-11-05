@@ -479,8 +479,8 @@ test('a native plan transition keeps an enabled YOLO toggle', async () => {
 
 // Motion uses Solid's browser condition so these lifecycle tests exercise real
 // effects/cleanup. The DOM below only controls geometry and animation clocks.
-async function loadFrontend(file, mocks) {
-  const code = ts.transpileModule(readFileSync(new URL(file, import.meta.url), 'utf8'), {
+async function loadFrontend(file, mocks, transform = source => source) {
+  const code = ts.transpileModule(transform(readFileSync(new URL(file, import.meta.url), 'utf8')), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022, jsx: ts.JsxEmit.React },
   }).outputText;
   const bindings = new Map();
@@ -705,7 +705,7 @@ test('preview setup unsubscribes stale listeners and ignores stale URLs', async 
   for (const id of ['old','new']) { urlDeferred.set(id,deferred()); existingDeferred.set(id,deferred()); exitDeferred.set(id,deferred()); }
   const module = await loadFrontend('../src/components/side/PreviewView.tsx', {
     'solid-js': { ...solid, createSignal:(...args) => { const signal=solid.createSignal(...args); signals.push(signal); return signal; } },
-    '../../lib/store': { store:sessions, readRunTargets:() => ({}), setRunSessionId:(id) => setSessions('runSessionId',id) },
+    '../../lib/store': { store:sessions, effectiveRoot:() => null, readRunTargets:() => ({}), setRunSessionId:(id) => setSessions('runSessionId',id) },
     '../../lib/ipc': {
       onPreviewUrl:(id,callback) => { urlListeners.set(id,callback); return urlDeferred.get(id).promise; },
       getSessionUrl:(id) => { existingReads.push(id); return existingDeferred.get(id).promise; },
@@ -1595,4 +1595,110 @@ test("scrcpy control messages use the documented byte layout", async () => {
   assert.equal(new DataView(text.buffer).getUint32(1), text.length - 5);
   assert.equal(new TextDecoder().decode(text.subarray(5)), "héllo");
   assert.deepEqual([...encodeRotate()], [11]);
+});
+
+
+test("Android inspection reads CLI bounds and preserves element metadata", async () => {
+  const { androidInspectionNodes } = await loadMirror();
+  const nodes = androidInspectionNodes([{ root: [{ class: "FrameLayout", bounds: "[0,0][1080,2400]", children: [
+    { text: "Submit", "resource-id": "app:id/submit", "content-desc": "Submit order", bounds: "[20,40][200,100]", state: ["enabled"] },
+    { text: "Invalid", bounds: "[20,40][0,0]" },
+  ] }] }]);
+  assert.equal(nodes.length, 3);
+  assert.deepEqual([...nodes[1].bounds], [20, 40, 200, 100]);
+  assert.equal(nodes[1].label, "Submit");
+  assert.equal(nodes[1].properties["resource-id"], "app:id/submit");
+  assert.equal(nodes[2].bounds, null);
+  assert.ok(!("children" in nodes[0].properties));
+  assert.equal(androidInspectionNodes(null).length, 0);
+});
+
+test("Android inspection traversal is bounded for large or cyclic layouts", async () => {
+  const { androidInspectionNodes } = await loadMirror();
+  const cyclic = { text: "Loop" }; cyclic.children = [cyclic];
+  assert.equal(androidInspectionNodes(cyclic).length, 2000);
+});
+
+
+async function androidPanelFixture() {
+  const [root, setRoot] = solid.createSignal('/checkout-a');
+  const [conversation, setConversation] = solidStore.createStore({ activeId: 'session-a', draftProject: null });
+  const calls = [], cancelled = [], attached = [];
+  const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+  const begins = [], runs = [];
+  const module = await loadFrontend('../src/components/side/AndroidPreview.tsx', {
+    'solid-js': solid,
+    '../../lib/store': { effectiveRoot: root },
+    '../../lib/chat': { chat: conversation },
+    '../../lib/attachments': { MAX_ATTACHMENTS: 10, attachments: () => [], addAttachments: items => attached.push(...items) },
+    '../../lib/androidMirror': { androidInspectionNodes: () => [] },
+    '../../lib/ipc': {
+      androidCliBegin: () => { const d = deferred(); begins.push(d); return d.promise; },
+      androidCliCancel: async id => { cancelled.push(id); },
+      androidCliRun: (...args) => { calls.push(args); const d = deferred(); runs.push(d); return d.promise; },
+      prepareAttachmentPreview: async path => ({path}),
+    },
+    '../ui': { toast() {} },
+  }, source => source.replace('const AndroidCliPanel:', 'export const AndroidCliPanel:')
+    .replace(/  return <section classList=[\s\S]*?\n};\n\nexport default AndroidPreview;/,
+      '  return { run, cancel, attach, result, busy, error, setTarget, setFqn };\n};\n\nexport default AndroidPreview;'));
+  let panel, dispose;
+  solid.createRoot(stop => {
+    dispose = stop;
+    panel = module.AndroidCliPanel({ mode: 'compose', info: null, serial: null });
+  });
+  await settle();
+  return { panel, dispose, root, setRoot, setConversation, calls, cancelled, attached, begins, runs };
+}
+
+test('Android operation cancellation during begin consumes and cancels the reservation', async () => {
+  const f = await androidPanelFixture();
+  try {
+    const pending = f.panel.run('list');
+    f.panel.cancel();
+    f.begins[0].resolve('job-a');
+    await settle();
+    assert.deepEqual(f.cancelled, ['job-a']);
+    assert.equal(f.calls[0][0], 'job-a');
+    f.runs[0].reject(new Error('Cancelled'));
+    await pending;
+    assert.equal(f.panel.busy(), '');
+    assert.equal(f.panel.error(), '');
+  } finally { f.dispose(); }
+});
+
+test('Android operations snapshot their checkout and reject results after switching worktrees', async () => {
+  const f = await androidPanelFixture();
+  try {
+    f.panel.setTarget(':library'); f.panel.setFqn('example.Preview');
+    const pending = f.panel.run('render');
+    f.panel.setTarget(':other');
+    f.begins[0].resolve('job-a');
+    await settle();
+    assert.deepEqual(f.calls[0].slice(1, 5), ['/checkout-a', 'render', ':library', 'example.Preview']);
+    f.setRoot('/checkout-b');
+    f.runs[0].resolve({ artifacts: [{ path:'/capture.png', kind:'image', name:'capture.png' }], context: { capture_started_ms:0 } });
+    await pending;
+    assert.equal(f.panel.result(), null);
+    assert.deepEqual(f.cancelled, ['job-a']);
+  } finally { f.dispose(); }
+});
+
+test('Android captures attach only to the originating conversation and retain a successful result on failure', async () => {
+  const f = await androidPanelFixture();
+  try {
+    const pending = f.panel.run('render');
+    f.begins[0].resolve('job-a'); await settle();
+    const capture = { artifacts: [{ path:'/capture.png', kind:'image', name:'capture.png' }, { path:'/context.json', kind:'file', name:'context.json' }], context: { capture_started_ms:0 } };
+    f.runs[0].resolve(capture); await pending;
+    f.setConversation('activeId', 'session-b');
+    await f.panel.attach(); assert.equal(f.attached.length, 0);
+    f.setConversation('activeId', 'session-a');
+    await f.panel.attach(); assert.equal(f.attached.length, 2);
+    const retry = f.panel.run('render');
+    f.begins[1].resolve('job-b'); await settle();
+    f.runs[1].reject(new Error('Build failed')); await retry;
+    assert.equal(f.panel.result(), capture);
+    assert.match(f.panel.error(), /Build failed/);
+  } finally { f.dispose(); }
 });

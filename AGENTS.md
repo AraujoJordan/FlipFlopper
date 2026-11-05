@@ -117,6 +117,13 @@ Currently implemented:
   `IosPreview`, macOS only): `xcrun simctl` gives screenshots, native video
   recording and headless boot; optional Meta `idb` adds the live H.264 stream
   and tap/swipe/text input, otherwise the pane is view-only snapshots).
+  Android Preview also offers retained Device/Compose views. The optional installed
+  Android CLI discovers and renders Compose previews (including library modules) on
+  demand, with component-tree JSON. Inspect screen captures a screenshot and live
+  accessibility hierarchy with selectable bounds. Captures attach only to the
+  requesting conversation; generated images and context remain app-owned. CLI jobs
+  use explicit arguments, the effective checkout, bounded output, cancellation and
+  timeouts. Discovery can compile: never run it from device polling or project open.
   Run and Preview share one device per project (`readAndroidDevices` /
   `readIosSimulators`): Android Gradle runs follow `ANDROID_SERIAL`, Flutter/RN
   are pinned with `-d` / `--deviceId`/`--udid`, and an explicit simulator choice beats

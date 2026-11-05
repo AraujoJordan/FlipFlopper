@@ -4700,3 +4700,528 @@ compose.desktop { application { mainClass = "com.example.MainKt" } }
         assert!(target.command.ends_with("flutter run -d 'emulator-5554'"));
     }
 }
+
+
+/// Optional Android CLI integration. Jobs are explicit user actions, never device polls.
+pub mod android_cli {
+    use super::*;
+    use std::{
+        io::Read,
+        process::Stdio,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
+        time::{Duration, Instant},
+    };
+
+    #[derive(Default)]
+    pub struct Jobs(Mutex<HashMap<String, Job>>);
+    struct Job {
+        cancelled: Arc<AtomicBool>,
+        created: Instant,
+        started: bool,
+    }
+    impl Jobs {
+        pub fn begin(&self) -> Result<String, String> {
+            let mut jobs = self.0.lock().map_err(|e| e.to_string())?;
+            // A WebView can disappear after reserving a job but before invoking it.
+            jobs.retain(|_, job| job.started || job.created.elapsed() < Duration::from_secs(30));
+            if jobs.len() >= 8 {
+                return Err("Too many Android operations are running".into());
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            jobs.insert(
+                id.clone(),
+                Job {
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                    created: Instant::now(),
+                    started: false,
+                },
+            );
+            Ok(id)
+        }
+        pub fn cancel(&self, id: &str) {
+            if let Ok(jobs) = self.0.lock() {
+                if let Some(job) = jobs.get(id) {
+                    job.cancelled.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        pub fn cancel_all(&self) {
+            if let Ok(jobs) = self.0.lock() {
+                for job in jobs.values() {
+                    job.cancelled.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        pub fn run(
+            &self,
+            id: &str,
+            root: &str,
+            action: &str,
+            target: &str,
+            fqn: &str,
+            serial: &str,
+        ) -> Result<Value, String> {
+            let flag = {
+                let mut jobs = self.0.lock().map_err(|e| e.to_string())?;
+                let job = jobs.get_mut(id).ok_or("Unknown Android operation")?;
+                if job.started {
+                    return Err("Android operation already started".into());
+                }
+                job.started = true;
+                job.cancelled.clone()
+            };
+            let result = execute(root, action, target, fqn, serial, &flag);
+            if let Ok(mut jobs) = self.0.lock() {
+                jobs.remove(id);
+            }
+            result
+        }
+    }
+
+    fn command(
+        executable: &Path,
+        root: &Path,
+        args: &[String],
+        flag: &AtomicBool,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        if flag.load(Ordering::Relaxed) {
+            return Err("Android operation cancelled".into());
+        }
+        let mut cmd = Command::new(executable);
+        cmd.args(args)
+            .current_dir(root)
+            .env("PATH", crate::env::augmented_path_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Couldn't start Android CLI: {e}"))?;
+        let overflow = Arc::new(AtomicBool::new(false));
+        fn reader(
+            pipe: impl Read + Send + 'static,
+            overflow: Arc<AtomicBool>,
+        ) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = pipe.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes);
+                if bytes.len() > 8 * 1024 * 1024 {
+                    overflow.store(true, Ordering::Relaxed);
+                }
+                bytes
+            })
+        }
+        let stdout = reader(child.stdout.take().unwrap(), overflow.clone());
+        let stderr = reader(child.stderr.take().unwrap(), overflow.clone());
+        let start = Instant::now();
+        let status = loop {
+            if flag.load(Ordering::Relaxed) {
+                break Err("Android operation cancelled".to_string());
+            }
+            if start.elapsed() > timeout {
+                break Err("Android operation timed out".to_string());
+            }
+            if overflow.load(Ordering::Relaxed) {
+                break Err("Android CLI output exceeded 8 MiB".to_string());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => std::thread::sleep(Duration::from_millis(40)),
+                Err(e) => break Err(e.to_string()),
+            }
+        };
+        // Also close pipes inherited by subprocesses before joining readers.
+        crate::chat::kill_tree(child.id());
+        let _ = child.wait();
+        let out = String::from_utf8_lossy(&stdout.join().unwrap_or_default()).into_owned();
+        let err = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+        let status = status?;
+        if overflow.load(Ordering::Relaxed) {
+            return Err("Android CLI output exceeded 8 MiB".into());
+        }
+        if !status.success() {
+            let structured = serde_json::from_str::<Value>(&out).ok().and_then(|v| {
+                v.get("globalError")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+            let detail = structured.as_deref().unwrap_or_else(|| {
+                if err.trim().is_empty() {
+                    &out
+                } else {
+                    &err
+                }
+            });
+            return Err(format!("Android CLI failed: {detail}")
+                .chars()
+                .take(8000)
+                .collect());
+        }
+        Ok(out)
+    }
+
+    fn discover_modules(root: &Path) -> Vec<String> {
+        let mut modules = Vec::new();
+        // Suggestions only: custom Gradle mappings can be entered in the target field.
+        for entry in ignore::WalkBuilder::new(&root)
+            .max_depth(Some(5))
+            .build()
+            .flatten()
+        {
+            if !matches!(
+                entry.file_name().to_str(),
+                Some("build.gradle" | "build.gradle.kts")
+            ) {
+                continue;
+            }
+            let path = entry.path();
+            let text = super::read_small_string(path)
+                .unwrap_or_default()
+                .to_lowercase();
+            if !(text.contains("compose") || text.contains("android")) {
+                continue;
+            }
+            let relative = path.parent().unwrap().strip_prefix(&root).unwrap();
+            if relative.components().any(|c| {
+                matches!(
+                    c.as_os_str().to_str(),
+                    Some("build" | ".gradle" | "node_modules")
+                )
+            }) {
+                continue;
+            }
+            modules.push(format!(
+                ":{}",
+                relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(":")
+            ));
+        }
+        modules.sort();
+        modules.dedup();
+        modules
+    }
+
+    pub fn info(root: &str) -> Result<Value, String> {
+        let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
+        let modules = discover_modules(&root);
+        let mut result = serde_json::json!({"version": null, "previews": false, "inspect": false, "modules": modules, "error": null});
+        if let Some(exe) = resolve_executable("android") {
+            let flag = AtomicBool::new(false);
+            match command(
+                &exe,
+                &root,
+                &["--version".into()],
+                &flag,
+                Duration::from_secs(10),
+            ) {
+                Ok(version) => {
+                    result["version"] = version.trim().into();
+                    for (key, args) in [
+                        ("previews", vec!["preview", "render", "--help"]),
+                        ("inspect", vec!["layout", "--help"]),
+                    ] {
+                        let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                        if let Ok(help) =
+                            command(&exe, &root, &args, &flag, Duration::from_secs(10))
+                        {
+                            result[key] = (if key == "previews" {
+                                help.contains("--component-tree") && help.contains("--format")
+                            } else {
+                                help.contains("--device")
+                            })
+                            .into();
+                        }
+                    }
+                }
+                Err(e) => result["error"] = e.into(),
+            }
+        }
+        Ok(result)
+    }
+
+    fn parse_output(text: &str, field: &str) -> Result<Value, String> {
+        let value: Value =
+            serde_json::from_str(text).map_err(|e| format!("Invalid Android CLI JSON: {e}"))?;
+        if value.get("success").and_then(Value::as_bool) != Some(true) {
+            return Err(value
+                .get("globalError")
+                .and_then(Value::as_str)
+                .unwrap_or("Android CLI reported an unsuccessful result")
+                .to_string());
+        }
+        if !value.get(field).is_some_and(Value::is_array) {
+            return Err(format!("Android CLI response is missing {field}"));
+        }
+        if field == "previews"
+            && value[field].as_array().unwrap().iter().any(|item| {
+                item.get("methodFqn")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            })
+        {
+            return Err("Android CLI returned a preview without a function name".into());
+        }
+        Ok(value)
+    }
+
+    fn artifact(path: &Path, directory: &Path) -> Result<crate::chat::store::Attachment, String> {
+        let path = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        let directory = fs::canonicalize(directory).map_err(|e| e.to_string())?;
+        if !path.starts_with(&directory) || !path.is_file() {
+            return Err("Android CLI returned an invalid artifact path".into());
+        }
+        let size = fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        if size == 0 || size > 20 * 1024 * 1024 {
+            return Err("Android artifact is empty or exceeds 20 MiB".into());
+        }
+        Ok(crate::chat::store::Attachment {
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            kind: crate::chat::attach::kind_for(&path.to_string_lossy()).into(),
+            path: path.to_string_lossy().into_owned(),
+        })
+    }
+
+    fn execute(
+        root: &str,
+        action: &str,
+        target: &str,
+        fqn: &str,
+        serial: &str,
+        flag: &AtomicBool,
+    ) -> Result<Value, String> {
+        let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
+        let exe = resolve_executable("android").ok_or("Android CLI is not installed")?;
+        if !matches!(action, "list" | "render" | "inspect") {
+            return Err("Unknown Android operation".into());
+        }
+        if action != "inspect"
+            && (!target.starts_with(':')
+                || target
+                    .chars()
+                    .any(|c| !c.is_alphanumeric() && !":_-@.".contains(c)))
+        {
+            return Err("Enter a Gradle target such as :app or :app@debug".into());
+        }
+        if action == "render" && (fqn.is_empty() || fqn.len() > 2048) {
+            return Err("Select a preview first".into());
+        }
+        if action == "inspect" && (serial.is_empty() || serial.len() > 256) {
+            return Err("Select an online device first".into());
+        }
+        let run = |args: Vec<String>| {
+            command(
+                &exe,
+                &root,
+                &args,
+                flag,
+                Duration::from_secs(if action == "inspect" { 60 } else { 600 }),
+            )
+        };
+        if action == "list" {
+            return parse_output(
+                &run(vec![
+                    "preview".into(),
+                    "list".into(),
+                    target.into(),
+                    "--format=json".into(),
+                ])?,
+                "previews",
+            );
+        }
+        let dir = crate::chat::attach::attachments_dir()
+            .join(format!("android-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let captured = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let mut artifacts = Vec::new();
+            let data = if action == "render" {
+                let output = run(vec![
+                    "preview".into(),
+                    "render".into(),
+                    target.into(),
+                    format!("--fqn={fqn}"),
+                    "--component-tree".into(),
+                    "--format=json".into(),
+                    format!("--output={}", dir.display()),
+                ])?;
+                let mut value = parse_output(&output, "results")?;
+                for item in value["results"].as_array_mut().unwrap() {
+                    if item.get("error").is_some_and(|v| !v.is_null()) {
+                        return Err(format!("Preview failed: {}", item["error"]));
+                    }
+                    for key in ["imagePath", "componentTreePath"] {
+                        if let Some(path) = item.get(key).and_then(Value::as_str) {
+                            let path = Path::new(path);
+                            let file = artifact(
+                                &if path.is_absolute() {
+                                    path.into()
+                                } else {
+                                    dir.join(path)
+                                },
+                                &dir,
+                            )?;
+                            // Keep associations stable across macOS /var -> /private/var.
+                            item[key] = file.path.clone().into();
+                            artifacts.push(file);
+                        }
+                    }
+                }
+                if !artifacts.iter().any(|a| a.kind == "image") {
+                    return Err("Android CLI returned no preview images".into());
+                }
+                value
+            } else {
+                let image = dir.join("screen.png");
+                run(vec![
+                    "screen".into(),
+                    "capture".into(),
+                    format!("--device={serial}"),
+                    format!("--output={}", image.display()),
+                ])?;
+                artifacts.push(artifact(&image, &dir)?);
+                let layout: Value = serde_json::from_str(&run(vec![
+                    "layout".into(),
+                    format!("--device={serial}"),
+                    "--full".into(),
+                ])?)
+                .map_err(|e| format!("Invalid layout JSON: {e}"))?;
+                layout
+            };
+            if flag.load(Ordering::Relaxed) {
+                return Err("Android operation cancelled".into());
+            }
+            let context = serde_json::json!({"checkout": root, "target": target, "preview": fqn, "device": serial, "capture_started_ms": captured,
+                "capture_finished_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+                "note": if action == "inspect" { "Screenshot and hierarchy are separate captures; refresh if the screen changed." } else { "Static Compose render; refresh after code changes." }, "data": data});
+            let context_path = dir.join("context.json");
+            fs::write(
+                &context_path,
+                serde_json::to_vec_pretty(&context).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            artifacts.push(artifact(&context_path, &dir)?);
+            Ok(serde_json::json!({"artifacts": artifacts, "context": context}))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&dir);
+        }
+        result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn validates_cli_results() {
+            assert!(parse_output(
+                r#"{"success":true,"previews":[{"methodFqn":"example.ScreenKt.Preview"}]}"#,
+                "previews"
+            )
+            .is_ok());
+            assert!(parse_output(
+                r#"{"success":false,"globalError":"Build failed"}"#,
+                "previews"
+            )
+            .unwrap_err()
+            .contains("Build failed"));
+            assert!(parse_output(r#"{"success":true}"#, "results").is_err());
+            assert!(parse_output("not json", "results").is_err());
+            assert!(parse_output(r#"{"success":true,"previews":[{}]}"#, "previews").is_err());
+        }
+        #[test]
+        fn discovers_library_modules_without_an_app_target() {
+            let root =
+                std::env::temp_dir().join(format!("android-library-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(root.join("feature/ui")).unwrap();
+            fs::write(
+                root.join("feature/ui/build.gradle.kts"),
+                "plugins { alias(libs.plugins.androidLibrary) }",
+            )
+            .unwrap();
+            assert_eq!(discover_modules(&root), vec![":feature:ui"]);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn cancellation_before_spawn() {
+            let flag = AtomicBool::new(true);
+            assert!(command(
+                Path::new("does-not-exist"),
+                Path::new("."),
+                &[],
+                &flag,
+                Duration::from_secs(1)
+            )
+            .unwrap_err()
+            .contains("cancelled"));
+        }
+        #[cfg(unix)]
+        #[test]
+        fn command_timeout_and_cancellation_kill_the_process_group() {
+            let flag = Arc::new(AtomicBool::new(false));
+            let later = flag.clone();
+            let thread = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(80));
+                later.store(true, Ordering::Relaxed);
+            });
+            let args = vec!["-c".into(), "sleep 30 & wait".into()];
+            let start = Instant::now();
+            assert!(command(
+                Path::new("/bin/sh"),
+                Path::new("/"),
+                &args,
+                &flag,
+                Duration::from_secs(5)
+            )
+            .unwrap_err()
+            .contains("cancelled"));
+            thread.join().unwrap();
+            assert!(start.elapsed() < Duration::from_secs(3));
+            assert!(command(
+                Path::new("/bin/sh"),
+                Path::new("/"),
+                &args,
+                &AtomicBool::new(false),
+                Duration::from_millis(80)
+            )
+            .unwrap_err()
+            .contains("timed out"));
+        }
+
+        #[test]
+        fn artifacts_cannot_escape_output_directory() {
+            let root = std::env::temp_dir().join(format!("android-artifact-{}", uuid::Uuid::new_v4()));
+            let output = root.join("output");
+            fs::create_dir_all(&output).unwrap();
+            let inside = output.join("preview.png");
+            let outside = root.join("outside.png");
+            fs::write(&inside, b"image").unwrap();
+            fs::write(&outside, b"outside").unwrap();
+            assert!(artifact(&inside, &output).is_ok());
+            assert!(artifact(&outside, &output).unwrap_err().contains("invalid artifact path"));
+            #[cfg(unix)] {
+                let link = output.join("escape.png");
+                std::os::unix::fs::symlink(&outside, &link).unwrap();
+                assert!(artifact(&link, &output).unwrap_err().contains("invalid artifact path"));
+            }
+            fs::write(&inside, b"").unwrap();
+            assert!(artifact(&inside, &output).unwrap_err().contains("empty"));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+}

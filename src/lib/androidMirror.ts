@@ -441,3 +441,34 @@ export function createAutoReconnect(opts: {
   });
   return { reset: () => { tries = 0; } };
 }
+
+
+export interface AndroidInspectionNode {
+  label: string;
+  bounds: [number, number, number, number] | null;
+  properties: Record<string, unknown>;
+}
+
+/** Android CLI layout JSON uses resource-id/content-desc and [l,t][r,b] bounds.
+ * Keep unknown properties for agents; cap traversal for large accessibility trees. */
+export function androidInspectionNodes(value: unknown): AndroidInspectionNode[] {
+  const nodes: AndroidInspectionNode[] = [];
+  const pending: unknown[] = [value];
+  let visited = 0;
+  while (pending.length && visited++ < 10000 && nodes.length < 2000) {
+    const current = pending.pop();
+    if (!current || typeof current !== "object") continue;
+    if (Array.isArray(current)) { pending.push(...current.slice(0, 2000).reverse()); continue; }
+    const record = current as Record<string, unknown>;
+    const properties = Object.fromEntries(Object.entries(record).filter(([key, v]) => key !== "children" && (v === null || typeof v !== "object" || key === "state" || key === "interactions")));
+    const raw = typeof record.bounds === "string" ? record.bounds.match(/^\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]$/) : null;
+    const numbers = raw?.slice(1).map(Number);
+    const bounds = numbers && numbers.every(Number.isFinite) && numbers[2] > numbers[0] && numbers[3] > numbers[1] ? numbers as AndroidInspectionNode["bounds"] : null;
+    if ("bounds" in record || "resource-id" in record || "class" in record || "content-desc" in record || "text" in record) {
+      const label = [record.text, record["content-desc"], record["resource-id"], record.class].find(v => typeof v === "string" && v.length > 0);
+      nodes.push({ label: typeof label === "string" ? label : "Element", bounds, properties });
+    }
+    pending.push(...Object.values(record).filter(v => v && typeof v === "object").slice(0, 2000).reverse());
+  }
+  return nodes;
+}

@@ -1136,6 +1136,27 @@ async fn detect_android_environment(project_path: String) -> Result<AndroidEnvir
 }
 
 #[tauri::command]
+async fn android_cli_info(project_path: String) -> Result<serde_json::Value, String> {
+    run_blocking(move || runner::android_cli::info(&project_path)).await?
+}
+
+#[tauri::command]
+fn android_cli_begin(state: State<'_, std::sync::Arc<runner::android_cli::Jobs>>) -> Result<String, String> {
+    state.begin()
+}
+
+#[tauri::command]
+fn android_cli_cancel(state: State<'_, std::sync::Arc<runner::android_cli::Jobs>>, id: String) {
+    state.cancel(&id);
+}
+
+#[tauri::command]
+async fn android_cli_run(state: State<'_, std::sync::Arc<runner::android_cli::Jobs>>, id: String, project_path: String, action: String, target: String, fqn: String, serial: String) -> Result<serde_json::Value, String> {
+    let jobs = state.inner().clone();
+    run_blocking(move || jobs.run(&id, &project_path, &action, &target, &fqn, &serial)).await?
+}
+
+#[tauri::command]
 async fn android_list_devices() -> Result<Vec<runner::AndroidDevice>, String> {
     run_blocking(runner::android_devices).await?
 }
@@ -2074,6 +2095,7 @@ pub fn run() {
         )
         .manage(PtyManager::new())
         .manage(std::sync::Arc::new(android_mirror::MirrorManager::default()))
+        .manage(std::sync::Arc::new(runner::android_cli::Jobs::default()))
         .manage(ios_mirror::IosMirrorState::default())
         .manage(std::sync::Arc::new(chat::ChatManager::default()))
         .manage(SessionUrls::default())
@@ -2104,6 +2126,7 @@ pub fn run() {
                 let app = window.app_handle();
                 app.state::<std::sync::Arc<chat::ChatManager>>().cancel_all();
                 app.state::<std::sync::Arc<android_mirror::MirrorManager>>().stop_all();
+                app.state::<std::sync::Arc<runner::android_cli::Jobs>>().cancel_all();
                 app.state::<ios_mirror::IosMirrorState>().stop_all();
                 let pty = app.state::<PtyManager>();
                 let killed = pty::kill_all_sessions(&pty);
@@ -2188,6 +2211,7 @@ pub fn run() {
             detect_android_environment,
             detect_ios_environment,
             android_list_devices,
+            android_cli_info, android_cli_begin, android_cli_run, android_cli_cancel,
             ios_list_simulators,
             run_project,
             detect_validation_targets,
