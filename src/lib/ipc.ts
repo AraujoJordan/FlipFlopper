@@ -76,6 +76,8 @@ export interface WorktreeInfo {
   branch: string;
   source_branch: string;
 }
+export interface ManagedWorktree { path: string; branch: string; dirty: boolean }
+export const listWorktrees = (projectPath: string): Promise<ManagedWorktree[]> => invoke("list_worktrees", { projectPath });
 
 export interface WorktreeStatus {
   dirty: boolean;
@@ -223,6 +225,59 @@ export const onPtyExit = (sessionId: string, cb: () => void): Promise<UnlistenFn
 export const onSingleInstance = (cb: (payload: SingleInstancePayload) => void): Promise<UnlistenFn> =>
   listen<SingleInstancePayload>("single-instance", (event) => cb(event.payload));
 
+/** flipflopper:// links delivered by the OS while the window was loading. */
+export const drainOpenLinks = (): Promise<string[]> => invoke("drain_open_links");
+
+/** A real child webview used for per-preview DevTools. */
+export const openPreviewInspector = (url: string, x: number, y: number, width: number, height: number): Promise<void> =>
+  invoke("open_preview_inspector", { url, x, y, width, height });
+export const setPreviewInspectorBounds = (x: number, y: number, width: number, height: number): Promise<void> =>
+  invoke("set_preview_inspector_bounds", { x, y, width, height });
+export const navigatePreviewInspector = (url: string): Promise<void> =>
+  invoke("navigate_preview_inspector", { url });
+export const closePreviewInspector = (): Promise<void> => invoke("close_preview_inspector");
+
+/** Cookie-backed native browser profile for the preview. */
+export interface BrowserProfileInfo { id: string; name: string; created_at: number; cookie_count: number; domains: string[] }
+export interface ListeningServer { port: number; pid: number; process: string; address: string }
+/** Local TCP listeners shown in the preview empty state. */
+export const listListeningServers = (): Promise<ListeningServer[]> => invoke("list_listening_servers");
+/** Run project setup commands in a fresh worktree before the agent starts. */
+export const runSetupCommands = (cwd: string, commands: string[]): Promise<string> => invoke("run_setup_commands", { cwd, commands });
+export const listBrowserProfiles = (): Promise<BrowserProfileInfo[]> => invoke("list_browser_profiles");
+export const createBrowserProfile = (name: string): Promise<BrowserProfileInfo> => invoke("create_browser_profile", { name });
+export const deleteBrowserProfile = (id: string): Promise<void> => invoke("delete_browser_profile", { id });
+export const importBrowserCookies = (id: string, path: string): Promise<number> => invoke("import_browser_cookies", { id, path });
+export const importFirefoxCookies = (id: string): Promise<number> => invoke("import_firefox_cookies", { id });
+export const pickBrowserCookieFile = (): Promise<string | null> => invoke("pick_browser_cookie_file");
+export const openPreviewProfile = (url: string, x: number, y: number, width: number, height: number, profileId: string): Promise<void> =>
+  invoke("open_preview_profile", { url, x, y, width, height, profileId });
+export const setPreviewProfileBounds = (x: number, y: number, width: number, height: number): Promise<void> =>
+  invoke("set_preview_profile_bounds", { x, y, width, height });
+export const navigatePreviewProfile = (url: string): Promise<void> => invoke("navigate_preview_profile", { url });
+export const openPreviewProfileDevtools = (): Promise<void> => invoke("open_preview_profile_devtools");
+export const closePreviewProfile = (): Promise<void> => invoke("close_preview_profile");
+
+export interface PreviewPickRect { x: number; y: number; width: number; height: number; dpr: number }
+export interface PreviewPick { url: string; title: string; selector: string; text: string; rect: PreviewPickRect }
+/** Native element picker over the preview stage. */
+export const openPreviewPicker = (url: string, x: number, y: number, width: number, height: number, profileId?: string | null): Promise<void> =>
+  invoke("open_preview_picker", { url, x, y, width, height, profileId: profileId ?? null });
+export const closePreviewPicker = (): Promise<void> => invoke("close_preview_picker");
+export const capturePreviewRegion = (x: number, y: number, width: number, height: number): Promise<string> =>
+  invoke("capture_preview_region", { x, y, width, height });
+export const startPreviewRecording = (x: number, y: number, width: number, height: number): Promise<void> =>
+  invoke("start_preview_recording", { x, y, width, height });
+export const stopPreviewRecording = (): Promise<string> => invoke("stop_preview_recording");
+export const onPreviewPick = (cb: (payload: PreviewPick) => void): Promise<UnlistenFn> =>
+  listen<PreviewPick>("preview-pick", (event) => cb(event.payload));
+export const onPreviewPickCancel = (cb: () => void): Promise<UnlistenFn> =>
+  listen("preview-pick-cancel", () => cb());
+
+/** The user tried to quit (Cmd+Q, menu or last window) while `running` agents were still working. */
+export const onQuitRequested = (cb: (running: number) => void): Promise<UnlistenFn> =>
+  listen<number>("app://quit-requested", (event) => cb(event.payload));
+
 // ── Agents ───────────────────────────────────────────────────────────────────
 
 export const getAgents = (includeVersions = true): Promise<AgentInfo[]> =>
@@ -252,14 +307,51 @@ export const searchPromptFiles = (
 ): Promise<FileEntry[]> =>
   invoke("search_prompt_files", { projectPath, query, limit });
 
+/** A matching line from project-wide content search. */
+export interface ContentMatch {
+  path: string;
+  line: number;
+  text: string;
+  column: number;
+}
+export const searchProjectContent = (
+  root: string,
+  query: string,
+  options: { caseSensitive?: boolean; wholeWord?: boolean } = {},
+  limit = 200,
+): Promise<ContentMatch[]> =>
+  invoke("search_project_content", {
+    root,
+    query,
+    caseSensitive: !!options.caseSensitive,
+    wholeWord: !!options.wholeWord,
+    limit,
+  });
+
 export const listPromptSkills = (projectPath: string | null): Promise<PromptSkill[]> =>
   invoke("list_prompt_skills", { projectPath });
 
 export const listMcpServers = (projectPath: string | null): Promise<McpServerInfo[]> =>
   invoke("list_mcp_servers", { projectPath });
 
+/** Execute a tool on a configured stdio MCP server for an MCP App. */
+export const mcpCallTool = (projectPath: string, server: string, tool: string, args: Record<string, unknown>): Promise<unknown> =>
+  invoke("mcp_call_tool", { projectPath, server, tool, arguments: args });
+
 export const pickProjectFolder = (): Promise<string | null> =>
   invoke("pick_project_folder");
+
+/** Choose a parent folder for a clone. */
+export const pickCloneDestination = (): Promise<string | null> =>
+  invoke("pick_clone_destination");
+
+/** Clone a repository into a new folder under `destinationParent` and inspect it. */
+export const cloneRepository = (url: string, destinationParent: string): Promise<ProjectInfo> =>
+  invoke("clone_repository", { url, destinationParent });
+
+/** Create a GitHub repository for a checkout with `gh repo create --source . --push`. */
+export const publishRepository = (projectPath: string, name: string, privateRepo: boolean, description?: string): Promise<string> =>
+  invoke("publish_repository", { projectPath, name, private: privateRepo, description });
 
 export const triggerHaptic = (pattern: "generic" | "alignment" | "level-change" | "levelChange"): Promise<void> =>
   invoke<void>("trigger_haptic", { pattern }).catch((error) => {
@@ -343,6 +435,12 @@ export const gitPull = (projectPath: string): Promise<PullOutcome> =>
 export const gitPush = (projectPath: string): Promise<string> =>
   invoke("git_push", { projectPath });
 
+export const gitRemoteUrl = (projectPath: string): Promise<string | null> =>
+  invoke("git_remote_url", { projectPath });
+
+/** Arguments the app was launched with, for prompt/thread links passed on the command line. */
+export const launchArgs = (): Promise<string[]> => invoke("launch_args");
+
 export const gitCheckoutCommit = (projectPath: string, sha: string): Promise<void> =>
   invoke("git_checkout_commit", { projectPath, sha });
 
@@ -371,8 +469,26 @@ export const listAgentModels = (agentId: string): Promise<AgentModelChoice[]> =>
 export const generateCommitMessage = (projectPath: string, agentId: string): Promise<string> =>
   invoke("generate_commit_message", { projectPath, agentId });
 
-export const createWorktree = (projectPath: string, agentId: string): Promise<WorktreeInfo> =>
-  invoke("create_worktree", { projectPath, agentId });
+export interface AutoPullResult { branch: string; pulled: boolean; reason: string }
+/** Fast-forward the clean checkout from its upstream when possible; never merges. */
+export const autoPull = (projectPath: string): Promise<AutoPullResult> =>
+  invoke("auto_pull", { projectPath });
+
+export const createWorktree = (projectPath: string, agentId: string, branchPrefix?: string, baseBranch?: string | null): Promise<WorktreeInfo> =>
+  invoke("create_worktree", { projectPath, agentId, branchPrefix: branchPrefix ?? null, baseBranch: baseBranch ?? null });
+
+/** A pull request head checked out in a fresh worktree (`worktree.source_branch` is the PR head commit). */
+export interface PrReview {
+  number: number;
+  title: string | null;
+  body: string | null;
+  /** Remote-tracking ref to diff against, e.g. `origin/main`. */
+  base_ref: string;
+  head_sha: string;
+  worktree: WorktreeInfo;
+}
+export const preparePrReview = (projectPath: string, input: string): Promise<PrReview> =>
+  invoke("prepare_pr_review", { projectPath, input });
 
 export const getWorktreeStatus = (worktreePath: string, sourceBranch: string): Promise<WorktreeStatus> =>
   invoke("get_worktree_status", { worktreePath, sourceBranch });
@@ -425,8 +541,9 @@ export const getReviewDiff = (
   rev?: string,
   path?: string,
   mode?: "staged" | "unstaged",
+  ignoreWhitespace = false,
 ): Promise<FileDiff[]> =>
-  invoke("get_review_diff", { projectPath, rev: rev ?? null, path: path ?? null, mode: mode ?? null });
+  invoke("get_review_diff", { projectPath, rev: rev ?? null, path: path ?? null, mode: mode ?? null, ignoreWhitespace });
 
 export interface ReviewMediaSide {
   path: string;
@@ -690,8 +807,21 @@ export interface AgentRuntimeState {
 }
 export interface AgentRuntimeInfo { available: boolean; detail: string; protocol: string; node_version: string | null; helper_version: string | null }
 
+/** A self-contained MCP Apps UI resource attached to a tool call. */
+export interface McpAppData {
+  server: string;
+  tool: string;
+  resource_uri: string;
+  title: string;
+  html: string;
+  structured_content: unknown | null;
+  csp: Record<string, unknown> | null;
+  permissions: Record<string, unknown> | null;
+  prefers_border: boolean;
+}
+
 export type ChatEvent =
-  | { type: "turn_started"; turn_id: string; agent_id: string }
+  | { type: "turn_started"; turn_id: string; agent_id: string; checkpoint?: string | null }
   | { type: "native_session"; id: string }
   | { type: "model"; name: string }
   | { type: "text"; delta: string }
@@ -702,6 +832,7 @@ export type ChatEvent =
   | { type: "interaction_resolved"; id: string; outcome: string }
   | { type: "tool_updated"; id: string; title: string | null; input: unknown | null; kind?: ToolKind | null }
   | { type: "tool_result"; id: string; ok: boolean; output: string }
+  | { type: "mcp_app"; tool_id: string; app: McpAppData }
   | { type: "context_usage"; used: number; size: number; cost_usd: number | null }
   | { type: "title_changed"; title: string }
   | { type: "subagent"; id: string; title?: string | null; description?: string | null; prompt?: string | null; state?: string | null; stop_reason?: string | null; error?: string | null; launched_by?: string | null }
@@ -754,11 +885,30 @@ export interface SessionMeta {
   archived: boolean;
   pinned: boolean;
   parent_id: string | null;
+  goal?: Goal | null;
+  /** Hidden from the main list until this time (ms); woken early when it needs you. */
+  snoozed_until?: number | null;
+  /** Opt-out of automatic settlement (idle archiving) for this session. */
+  settle_disabled?: boolean;
+  /** A throwaway side-question session: never listed. */
+  hidden?: boolean;
+  /** Shared by sessions started together by one multi-agent send. */
+  compare_group?: string | null;
   created_at: number;
   updated_at: number;
 }
 
+/** One durable objective per session; `src/lib/goals.ts` drives the rounds. */
+export interface Goal {
+  text: string;
+  status: "active" | "paused" | "done" | "blocked";
+  rounds: number;
+  max_rounds: number;
+  note?: string | null;
+}
+
 export interface NewSessionArgs {
+  compare_group?: string;
   project_path: string;
   cwd?: string;
   worktree?: WorktreeRef;
@@ -773,8 +923,15 @@ export interface NewSessionArgs {
 
 export interface SessionPatch {
   title?: string;
+  /** `null` clears the goal. */
+  goal?: Goal | null;
+  /** `null` wakes the session. */
+  snoozed_until?: number | null;
+  hidden?: boolean;
   archived?: boolean;
   pinned?: boolean;
+  /** Opt-out of automatic settlement for this session. */
+  settle_disabled?: boolean;
   agent_id?: string;
   /** `null` clears the model/effort override. */
   model?: string | null;
@@ -797,6 +954,8 @@ export interface SendArgs {
   yolo?: boolean;
   /** First turn only: seed the prompt with another session's conversation. */
   context_from?: string;
+  /** Other session ids whose digests ride along with this message (`@#` mentions). */
+  references?: string[];
   attachments?: Attachment[];
 }
 
@@ -821,6 +980,190 @@ export const chatDeleteSession = (sessionId: string): Promise<void> =>
   invoke("chat_delete_session", { sessionId });
 export const chatCancelSubagent = (sessionId: string, subagentId: string): Promise<void> =>
   invoke("chat_cancel_subagent", { sessionId, subagentId });
+/** Branch a conversation up to a turn (or everything finished) into a new session. */
+export const chatForkSession = (sessionId: string, uptoTurn?: string, keepWorktree = false, hidden = false): Promise<SessionMeta> =>
+  invoke("chat_fork_session", { sessionId, uptoTurn: uptoTurn ?? null, keepWorktree, hidden });
+/** Quit even though agents are still working (the user confirmed). */
+export const forceQuit = (): Promise<void> => invoke("force_quit");
+/** One finished turn: when, who, how many tokens and (if the agent reported it) what it cost. */
+export interface UsageRow { ts: number; agent: string; model: string; project: string; session: string; input: number; output: number; cost: number | null }
+export const usageRows = (days: number): Promise<UsageRow[]> => invoke("usage_rows", { days });
+export interface UsageLimitEvent {
+  ts: number;
+  agent: string;
+  project: string;
+  session: string;
+  session_title: string;
+  title: string;
+  message: string;
+}
+export const usageLimitEvents = (days: number): Promise<UsageLimitEvent[]> => invoke("usage_limit_events", { days });
+export interface ProviderLimitWindow { label: string; used_percent: number; reset: string | null; reset_at?: number | null }
+export interface ProviderLimits { provider: string; source: string; fetched_at: number; windows: ProviderLimitWindow[] }
+export const providerUsageLimits = (provider: string): Promise<ProviderLimits> => invoke("provider_usage_limits", { provider });
+
+/** Ask an agent for a fresh title for a conversation; resolves with the new title (already saved). */
+export const regenerateSessionTitle = (sessionId: string, instructions?: string): Promise<string> => invoke("regenerate_session_title", { sessionId, instructions: instructions ?? null });
+/** Restore a worktree to the snapshot taken before a turn. */
+export const revertToCheckpoint = (sessionId: string, checkpoint: string): Promise<void> => invoke("revert_to_checkpoint", { sessionId, checkpoint });
+export type GitTextKind = "commit" | "pr" | "branch";
+/** Ask an installed headless agent to draft a commit message, PR title/body or branch name. */
+export const generateGitText = (kind: GitTextKind, projectPath: string, instructions?: string): Promise<string> =>
+  invoke("generate_git_text", { kind, projectPath, instructions: instructions ?? null });
+
+/** A project file read for display: text (size-capped), or just its size when binary. */
+export interface FilePreview { path: string; size: number; text: string | null; truncated: boolean; binary: boolean }
+export const listWorkspaceDir = (root: string, dir: string): Promise<FileEntry[]> => invoke("list_workspace_dir", { root, dir });
+export const readWorkspaceFile = (root: string, path: string): Promise<FilePreview> => invoke("read_workspace_file", { root, path });
+
+/** Text and worksheet data extracted from a read-only Office document preview. */
+export interface OfficeSheet { name: string; rows: string[][] }
+export interface OfficePreview { kind: "docx" | "xlsx" | "pptx" | string; text: string; sheets: OfficeSheet[] }
+export const readWorkspaceOffice = (root: string, path: string): Promise<OfficePreview> => invoke("read_workspace_office", { root, path });
+
+/** One entry in a read-only ZIP archive listing. */
+export interface ArchiveEntry { name: string; size: number; compressed: number; is_dir: boolean }
+export const listWorkspaceArchive = (root: string, path: string): Promise<ArchiveEntry[]> => invoke("list_workspace_archive", { root, path });
+
+/** Folder that holds the working directories of sessions started without a project. */
+export const getScratchRoot = (): Promise<string> => invoke("get_scratch_root");
+/** A fresh working folder for a project-less session, named from the prompt. */
+export const createScratchDir = (hint: string): Promise<string> => invoke("create_scratch_dir", { hint });
+
+/** Where a conversation's transcript file lives. */
+export const chatTranscriptPath = (sessionId: string): Promise<string> => invoke("chat_transcript_path", { sessionId });
+
+/** The pull request for a checkout's branch, from the optional `gh` CLI. */
+export interface PrStatus {
+  number: number;
+  title: string;
+  url: string;
+  state: "OPEN" | "CLOSED" | "MERGED" | string;
+  is_draft: boolean;
+  review_decision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "" | string;
+  checks: { passing: number; failing: number; pending: number };
+}
+export const prStatus = (projectPath: string): Promise<PrStatus | null> => invoke("pr_status", { projectPath });
+
+export interface PrCheck { name: string; status: string; conclusion: string; url: string | null }
+export interface PrCommit { oid: string; headline: string; author: string; committed_at: string }
+export interface PrFile { path: string; additions: number; deletions: number }
+export interface PrTimelineItem { kind: "comment" | "review" | string; author: string; body: string; created_at: string; state: string; url: string | null }
+export interface PrSummary {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  is_draft: boolean;
+  review_decision: string;
+  head_ref_name: string;
+  base_ref_name: string;
+  author: string;
+  updated_at: string;
+  additions: number;
+  deletions: number;
+  changed_files: number;
+  checks: { passing: number; failing: number; pending: number };
+  labels: string[];
+}
+export interface PrDetail {
+  summary: PrSummary;
+  body: string;
+  mergeable: string;
+  merge_state_status: string;
+  checks: PrCheck[];
+  commits: PrCommit[];
+  files: PrFile[];
+  timeline: PrTimelineItem[];
+  reviewers: string[];
+}
+export const listPullRequests = (projectPath: string, state: "open" | "closed" | "all" = "open"): Promise<PrSummary[]> =>
+  invoke("list_pull_requests", { projectPath, state });
+export const pullRequestDetail = (projectPath: string, number: number): Promise<PrDetail> =>
+  invoke("pull_request_detail", { projectPath, number });
+
+export interface PrFileEntry {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+  previous_filename: string | null;
+  patch: string | null;
+  diff: FileDiff | null;
+}
+export interface PrReviewComment {
+  id: number;
+  path: string;
+  line: number | null;
+  original_line: number | null;
+  start_line: number | null;
+  side: "LEFT" | "RIGHT" | string | null;
+  body: string;
+  author: string;
+  created_at: string;
+  url: string | null;
+  in_reply_to_id: number | null;
+  diff_hunk: string | null;
+}
+export interface PrFiles { files: PrFileEntry[]; comments: PrReviewComment[] }
+export interface PrReviewGuideStop {
+  title: string;
+  summary: string;
+  kind: string;
+  path: string | null;
+  line: number | null;
+  excerpt: string | null;
+}
+export interface PrReviewGuide { title: string; summary: string; stops: PrReviewGuideStop[] }
+export const generatePullRequestGuide = (projectPath: string, number: number): Promise<PrReviewGuide> =>
+  invoke("generate_pull_request_guide", { projectPath, number });
+export interface PendingReviewComment {
+  path: string;
+  line: number;
+  side: "LEFT" | "RIGHT";
+  body: string;
+  start_line?: number | null;
+  start_side?: "LEFT" | "RIGHT" | null;
+}
+export interface PrReviewResult { id: number; url: string | null }
+export const pullRequestFiles = (projectPath: string, number: number): Promise<PrFiles> =>
+  invoke("pull_request_files", { projectPath, number });
+export const submitPullRequestReview = (
+  projectPath: string,
+  number: number,
+  event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES",
+  body: string,
+  comments: PendingReviewComment[],
+): Promise<PrReviewResult> =>
+  invoke("submit_pull_request_review", { projectPath, number, event, body, comments });
+export const mergePullRequest = (projectPath: string, number: number, method: "squash" | "merge" | "rebase", deleteBranch = true): Promise<void> =>
+  invoke("merge_pull_request", { projectPath, number, method, deleteBranch });
+export const setPullRequestOpen = (projectPath: string, number: number, open: boolean): Promise<void> =>
+  invoke("set_pull_request_open", { projectPath, number, open });
+export const commentOnPullRequest = (projectPath: string, number: number, body: string): Promise<void> =>
+  invoke("comment_on_pull_request", { projectPath, number, body });
+export const updatePullRequest = (projectPath: string, number: number, title: string, body: string): Promise<void> =>
+  invoke("update_pull_request", { projectPath, number, title, body });
+export const setPullRequestDraft = (projectPath: string, number: number, draft: boolean): Promise<void> =>
+  invoke("set_pull_request_draft", { projectPath, number, draft });
+export const updatePullRequestBranch = (projectPath: string, number: number): Promise<void> =>
+  invoke("update_pull_request_branch", { projectPath, number });
+export const checkoutPullRequest = (projectPath: string, number: number): Promise<string> =>
+  invoke("checkout_pull_request", { projectPath, number });
+export const revertPullRequest = (projectPath: string, number: number, draft = false): Promise<{ number: number; url: string }> =>
+  invoke("revert_pull_request", { projectPath, number, draft });
+export const addPullRequestReviewers = (projectPath: string, number: number, reviewers: string[]): Promise<void> =>
+  invoke("add_pull_request_reviewers", { projectPath, number, reviewers });
+export const addPullRequestLabels = (projectPath: string, number: number, labels: string[]): Promise<void> =>
+  invoke("add_pull_request_labels", { projectPath, number, labels });
+export const reactToPullRequest = (projectPath: string, number: number, reaction: string): Promise<void> =>
+  invoke("react_to_pull_request", { projectPath, number, reaction });
+export const setPullRequestAutoMerge = (projectPath: string, number: number, method: "squash" | "merge" | "rebase"): Promise<void> =>
+  invoke("set_pull_request_auto_merge", { projectPath, number, method });
+export interface CreatedPullRequest { number: number; url: string }
+export const createPullRequest = (projectPath: string, title: string, body: string, base: string, draft: boolean): Promise<CreatedPullRequest> =>
+  invoke("create_pull_request", { projectPath, title, body, base, draft });
 export const chatClearSession = (sessionId: string): Promise<{ session: SessionMeta; archived: SessionMeta | null }> =>
   invoke("chat_clear_session", { sessionId });
 
@@ -844,7 +1187,7 @@ export const readImageThumbnail = (path: string): Promise<string | null> =>
 
 export interface AttachmentPreviewSource {
   path: string;
-  kind: "image" | "video" | "audio" | "pdf";
+  kind: "image" | "video" | "audio" | "pdf" | "font";
   size: number;
 }
 
@@ -855,7 +1198,38 @@ export const prepareAttachmentPreview = (path: string): Promise<AttachmentPrevie
 export const openAttachment = (path: string): Promise<void> => invoke("open_attachment", { path });
 
 /** Native multi-file picker. */
+/** An installed editor, IDE, terminal or the file manager that "Open in" can launch. */
+export interface OpenInApp { id: string; name: string; kind: "editor" | "terminal" | "files" }
+export const listOpenInApps = (): Promise<OpenInApp[]> => invoke("list_open_in_apps");
+export const openInApp = (appId: string, path: string, line: number | null = null): Promise<void> =>
+  invoke("open_in_app", { appId, path, line });
+
+/** How agents and tools reach the network: the shell's proxy, a custom one, or none. */
+export interface NetworkProxy { mode: "inherit" | "custom" | "off"; url: string; no_proxy: string }
+export const setNetworkProxy = (config: NetworkProxy): Promise<NetworkProxy> => invoke("set_network_proxy", { config });
+/** `config.url` is credential-masked; `effective` is the proxy children use (empty when direct). */
+export const getNetworkProxy = (): Promise<{ config: NetworkProxy; effective: string }> => invoke("get_network_proxy");
+
+export const saveTextFile = (defaultName: string, contents: string): Promise<string | null> =>
+  invoke("save_text_file", { defaultName, contents });
+/** Save a copy of a workspace file through the native save dialog. */
+export const saveWorkspaceFileCopy = (root: string, path: string): Promise<string | null> =>
+  invoke("save_workspace_file_copy", { root, path });
+export const saveAttachmentCopy = (path: string, defaultName: string): Promise<string | null> =>
+  invoke("save_attachment_copy", { path, defaultName });
 export const pickFiles = (): Promise<Attachment[]> => invoke("pick_files");
+/** Capture a window (macOS) or the primary screen and return the saved PNG path. */
+export const captureScreenshot = (): Promise<string> => invoke("capture_screenshot");
+
+export interface SnapshotInfo {
+  path: string;
+  app_name: string | null;
+  window_title: string | null;
+  app_text: string | null;
+}
+/** Capture a SnapShot plus best-effort app/window/accessibility metadata. */
+export const captureSnapshot = (includeText: boolean): Promise<SnapshotInfo> =>
+  invoke("capture_snapshot", { includeText });
 
 export const chatSearch = (query: string, limit: number): Promise<ChatSearchHit[]> =>
   invoke("chat_search", { query, limit });
@@ -889,7 +1263,7 @@ export interface NativeMenuState {
   fullAccess: boolean;
   sidebarOpen: boolean;
   sidePaneOpen: boolean;
-  sideTab: "changes" | "preview" | "terminal" | "flow" | "explain";
+  sideTab: "changes" | "preview" | "terminal" | "flow" | "explain" | "files" | "pulls" | "sidechat";
 }
 
 export const syncNativeMenuState = (state: NativeMenuState): Promise<void> =>
@@ -904,6 +1278,8 @@ export const onNativeMenuCommand = (cb: (id: string) => void): Promise<UnlistenF
 export const chatOpenTerminal = (sessionId: string): Promise<string> => invoke("chat_open_terminal", { sessionId });
 export const chatCloseTerminal = (sessionId: string): Promise<void> => invoke("chat_close_terminal", { sessionId });
 export const chatDetachNative = (sessionId: string): Promise<void> => invoke("chat_detach_native", { sessionId });
+/** Start a fresh agent conversation on the next message while keeping the visible transcript. */
+export const chatRestartSession = (sessionId: string): Promise<SessionMeta> => invoke("chat_restart_session", { sessionId });
 export const chatRuntimeState = (sessionId: string): Promise<AgentRuntimeState> => invoke("chat_runtime_state", { sessionId });
 export const chatSetMode = (sessionId: string, mode: PermissionMode, yolo: boolean): Promise<{ session: SessionMeta; runtime: AgentRuntimeState }> =>
   invoke("chat_set_mode", { sessionId, mode, yolo });

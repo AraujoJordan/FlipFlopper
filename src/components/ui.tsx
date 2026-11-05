@@ -758,7 +758,8 @@ export const MenuLabel: Component<{ children: JSX.Element }> = (props) => (
 );
 
 export const MenuItem: Component<{
-  onSelect: () => void;
+  /** Receives the click, so callers can read modifier keys (for example Shift to multi-select). */
+  onSelect: (event: MouseEvent) => void;
   disabled?: boolean;
   style?: JSX.CSSProperties;
   children: JSX.Element;

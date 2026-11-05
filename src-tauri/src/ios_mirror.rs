@@ -76,7 +76,7 @@ fn valid_udid(udid: &str) -> Result<(), String> {
 
 fn command(program: &PathBuf) -> Command {
     let mut cmd = Command::new(program);
-    cmd.env("PATH", crate::env::augmented_path_string()).stdin(Stdio::null());
+    cmd.env("PATH", crate::env::augmented_path_string()).envs(crate::env::proxy_env()).stdin(Stdio::null());
     cmd
 }
 

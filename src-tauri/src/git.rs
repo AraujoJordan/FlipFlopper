@@ -35,6 +35,7 @@ pub struct CommitResult {
 pub(crate) fn git_output(project_path: &str, args: &[&str]) -> Result<std::process::Output, String> {
     Command::new("git")
         .args(args)
+        .envs(crate::env::proxy_env())
         .current_dir(project_path)
         .output()
         .map_err(|e| format!("git error: {e}"))
@@ -54,6 +55,57 @@ pub(crate) fn git(project_path: &str, args: &[&str]) -> Result<String, String> {
 pub(crate) fn git_ignore_exit(project_path: &str, args: &[&str]) -> Result<String, String> {
     let out = git_output(project_path, args)?;
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutoPullResult {
+    pub branch: String,
+    pub pulled: bool,
+    /// Why nothing was pulled, or "up to date" / "pulled".
+    pub reason: String,
+}
+
+/// `HEAD...@{u}` ahead/behind counts, or `None` when the branch has no upstream.
+fn ahead_behind(project_path: &str, upstream: &str) -> Result<(u64, u64), String> {
+    let range = format!("HEAD...{upstream}");
+    let out = git(project_path, &["rev-list", "--left-right", "--count", &range])?;
+    let mut parts = out.split_whitespace();
+    let ahead = parts.next().and_then(|value| value.parse().ok()).ok_or("Unexpected git rev-list output")?;
+    let behind = parts.next().and_then(|value| value.parse().ok()).ok_or("Unexpected git rev-list output")?;
+    Ok((ahead, behind))
+}
+
+/// T3-style "Automatically pull": fast-forward the current branch from its upstream only when
+/// the checkout has no local changes and no local commits. Safe to call on open; never merges.
+pub fn auto_pull(project_path: &str) -> AutoPullResult {
+    let branch = git(project_path, &["branch", "--show-current"]).unwrap_or_default();
+    if branch.is_empty() {
+        return AutoPullResult { branch, pulled: false, reason: "detached HEAD".into() };
+    }
+    let Ok(upstream) = git(project_path, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]) else {
+        return AutoPullResult { branch, pulled: false, reason: "no upstream branch".into() };
+    };
+    let dirty = git(project_path, &["status", "--porcelain"]).map(|value| !value.trim().is_empty()).unwrap_or(true);
+    if dirty {
+        return AutoPullResult { branch, pulled: false, reason: "local changes".into() };
+    }
+    if git(project_path, &["fetch", "--quiet"]).is_err() {
+        return AutoPullResult { branch, pulled: false, reason: "fetch failed".into() };
+    }
+    let (ahead, behind) = match ahead_behind(project_path, &upstream) {
+        Ok(counts) => counts,
+        Err(error) => return AutoPullResult { branch, pulled: false, reason: error },
+    };
+    if ahead > 0 {
+        return AutoPullResult { branch, pulled: false, reason: "local commits".into() };
+    }
+    if behind == 0 {
+        return AutoPullResult { branch, pulled: false, reason: "up to date".into() };
+    }
+    match git(project_path, &["merge", "--ff-only", &upstream]) {
+        Ok(_) => AutoPullResult { branch, pulled: true, reason: "pulled".into() },
+        Err(error) => AutoPullResult { branch, pulled: false, reason: error },
+    }
 }
 
 /// True if `path` is inside a git working tree (its own repo, or a subfolder
@@ -466,6 +518,20 @@ pub fn commit_range_diff(project_path: &str) -> Result<String, String> {
     let diff = git(project_path, &["diff", &range_arg]).unwrap_or_default();
 
     let mut combined = format!("Commits:\n{log_header}\n\nDiff:\n{diff}");
+    if combined.len() > MAX_BYTES {
+        combined.truncate(MAX_BYTES);
+        combined.push_str("\n… (truncated)");
+    }
+    Ok(combined)
+}
+
+/// Working-tree diff (staged and unstaged) for drafting a commit message.
+pub fn working_diff(project_path: &str) -> Result<String, String> {
+    const MAX_BYTES: usize = 60_000;
+    let staged = git_ignore_exit(project_path, &["-c", "core.quotepath=false", "diff", "--cached", "--unified=3"])?;
+    let unstaged = git_ignore_exit(project_path, &["-c", "core.quotepath=false", "diff", "--unified=3"])?;
+    let status = git(project_path, &["status", "--short"]).unwrap_or_default();
+    let mut combined = format!("Status:\n{status}\n\nStaged changes:\n{staged}\n\nUnstaged changes:\n{unstaged}");
     if combined.len() > MAX_BYTES {
         combined.truncate(MAX_BYTES);
         combined.push_str("\n… (truncated)");
@@ -979,3 +1045,58 @@ pub fn apply_patch(
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_repo(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let base = dir.to_string_lossy().to_string();
+        git(&base, &["-c", "init.defaultBranch=main", "init"]).unwrap();
+        std::fs::write(dir.join("README.md"), "base\n").unwrap();
+        git(&base, &["add", "."]).unwrap();
+        git(&base, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base"]).unwrap();
+    }
+
+    #[test]
+    fn auto_pull_fast_forwards_only_clean_checkouts_with_an_upstream() {
+        let root = std::env::temp_dir().join(format!("ff-autopull-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root_string = root.to_string_lossy().to_string();
+        git(&root_string, &["init", "--bare", "-b", "main", "origin.git"]).unwrap();
+        git(&root_string, &["clone", "origin.git", "work"]).unwrap();
+        let work = root.join("work");
+        let work_string = work.to_string_lossy().to_string();
+        std::fs::write(work.join("README.md"), "base\n").unwrap();
+        git(&work_string, &["add", "."]).unwrap();
+        git(&work_string, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base"]).unwrap();
+        git(&work_string, &["push", "-u", "origin", "main"]).unwrap();
+
+        git(&root_string, &["clone", "origin.git", "other"]).unwrap();
+        let other = root.join("other");
+        let other_string = other.to_string_lossy().to_string();
+        std::fs::write(other.join("new.txt"), "new\n").unwrap();
+        git(&other_string, &["add", "."]).unwrap();
+        git(&other_string, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "new"]).unwrap();
+        git(&other_string, &["push"]).unwrap();
+
+        let pulled = auto_pull(&work_string);
+        assert!(pulled.pulled, "{}", pulled.reason);
+        assert_eq!(pulled.branch, "main");
+        assert_eq!(std::fs::read_to_string(work.join("new.txt")).unwrap(), "new\n");
+
+        std::fs::write(work.join("local.txt"), "mine\n").unwrap();
+        let dirty = auto_pull(&work_string);
+        assert!(!dirty.pulled);
+        assert_eq!(dirty.reason, "local changes");
+
+        let plain = root.join("plain");
+        init_repo(&plain);
+        let no_upstream = auto_pull(&plain.to_string_lossy());
+        assert!(!no_upstream.pulled);
+        assert_eq!(no_upstream.reason, "no upstream branch");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

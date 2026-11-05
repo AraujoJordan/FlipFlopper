@@ -7,6 +7,9 @@ import ChangesView from "./ChangesView";
 import PreviewView from "./PreviewView";
 import TerminalView from "./TerminalView";
 import ExplainView from "./ExplainView";
+import FilesView from "./FilesView";
+import PullsView from "./PullsView";
+import SideChatPane from "./SideChatPane";
 
 const FlowView = lazy(() => import("./FlowView"));
 
@@ -16,9 +19,12 @@ const TITLES: Record<SideTab, string> = {
   terminal: "Terminal",
   flow: "Flow",
   explain: "Explain",
+  files: "Files",
+  pulls: "Pull requests",
+  sidechat: "Side chat",
 };
 const ICONS: Record<SideTab, IconName> = {
-  changes: "diff", preview: "globe", terminal: "terminal", flow: "flow", explain: "help",
+  changes: "diff", preview: "globe", terminal: "terminal", flow: "flow", explain: "help", files: "folder", pulls: "merge", sidechat: "message",
 };
 
 /** Right-hand pane. Each tab stays mounted after its first visit, so terminals
@@ -47,7 +53,7 @@ const SidePane: Component = () => {
   let pane: HTMLElement | undefined;
   let heading: HTMLSpanElement | undefined;
   const present = usePresence(() => layout.sideOpen, () => pane, {
-    axis: "width", size: width, duration: 240, slide: paneIsOverlay,
+    axis: "width", size: width, duration: layout.panelMotionMs, slide: paneIsOverlay,
     anchor: () => document.querySelector<HTMLElement>(`button[aria-label="${TITLES[layout.sideTab]}"]`) ?? document.querySelector<HTMLElement>('button[aria-label="More tools"]') ?? undefined,
   });
   useValueMotion(() => heading, () => layout.sideTab);
@@ -64,7 +70,7 @@ const SidePane: Component = () => {
   return (
     <>
     <Show when={scrimPresent()}><div ref={scrim} class="side-scrim motion-scrim" onClick={() => toggleSide()} aria-hidden="true" /></Show>
-    <aside ref={pane} class="side-pane" classList={{ "side-pane-overlay": paneIsOverlay() }} hidden={!present()} style={{ width: `${width()}px` }}
+    <aside ref={pane} data-focus-area="side" class="side-pane" classList={{ "side-pane-overlay": paneIsOverlay() }} hidden={!present()} style={{ width: `${width()}px` }}
       role={paneIsOverlay() ? "dialog" : undefined} aria-modal={paneIsOverlay() ? true : undefined} aria-label={TITLES[layout.sideTab]}
       onKeyDown={(event) => {
         if (!paneIsOverlay() || !layout.sideOpen || event.defaultPrevented) return;
@@ -98,13 +104,22 @@ const SidePane: Component = () => {
           <Show when={seen("preview")}><PreviewView /></Show>
         </div>
         <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "terminal" }}>
-          <Show when={seen("terminal")}><TerminalView /></Show>
+          <Show when={seen("terminal") && !layout.terminalDrawer}><TerminalView /></Show>
         </div>
         <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "flow" }}>
           <Show when={seen("flow")}><FlowView /></Show>
         </div>
         <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "explain" }}>
           <Show when={seen("explain")}><ExplainView /></Show>
+        </div>
+        <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "files" }}>
+          <Show when={seen("files")}><FilesView /></Show>
+        </div>
+        <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "pulls" }}>
+          <Show when={seen("pulls")}><PullsView /></Show>
+        </div>
+        <div class="side-tab" classList={{ "side-tab-on": layout.sideTab === "sidechat" }}>
+          <Show when={seen("sidechat")}><SideChatPane /></Show>
         </div>
       </div>
       </div>

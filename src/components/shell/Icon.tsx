@@ -35,6 +35,7 @@ import fit_screen from "@material-symbols/svg-400/rounded/fit_screen.svg?raw";
 import folder from "@material-symbols/svg-400/rounded/folder.svg?raw";
 import format_list_bulleted from "@material-symbols/svg-400/rounded/format_list_bulleted.svg?raw";
 import help from "@material-symbols/svg-400/rounded/help.svg?raw";
+import info from "@material-symbols/svg-400/rounded/info.svg?raw";
 import home from "@material-symbols/svg-400/rounded/home.svg?raw";
 import history from "@material-symbols/svg-400/rounded/history.svg?raw";
 import html from "@material-symbols/svg-400/rounded/html.svg?raw";
@@ -42,14 +43,19 @@ import image from "@material-symbols/svg-400/rounded/image.svg?raw";
 import javascript from "@material-symbols/svg-400/rounded/javascript.svg?raw";
 import keyboard_arrow_down from "@material-symbols/svg-400/rounded/keyboard_arrow_down.svg?raw";
 import language from "@material-symbols/svg-400/rounded/language.svg?raw";
+import link from "@material-symbols/svg-400/rounded/link.svg?raw";
 import layers from "@material-symbols/svg-400/rounded/layers.svg?raw";
 import lock from "@material-symbols/svg-400/rounded/lock.svg?raw";
 import merge from "@material-symbols/svg-400/rounded/merge.svg?raw";
 import mobile from "@material-symbols/svg-400/rounded/mobile.svg?raw";
 import more_horiz from "@material-symbols/svg-400/rounded/more_horiz.svg?raw";
+import notifications_off from "@material-symbols/svg-400/rounded/notifications_off.svg?raw";
 import open_in_new from "@material-symbols/svg-400/rounded/open_in_new.svg?raw";
 import package_2 from "@material-symbols/svg-400/rounded/package_2.svg?raw";
 import photo_camera from "@material-symbols/svg-400/rounded/photo_camera.svg?raw";
+import ads_click from "@material-symbols/svg-400/rounded/ads_click.svg?raw";
+import call_split from "@material-symbols/svg-400/rounded/call_split.svg?raw";
+import horizontal_split from "@material-symbols/svg-400/rounded/horizontal_split.svg?raw";
 import picture_as_pdf from "@material-symbols/svg-400/rounded/picture_as_pdf.svg?raw";
 import play_arrow from "@material-symbols/svg-400/rounded/play_arrow.svg?raw";
 import refresh from "@material-symbols/svg-400/rounded/refresh.svg?raw";
@@ -68,6 +74,7 @@ import video_file from "@material-symbols/svg-400/rounded/video_file.svg?raw";
 import view_sidebar from "@material-symbols/svg-400/rounded/view_sidebar.svg?raw";
 import visibility from "@material-symbols/svg-400/rounded/visibility.svg?raw";
 import wand_stars from "@material-symbols/svg-400/rounded/wand_stars.svg?raw";
+import wrap_text from "@material-symbols/svg-400/rounded/wrap_text.svg?raw";
 import warning from "@material-symbols/svg-400/rounded/warning.svg?raw";
 
 // Google Material Symbols, rounded / weight 400 (Apache-2.0). Vite bundles only
@@ -103,6 +110,7 @@ const SYMBOLS = {
   eye: visibility,
   sparkle: wand_stars,
   list: format_list_bulleted,
+  wrap: wrap_text,
   dragHandle: drag_indicator,
   wrench: build,
   shield: shield,
@@ -113,9 +121,12 @@ const SYMBOLS = {
   external: open_in_new,
   at: alternate_email,
   help: help,
+  info: info,
   download: download,
   message: chat_bubble,
+  notificationsOff: notifications_off,
   layers: layers,
+  link: link,
   upload: upload,
   merge: merge,
   history: history,
@@ -143,6 +154,9 @@ const SYMBOLS = {
   device: mobile,
   camera: photo_camera,
   rotate: rotate_right,
+  pick: ads_click,
+  split: call_split,
+  splitRows: horizontal_split,
 } as const;
 
 export type IconName = keyof typeof SYMBOLS;

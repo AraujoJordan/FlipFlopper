@@ -52,6 +52,18 @@ export function isMediaFile(path: string | null | undefined): boolean {
   return isImageFile(path) || isVideoFile(path);
 }
 
+/** Test files hidden by the diff source picker. Covers test/spec directories,
+ *  `.test`/`.spec`/`.e2e` names, Go/Python-style test names and Cypress specs. */
+export function isTestFile(path: string | null | undefined): boolean {
+  if (!path) return false;
+  const normalized = path.replace(/\\/g, "/");
+  const name = normalized.split("/").pop() ?? "";
+  return /(^|\/)(__tests__|tests?|specs?)(\/|$)/i.test(normalized)
+    || /\.(test|spec|e2e)\.[^./]+$/i.test(name)
+    || /^(test_.+|[^/]+_test\.[^.]+)$/i.test(name)
+    || /(^|\/)cypress\/e2e\//i.test(normalized);
+}
+
 export function formatMediaBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -252,4 +264,26 @@ export function buildPatchForFile(
 
   if (patchHunks.length === 0) return null;
   return `--- a/${oldPath}\n+++ b/${newPath}\n${patchHunks.join("\n")}\n`;
+}
+
+export type FileTreeRow =
+  | { kind: "dir"; path: string; name: string; depth: number }
+  | { kind: "file"; path: string; name: string; depth: number };
+
+/** Flatten changed paths into folder and file rows, skipping the contents of collapsed folders. */
+export function fileTreeRows(paths: readonly string[], isCollapsed: (dir: string) => boolean = () => false): FileTreeRow[] {
+  const rows: FileTreeRow[] = [];
+  const seen = new Set<string>();
+  for (const path of [...paths].sort((a, b) => a.localeCompare(b))) {
+    const parts = path.split("/");
+    let prefix = "";
+    let hidden = false;
+    for (let depth = 0; depth < parts.length - 1 && !hidden; depth++) {
+      prefix = prefix ? `${prefix}/${parts[depth]}` : parts[depth];
+      if (!seen.has(prefix)) { seen.add(prefix); rows.push({ kind: "dir", path: prefix, name: parts[depth], depth }); }
+      hidden = isCollapsed(prefix);
+    }
+    if (!hidden) rows.push({ kind: "file", path, name: parts[parts.length - 1], depth: parts.length - 1 });
+  }
+  return rows;
 }

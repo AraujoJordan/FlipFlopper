@@ -4,6 +4,26 @@ use serde_json::Value;
 /// Max bytes of tool output kept per tool result (persisted + sent to the UI).
 pub const MAX_TOOL_OUTPUT: usize = 8 * 1024;
 
+/// One MCP Apps UI resource, embedded in the tool result that produced it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpAppData {
+    pub server: String,
+    pub tool: String,
+    pub resource_uri: String,
+    pub title: String,
+    /// Self-contained HTML, already size-limited by the provider.
+    pub html: String,
+    /// Optional structured tool result the app can use to render its state.
+    #[serde(default)]
+    pub structured_content: Option<Value>,
+    #[serde(default)]
+    pub csp: Option<Value>,
+    #[serde(default)]
+    pub permissions: Option<Value>,
+    #[serde(default)]
+    pub prefers_border: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolKind {
@@ -41,6 +61,10 @@ pub enum ChatEvent {
     TurnStarted {
         turn_id: String,
         agent_id: String,
+        /// Worktree snapshot taken before the turn; file restore is only offered
+        /// for isolated worktrees. Older transcripts deserialize as `None`.
+        #[serde(default)]
+        checkpoint: Option<String>,
     },
     /// Native session id of the underlying CLI (used to resume next turn).
     NativeSession {
@@ -70,6 +94,11 @@ pub enum ChatEvent {
         id: String,
         ok: bool,
         output: String,
+    },
+    /// Optional interactive MCP Apps resource attached to a completed tool call.
+    McpApp {
+        tool_id: String,
+        app: McpAppData,
     },
     ContextUsage { used: u64, size: u64, cost_usd: Option<f64> },
     /// Lifecycle of a native subagent; every field but `id` is a patch.

@@ -2,17 +2,22 @@ import {
   Component, For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup,
 } from "solid-js";
 import {
-  cancelTurn, retryLastTurn, setComposerAgent, chat,
+  cancelTurn, retryLastTurn, setComposerAgent, chat, enqueueFollowUp, sendQueuedNow, forkSession, secondOpinion, editFromHere,
   pendingInputCount, type InteractionBlock, type AssistantMessage, type Block, type CompactionBlock, type DividerMessage, type NoticeBlock, type SubagentBlock, type ThinkingBlock, type ToolBlock, type UserMessage,
 } from "../../lib/chat";
-import { openReview, store, setPendingPromptSeed } from "../../lib/store";
-import { chatCancelSubagent } from "../../lib/ipc";
+import { maskForDisplay } from "../../lib/secrets";
+import { describeToolRun, detectToolLoop, focusBlocks, formatDuration, splitLeadingQuote, toolSpanMs, turnTiming } from "../../lib/transcript";
+import { layout } from "../../lib/layout";
+import { responseStreaming } from "../../lib/settings";
+import { openReview, store, setPendingPromptSeed, bumpGitStatus } from "../../lib/store";
+import { chatCancelSubagent, revertToCheckpoint } from "../../lib/ipc";
 import { writeClipboardText } from "../../lib/native";
 import { runAction } from "../../lib/shortcuts";
+import { copyPromptLink } from "../../lib/promptLinks";
 import { agentLabel } from "./agentLabel";
 import { AgentLogo } from "../../lib/agentMeta";
 import { openSide } from "../../lib/layout";
-import { Menu, MenuItem, MenuLabel, Spinner, Disclosure, useValueMotion, toast } from "../ui";
+import { Menu, MenuItem, MenuLabel, Spinner, Disclosure, useValueMotion, toast, confirmDialog } from "../ui";
 import { Icon } from "../shell/Icon";
 import Markdown from "./Markdown";
 import { renderPlainTextWithFileRefs } from "../../lib/markdownLite";
@@ -52,17 +57,33 @@ function formatTokens(n: number): string {
 // ── User / divider ───────────────────────────────────────────────────────────
 
 export const UserBubble: Component<{ message: UserMessage }> = (props) => (
-  <div class="msg-user" data-message-id={props.message.id}>
+  <div class="msg-user" data-message-id={props.message.id} data-ts={props.message.ts}>
     <div class="msg-user-stack">
       <Show when={props.message.attachments.length > 0}>
         <div class="msg-attachments">
           <For each={props.message.attachments}>{(a) => <AttachmentChip attachment={a} />}</For>
         </div>
       </Show>
-      <Show when={props.message.text}><div class="msg-user-body" innerHTML={renderPlainTextWithFileRefs(props.message.text)} /></Show>
+      <Show when={props.message.text}>
+        {(() => {
+          const parts = () => splitLeadingQuote(props.message.text);
+          return <>
+            <Show when={parts().quote}>
+              {(quote) => <blockquote class="msg-user-quote" title="Quoted from the previous reply">{maskForDisplay(quote())}</blockquote>}
+            </Show>
+            <Show when={parts().rest || !parts().quote}>
+              <div class="msg-user-body" innerHTML={renderPlainTextWithFileRefs(maskForDisplay(parts().quote ? parts().rest : props.message.text))} />
+            </Show>
+          </>;
+        })()}
+      </Show>
     </div>
     <div class="msg-actions">
       <ActionButton icon="copy" label="Copy" onClick={() => writeClipboardText(props.message.text, "message")} />
+      <ActionButton icon="link" label="Copy prompt link" onClick={() => copyPromptLink({ prompt: props.message.text, provider: props.message.agentId })} />
+      <Show when={chat.activeId}>
+        <ActionButton icon="history" label="Edit from here (branch before this message)" onClick={() => editFromHere(chat.activeId!, props.message.id)} />
+      </Show>
       <ActionButton
         icon="pencil"
         label="Edit in composer"
@@ -102,7 +123,7 @@ const Thinking: Component<{ block: ThinkingBlock; live: boolean }> = (props) => 
         <span ref={heading}>{label()}</span>
         <Icon name="chevronRight" size={12} style={{ transform: open() ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast)" }} />
       </button>
-      <Disclosure open={open()} class="thinking-body">{props.block.text}</Disclosure>
+      <Disclosure open={open()} class="thinking-body">{maskForDisplay(props.block.text)}</Disclosure>
     </div>
   );
 };
@@ -214,6 +235,7 @@ const ToolGroupRow: Component<{ group: ToolGroup; blocks: () => Block[] }> = (pr
   });
   const running = () => tools().some((t) => t.status === "running");
   const failed = () => tools().filter((t) => t.status === "error").length;
+  const spent = () => toolSpanMs(tools());
   let previousFailures = 0;
   createEffect(() => {
     const count = failed();
@@ -221,15 +243,16 @@ const ToolGroupRow: Component<{ group: ToolGroup; blocks: () => Block[] }> = (pr
     previousFailures = count;
   });
   let count: HTMLSpanElement | undefined;
-  useValueMotion(() => count, () => `${tools().length}:${running()}`);
+  useValueMotion(() => count, () => `${describeToolRun(tools())}:${running()}`);
   return (
     <div class="tool-group" classList={{ "tool-group-error": failed() > 0 }}>
       <button type="button" class="tool-group-head" onClick={() => setOpen((v) => !v)} aria-expanded={open()}>
         <Show when={running()} fallback={<Icon name="wrench" size={14} />}><Spinner size={12} /></Show>
         <span ref={count} class="tool-group-title">
-          {running() ? "Working" : "Activity"} · {tools().length} tools
+          {running() ? "Working" : "Activity"} · {describeToolRun(tools())}
         </span>
         <Show when={failed() > 0}><span class="tool-group-failed">{failed()} failed</span></Show>
+        <Show when={!running() && spent() >= 1000}><span class="tool-row-time">{formatDuration(spent())}</span></Show>
         <Show when={!open()}><span class="tool-group-last">{tools()[tools().length - 1]?.title}</span></Show>
         <Icon name="chevronRight" size={13} style={{ transform: open() ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast)" }} />
       </button>
@@ -245,12 +268,30 @@ const ToolGroupRow: Component<{ group: ToolGroup; blocks: () => Block[] }> = (pr
 export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boolean; sessionId: string }> = (props) => {
   const running = () => props.message.status === "running";
   const lastBlock = (): Block | undefined => props.message.blocks[props.message.blocks.length - 1];
-  const showPulse = () => running() && !pendingInputCount(props.sessionId) && lastBlock()?.kind !== "text";
+  const deferText = () => running() && responseStreaming() === "finished";
+  const showPulse = () => running() && !pendingInputCount(props.sessionId) && (deferText() || lastBlock()?.kind !== "text");
+  const deferredText = () => deferText() && props.message.blocks.some((block) => block.kind === "text" && block.text.trim());
   // A subagent's own tool calls render inside its card, not in the main flow.
-  const visible = createMemo(() => props.message.blocks.filter((b) => !(b.kind === "tool" && b.subagent)));
+  const visible = createMemo(() => (layout.focusView ? focusBlocks(props.message) : props.message.blocks)
+    .filter((b) => !(b.kind === "tool" && b.subagent) && !(deferText() && b.kind === "text")));
   const items = createMemo(() => buildItems(visible()));
 
   const [now, setNow] = createSignal(Date.now());
+  async function revertFiles() {
+    const checkpoint = props.message.checkpoint;
+    if (!checkpoint) return;
+    if (!(await confirmDialog(
+      "Restore this worktree to before the turn? Tracked edits made after the checkpoint and files created since then are removed. Ignored files and other sessions are left alone.",
+      { confirmLabel: "Revert files", danger: true },
+    ))) return;
+    try {
+      await revertToCheckpoint(props.sessionId, checkpoint);
+      bumpGitStatus();
+      toast("Worktree files restored to the checkpoint", "success");
+    } catch (error) {
+      toast(`Couldn't revert files: ${String(error)}`, "error");
+    }
+  }
   createEffect(() => {
     if (!running()) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -270,13 +311,28 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
   const fullText = () =>
     props.message.blocks.filter((b): b is Extract<Block, { kind: "text" }> => b.kind === "text").map((b) => b.text).join("\n\n");
 
+  const timing = createMemo(() => (running() ? null : turnTiming(props.message)));
+
+  // Loop guard: the agent keeps repeating one identical tool call.
+  const [loopDismissed, setLoopDismissed] = createSignal(0);
+  const loop = createMemo(() => (running() ? detectToolLoop(props.message) : null));
+  const steerLoop = () => {
+    const id = chat.activeId, l = loop();
+    if (!id || !l) return;
+    enqueueFollowUp(id, `You are repeating "${l.title}" with identical input. Change approach or finish.`);
+    const index = (chat.queued[id]?.length ?? 1) - 1;
+    void sendQueuedNow(id, index);
+  };
+
   const [flipOpen, setFlipOpen] = createSignal(false);
   let flipAnchor: HTMLButtonElement | undefined;
   const flipTargets = () =>
     store.agents.filter((a) => a.installed && a.chat_supported && a.id !== props.message.agentId);
+  const [opinionOpen, setOpinionOpen] = createSignal(false);
+  let opinionAnchor: HTMLButtonElement | undefined;
 
   return (
-    <div class="msg-assistant" data-message-id={props.message.id}>
+    <div class="msg-assistant" data-message-id={props.message.id} data-ts={props.message.startedAt}>
       <div class="msg-assistant-head">
         <AgentLogo agentId={props.message.agentId} icon={agentIcon(props.message.agentId)} size={18} radius={5} />
         <span class="msg-assistant-name">{agentLabel(props.message.agentId)}</span>
@@ -297,6 +353,10 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
         </Show>
         <Show when={!running() && props.message.status === "done"}><span class="msg-done"><Icon name="check" size={12} /> Done</span></Show>
       </div>
+
+      <Show when={deferredText()}>
+        <div class="msg-note">Waiting for the full response…</div>
+      </Show>
 
       <For each={items()}>
         {(item) => (
@@ -334,6 +394,17 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
         )}
       </For>
 
+      <Show when={loop() && loop()!.count > loopDismissed()}>
+        <div class="notice-row" data-severity="warning" role="alert">
+          <Icon name="alert" size={14} />
+          <span class="notice-title">Repeated the same call {loop()!.count}×</span>
+          <span class="notice-desc">{loop()!.title}</span>
+          <button type="button" class="msg-error-retry" onClick={steerLoop}>Steer</button>
+          <button type="button" class="msg-error-retry" onClick={() => void cancelTurn()}>Stop</button>
+          <button type="button" class="msg-error-retry" onClick={() => setLoopDismissed(loop()!.count)}>Dismiss</button>
+        </div>
+      </Show>
+
       <Show when={showPulse()}>
         <div class="typing-dots" aria-label="Working"><span /><span /><span /></div>
       </Show>
@@ -354,9 +425,9 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
 
       <Show when={!running() && props.message.changedFiles.length > 0}>
         <div class="turn-changes">
-          <button type="button" class="turn-changes-main" onClick={() => openSide("changes")}>
+          <button type="button" class="turn-changes-main" onClick={() => openReview(undefined, "Turn changes", undefined, undefined, props.message.changedFiles.map((file) => file.path), { source: "turn" })} title="Review only the files this turn changed">
             <Icon name="diff" size={14} />
-            <span>Review changes · {props.message.changedFiles.length} file{props.message.changedFiles.length === 1 ? "" : "s"}</span>
+            <span>Review turn · {props.message.changedFiles.length} file{props.message.changedFiles.length === 1 ? "" : "s"}</span>
           </button>
           <span class="turn-changes-files">
             <For each={props.message.changedFiles.slice(0, 3)}>
@@ -364,7 +435,7 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
             </For>
             <Show when={props.message.changedFiles.length > 3}><span class="turn-changes-more">+{props.message.changedFiles.length - 3}</span></Show>
           </span>
-          <button type="button" class="turn-changes-all" onClick={() => openSide("changes")} title="Open all changes" aria-label="Open all changes"><Icon name="chevronRight" size={16} /></button>
+          <button type="button" class="turn-changes-all" onClick={() => openSide("changes")} title="Open all working changes" aria-label="Open all working changes"><Icon name="chevronRight" size={16} /></button>
         </div>
       </Show>
 
@@ -372,6 +443,28 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
         <div class="msg-footer">
           <div class="msg-actions msg-actions-inline">
             <ActionButton icon="copy" label="Copy response" onClick={() => writeClipboardText(fullText(), "response")} />
+            <Show when={chat.activeId}>
+              <ActionButton icon="layers" label="Branch from here" onClick={() => forkSession(chat.activeId!, props.message.id)} />
+            </Show>
+            <Show when={props.message.checkpoint}>
+              <ActionButton icon="history" label="Revert files from this turn" onClick={() => void revertFiles()} />
+            </Show>
+            <Show when={chat.activeId && flipTargets().length > 0}>
+              <button ref={opinionAnchor} type="button" class="msg-action" onClick={() => setOpinionOpen((v) => !v)} title="Have another agent review this answer (read-only)" aria-label="Get a second opinion" aria-haspopup="menu" aria-expanded={opinionOpen()}>
+                <Icon name="eye" size={14} />
+              </button>
+              <Menu open={opinionOpen()} onClose={() => setOpinionOpen(false)} anchorRef={opinionAnchor} width={250}>
+                <MenuLabel>Second opinion from</MenuLabel>
+                <For each={flipTargets()}>
+                  {(a) => (
+                    <MenuItem onSelect={() => { setOpinionOpen(false); void secondOpinion(chat.activeId!, props.message.id, a.id, agentLabel(props.message.agentId)); }}>
+                      <AgentLogo agentId={a.id} icon={a.icon} size={18} radius={5} />
+                      <span style={{ flex: 1 }}>{a.name}</span>
+                    </MenuItem>
+                  )}
+                </For>
+              </Menu>
+            </Show>
             <Show when={props.isLast && chat.activeId}>
               <ActionButton icon="refresh" label="Retry" onClick={() => void retryLastTurn(chat.activeId!)} />
             </Show>
@@ -400,10 +493,13 @@ export const AssistantBubble: Component<{ message: AssistantMessage; isLast: boo
               </Menu>
             </Show>
           </div>
-          <Show when={props.message.contextUsage || props.message.usage}>
+          <Show when={props.message.contextUsage || props.message.usage || timing()}>
             <details class="msg-usage">
               <summary>Usage</summary>
               <div class="msg-usage-detail">
+                <Show when={timing()}>{(t) => (
+                  <span>Tools {formatDuration(t().toolMs)} of {formatDuration(t().totalMs)}<Show when={t().slowest}>{(s) => <> · slowest: {s().title} {formatDuration(s().ms)}</>}</Show></span>
+                )}</Show>
                 <Show when={props.message.contextUsage}>{(usage) => (
                   <span>{usage().used.toLocaleString()} / {usage().size.toLocaleString()} context tokens<Show when={usage().cost != null}> · ${usage().cost!.toFixed(3)}</Show></span>
                 )}</Show>

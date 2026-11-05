@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.24.0 - 2026-11-05
+
+### Added
+
+- **New Brand Identity & Icon System**:
+  - New **Interlocking Rotational `FF` Switch** application icon across all target formats (macOS ICNS, Windows ICO, Linux PNGs, store assets).
+  - Rotational $C_2$ symmetry pairing an upright `F` in **Electric Indigo (`#6366F1`)** and an inverted 180° `F` in **Hot Coral (`#FF5E7E`)** on a deep **Carbon (`#11131A`)** squircle, carving a stepped negative-space circuit/prompt channel.
+  - Pixel-aligned 32×32 optical master with integer 4px stems and 2px channels, preserving the sharp dual-`F` silhouette at 16–32 px.
+  - Reusable `<BrandMark />` component integrated into the Welcome Wizard and About settings panel.
+  - Migrated the default UI theme accent from legacy Jade to Electric Indigo + Hot Coral across CSS tokens, terminal cursors, and custom themes.
+- **Android Compose Previews & Screen Hierarchy**:
+  - Discover and render Compose previews on demand with component-tree JSON.
+  - Accessibility hierarchy inspection with selectable screen bounds.
+- **T3 Code-Inspired Conversation & Workspace Tools**:
+  - Multi-agent fan-out comparison for evaluating prompts across models/agents simultaneously.
+  - Side chats (`/btw`), prompt stash (⌘S), timeline minimap, and task strip.
+  - Account rate limits & provider windows dashboard (Claude, Codex, Cursor).
+  - PR status chips and automated `/pr` review worktrees.
+  - Isolated Git worktrees with automatic idle cleanup and safe merge back.
+
 ## 0.23.0 - 2026-11-02
 
 ### Added

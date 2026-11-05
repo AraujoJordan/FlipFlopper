@@ -106,7 +106,7 @@ fn parse_hunk_header(header: &str) -> (u32, u32) {
 }
 
 /// Parse the output of `git diff` (unified format) into `Vec<FileDiff>`.
-fn parse_unified_diff(raw: &str) -> Vec<FileDiff> {
+pub(crate) fn parse_unified_diff(raw: &str) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut current: Option<FileDiff> = None;
     let mut current_hunk: Option<Hunk> = None;
@@ -335,6 +335,7 @@ pub fn get_review_diff(
     rev: Option<String>,
     path: Option<String>,
     mode: Option<String>,
+    ignore_whitespace: bool,
 ) -> Result<Vec<FileDiff>, String> {
     let mode = mode.as_deref().unwrap_or("head");
 
@@ -353,6 +354,7 @@ pub fn get_review_diff(
                 "--cached",
                 &before,
             ];
+            if ignore_whitespace { args.push("-w"); }
             if let Some(ref p) = path {
                 args.push("--");
                 args.push(p.as_str());
@@ -361,6 +363,7 @@ pub fn get_review_diff(
         }
         "unstaged" => {
             let mut args: Vec<&str> = vec!["-c", "core.quotepath=false", "diff", "--unified=3"];
+            if ignore_whitespace { args.push("-w"); }
             if let Some(ref p) = path {
                 args.push("--");
                 args.push(p.as_str());
@@ -371,6 +374,7 @@ pub fn get_review_diff(
             let rev_arg = rev.as_deref().unwrap_or("HEAD");
             let mut args: Vec<&str> =
                 vec!["-c", "core.quotepath=false", "diff", "--unified=3", rev_arg];
+            if ignore_whitespace { args.push("-w"); }
             if let Some(ref p) = path {
                 args.push("--");
                 args.push(p.as_str());

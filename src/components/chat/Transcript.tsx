@@ -1,11 +1,17 @@
 import { Component, For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { activeView, chat, pendingInputCount, dropQueued, isRunning, sendQueuedNow, onLivePresentation, onClearMotion } from "../../lib/chat";
 import { resolvedMotion } from "../../lib/layout";
-import { openConversationFile } from "../../lib/attachments";
+import { setPendingPromptSeed } from "../../lib/store";
+import { citeInComposer, firstUnreadId } from "../../lib/transcript";
+import { sessionGoal } from "../../lib/goals";
+import { addAttachments, openConversationFile } from "../../lib/attachments";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { animateElement, reveal, cancelMotion, consumePromptLaunch, useListMotion, toast } from "../ui";
 import { Icon } from "../shell/Icon";
 import { AssistantBubble, Divider, UserBubble } from "./MessageItem";
+import FindBar from "./FindBar";
+import { openFileInViewer } from "../../lib/fileViewer";
+import TimelineMinimap from "./TimelineMinimap";
 
 const STICK_THRESHOLD = 80;
 /** Long sessions render only their most recent messages until asked for more. */
@@ -22,6 +28,88 @@ const Transcript: Component = () => {
   let content: HTMLDivElement | undefined;
   const [stuck, setStuck] = createSignal(true);
   const [fileModHeld, setFileModHeld] = createSignal(false);
+  // Quote reply: a floating button over text selected inside one assistant message.
+  const [quote, setQuote] = createSignal<{ text: string; left: number; top: number } | null>(null);
+  const [quoteComment, setQuoteComment] = createSignal("");
+  const evaluateSelection = () => {
+    const selection = window.getSelection();
+    // Stepping through find results may select text; that is not a request to quote it.
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !scroller || document.activeElement?.closest(".find-bar")) return hideQuote();
+    // Typing a comment in the citation popover collapses the selection; keep the popover.
+    if (document.activeElement?.closest(".quote-pop")) return;
+    const bubble = (node: Node | null) => (node instanceof Element ? node : node?.parentElement)?.closest(".msg-assistant") ?? null;
+    const start = bubble(selection.anchorNode);
+    const text = selection.toString().trim();
+    if (!start || start !== bubble(selection.focusNode) || !scroller.contains(start) || !text) return setQuote(null);
+    const rect = selection.getRangeAt(0).getBoundingClientRect();
+    // A small card under the selection, clamped to the viewport.
+    setQuote({
+      text,
+      left: Math.max(8, Math.min(rect.left + rect.width / 2 - 146, window.innerWidth - 308)),
+      top: Math.min(Math.max(8, rect.bottom + 8), Math.max(8, window.innerHeight - 196)),
+    });
+  };
+  const afterPointerOrKey = () => setTimeout(evaluateSelection, 0);
+  const hideQuote = () => { setQuote(null); setQuoteComment(""); };
+  const hideCollapsedQuote = () => {
+    if (document.activeElement?.closest(".quote-pop")) return;
+    if (window.getSelection()?.isCollapsed) hideQuote();
+  };
+  onMount(() => {
+    document.addEventListener("mouseup", afterPointerOrKey);
+    document.addEventListener("keyup", afterPointerOrKey);
+    document.addEventListener("selectionchange", hideCollapsedQuote);
+    const hide = () => setQuote(null);
+    scroller?.addEventListener("scroll", hide, { passive: true });
+
+    // The command palette's message search lands on the matching message.
+    const findRevealTarget = (role: string, ts: number) => {
+      if (!content) return undefined;
+      const nodes = [...content.querySelectorAll<HTMLElement>(role === "user" ? ".msg-user[data-ts]" : ".msg-assistant[data-ts]")]
+        .map((element) => ({ element, ts: Number(element.dataset.ts) }))
+        .filter((entry) => Number.isFinite(entry.ts));
+      if (role === "user") return (nodes.find((entry) => entry.ts === ts) ?? nodes.find((entry) => entry.ts >= ts))?.element;
+      return (nodes.filter((entry) => entry.ts <= ts).pop() ?? nodes[0])?.element;
+    };
+    const revealHit = (role: string, ts: number) => {
+      const target = findRevealTarget(role, ts);
+      if (!target) return false;
+      setStuck(false);
+      target.scrollIntoView({ block: "center" });
+      void animateElement(target, [
+        { backgroundColor: "rgba(var(--accent-rgb), .18)" },
+        { backgroundColor: "rgba(var(--accent-rgb), .05)", offset: .35 },
+        { backgroundColor: "transparent" },
+      ], 1500);
+      return true;
+    };
+    const onReveal = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string; ts?: number; role?: string }>).detail;
+      if (!detail || detail.sessionId !== chat.activeId || !Number.isFinite(detail.ts)) return;
+      const role = detail.role === "user" ? "user" : "assistant";
+      if (revealHit(role, detail.ts!)) return;
+      // The hit may be in an older page; show everything, then try once more.
+      if (hidden() > 0) {
+        setLimit(Number.MAX_SAFE_INTEGER);
+        requestAnimationFrame(() => requestAnimationFrame(() => revealHit(role, detail.ts!)));
+      }
+    };
+    window.addEventListener("flipflopper:reveal-message", onReveal);
+    onCleanup(() => {
+      document.removeEventListener("mouseup", afterPointerOrKey);
+      document.removeEventListener("keyup", afterPointerOrKey);
+      document.removeEventListener("selectionchange", hideCollapsedQuote);
+      scroller?.removeEventListener("scroll", hide);
+      window.removeEventListener("flipflopper:reveal-message", onReveal);
+    });
+  });
+  const insertQuote = () => {
+    const q = quote();
+    if (!q) return;
+    setPendingPromptSeed({ text: citeInComposer(q.text, quoteComment()) });
+    window.getSelection()?.removeAllRanges();
+    hideQuote();
+  };
   const isMac = navigator.platform.toLowerCase().includes("mac");
   const hasFileMod = (event: MouseEvent) => isMac ? event.metaKey : event.ctrlKey;
   const [limit, setLimit] = createSignal(PAGE);
@@ -125,6 +213,29 @@ const Transcript: Component = () => {
   const hidden = () => Math.max(0, all().length - limit());
   const messages = createMemo(() => (hidden() > 0 ? all().slice(hidden()) : all()));
   const queue = () => (chat.activeId ? chat.queued[chat.activeId] ?? [] : []);
+  const goal = createMemo(() => {
+    const id = chat.activeId;
+    const value = id ? sessionGoal(id) : "";
+    return value || null;
+  });
+  const unreadId = createMemo(() => (chat.activeId ? firstUnreadId(messages(), chat.unreadFrom[chat.activeId]) : null));
+  /** Scroll a prompt into view, first rendering the older messages when it is not on screen yet. */
+  const jumpTo = (id: string) => {
+    const find = () => content?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`);
+    const element = find();
+    if (element) { setStuck(false); element.scrollIntoView({ block: "start" }); return; }
+    setLimit(Number.MAX_SAFE_INTEGER);
+    requestAnimationFrame(() => requestAnimationFrame(() => { setStuck(false); find()?.scrollIntoView({ block: "start" }); }));
+  };
+  /** Pull a queued message back into the composer (an unsent draft stays above it). */
+  const editQueued = (index: number) => {
+    const id = chat.activeId;
+    const item = id ? chat.queued[id]?.[index] : undefined;
+    if (!id || !item) return;
+    dropQueued(id, index);
+    addAttachments(item.attachments);
+    if (item.text) setPendingPromptSeed({ text: item.text });
+  };
   const running = () => (chat.activeId ? isRunning(chat.activeId) : false);
 
   // Announced to screen readers; the transcript itself is not a live region
@@ -151,12 +262,14 @@ const Transcript: Component = () => {
     const link = event.target.closest<HTMLAnchorElement>("a[data-file-path]");
     if (link && scroller?.contains(link)) {
       event.preventDefault();
-      if (!hasFileMod(event) && event.detail !== 0) return;
       const path = link.dataset.filePath;
       if (!path) return;
+      const line = Number(link.dataset.fileLine) || null;
+      // A plain click previews the file in the Files tab; Cmd/Ctrl-click opens it in the editor or default app.
+      if (!hasFileMod(event)) { void openFileInViewer(path, line); return; }
       void (async () => {
         try {
-          await openConversationFile(path);
+          await openConversationFile(path, line);
         } catch (error) {
           toast(`Couldn't open ${path}: ${String(error)}`, "error");
         }
@@ -171,7 +284,7 @@ const Transcript: Component = () => {
 
   return (
     <div class="transcript-wrap">
-      <div class="transcript" classList={{ "file-mod-held": fileModHeld() }} ref={scroller} onScroll={onScroll} onClick={onLinkClick} onMouseMove={(event) => setFileModHeld(hasFileMod(event))} role="log" aria-label="Conversation" aria-live="off">
+      <div class="transcript" data-focus-area="conversation" tabIndex={-1} classList={{ "file-mod-held": fileModHeld() }} ref={scroller} onScroll={onScroll} onClick={onLinkClick} onMouseMove={(event) => setFileModHeld(hasFileMod(event))} role="log" aria-label="Conversation" aria-live="off">
         <div class="transcript-inner" ref={content}>
           <Show when={hidden() > 0}>
             <button type="button" class="load-earlier" onClick={loadEarlier}>
@@ -180,6 +293,10 @@ const Transcript: Component = () => {
           </Show>
           <For each={messages()}>
             {(message, i) => (
+              <>
+              <Show when={message.id === unreadId()}>
+                <div class="new-divider" role="separator" aria-label="New since you last looked"><span>New</span></div>
+              </Show>
               <Switch>
                 <Match when={message.role === "user" && message}>
                   {(m) => <UserBubble message={m() as Extract<typeof message, { role: "user" }>} />}
@@ -197,8 +314,19 @@ const Transcript: Component = () => {
                   )}
                 </Match>
               </Switch>
+              </>
             )}
           </For>
+          <Show when={chat.activeId}>
+            <div class="thread-status-line" classList={{ "thread-status-working": running(), "thread-status-attention": pendingInputCount(chat.activeId!) > 0 }}>
+              <span class="thread-status-dot" />
+              <span>{running() ? "Working" : pendingInputCount(chat.activeId!) > 0 ? "Needs your input" : "Ready"}</span>
+              <Show when={queue().length > 0}><span class="thread-status-chip">{queue().length} queued</span></Show>
+              <Show when={goal()}>
+                {(current) => <span class="thread-status-chip" title={current().text}>Goal · {current().status}</span>}
+              </Show>
+            </div>
+          </Show>
           <Show when={queue().length > 0}>
             <div class="queued">
               <For each={queue()}>
@@ -222,6 +350,15 @@ const Transcript: Component = () => {
                     <button
                       type="button"
                       class="icon-btn"
+                      title="Edit queued message"
+                      aria-label="Edit queued message"
+                      onClick={() => editQueued(i())}
+                    >
+                      <Icon name="pencil" size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      class="icon-btn"
                       title="Remove from queue"
                       aria-label="Remove from queue"
                       onClick={() => chat.activeId && dropQueued(chat.activeId, i())}
@@ -235,7 +372,29 @@ const Transcript: Component = () => {
           </Show>
         </div>
       </div>
+      <TimelineMinimap scroller={() => scroller} messages={all} onJump={jumpTo} />
+      <FindBar scroller={() => scroller} hasEarlier={() => hidden() > 0} showAll={() => setLimit(Number.MAX_SAFE_INTEGER)} />
       <div class="sr-only" role="status" aria-live="polite">{announcement()}</div>
+      <Show when={quote()}>
+        {(q) => (
+          <div class="quote-pop" role="dialog" aria-label="Cite in composer" style={{ left: `${q().left}px`, top: `${q().top}px` }}>
+            <div class="quote-pop-head"><Icon name="message" size={12} /> Cite in composer</div>
+            <div class="quote-pop-preview" title={q().text}>{q().text.length > 160 ? `${q().text.slice(0, 160)}…` : q().text}</div>
+            <textarea class="quote-pop-input" rows={2} aria-label="Comment about the quote" placeholder="Add a comment (optional)" value={quoteComment()}
+              ref={(el) => queueMicrotask(() => el.focus())}
+              onInput={(event) => setQuoteComment(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === "Escape") { event.preventDefault(); hideQuote(); }
+                else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); insertQuote(); }
+              }} />
+            <div class="quote-pop-actions">
+              <button type="button" class="ui-btn ui-btn-ghost" onMouseDown={(event) => event.preventDefault()} onClick={hideQuote}>Cancel</button>
+              <button type="button" class="ui-btn ui-btn-solid" onMouseDown={(event) => event.preventDefault()} onClick={insertQuote}>Cite</button>
+            </div>
+          </div>
+        )}
+      </Show>
       <Show when={!stuck()}>
         <button type="button" class="jump-latest" onClick={() => { setStuck(true); toBottom(true); }}>
           <Icon name="arrowUp" size={14} style={{ transform: "rotate(180deg)" }} />

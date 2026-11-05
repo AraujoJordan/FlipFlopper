@@ -1,6 +1,8 @@
 import { Component, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { openAttachment, prepareAttachmentPreview, type Attachment } from "../../lib/ipc";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openAttachment, prepareAttachmentPreview, saveAttachmentCopy, type Attachment } from "../../lib/ipc";
+import { copyImageToClipboard } from "../../lib/native";
 import { attachmentPreviewKind } from "../../lib/attachments";
 import { getFileIcon } from "../../lib/fileIcons";
 import { Presence, Spinner, toast, useValueMotion } from "../ui";
@@ -48,6 +50,17 @@ const AttachmentChip: Component<{ attachment: Attachment; onRemove?: () => void 
     try { await openAttachment(props.attachment.path); }
     catch (error) { toast(String(error), "error"); }
   };
+  const copyImage = async () => {
+    try { await copyImageToClipboard(url()!); toast("Image copied", "success"); }
+    catch (error) { toast(`Couldn't copy the image: ${String(error)}`, "error"); }
+  };
+  const saveCopy = async () => {
+    try {
+      const saved = await saveAttachmentCopy(props.attachment.path, props.attachment.name);
+      if (saved) toast(`Saved to ${saved}`, "success");
+    } catch (error) { toast(String(error), "error"); }
+  };
+  const reveal = () => revealItemInDir(props.attachment.path).catch((error) => toast(`Couldn't show the file: ${String(error)}`, "error"));
   const videoFrame = (video: HTMLVideoElement) => {
     if (Number.isFinite(video.duration) && video.duration > 0) video.currentTime = Math.min(.1, video.duration / 2);
   };
@@ -111,6 +124,11 @@ const AttachmentChip: Component<{ attachment: Attachment; onRemove?: () => void 
             </Show>
           </div>
           <footer class="attachment-dialog-foot"><span title={props.attachment.path}>{props.attachment.path}</span>
+            <Show when={kind() === "image" && source() && !mediaError()}>
+              <button type="button" class="ui-btn ui-btn-outline" onClick={() => void copyImage()}><Icon name="copy" size={15} />Copy image</button>
+            </Show>
+            <button type="button" class="ui-btn ui-btn-outline" onClick={() => void saveCopy()}><Icon name="download" size={15} />Save a copy…</button>
+            <button type="button" class="ui-btn ui-btn-outline" onClick={() => void reveal()}><Icon name="folder" size={15} />Show in folder</button>
             <button type="button" class="ui-btn ui-btn-outline" onClick={() => void openDefault()}><Icon name="external" size={15} />Open in default app</button>
           </footer>
         </section>

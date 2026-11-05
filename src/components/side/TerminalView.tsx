@@ -1,7 +1,7 @@
-import { Component, For, Show, createSignal, lazy } from "solid-js";
+import { Component, For, Show, createEffect, createSignal, lazy, on } from "solid-js";
 import { openTerminal } from "../../lib/ipc";
-import { activeSession, isRunning, canOpenInTerminal, setConversationMode } from "../../lib/chat";
-import { addTerminal, effectiveRoot, removeTerminal, setActiveTerminal, store, type TerminalKind } from "../../lib/store";
+import { activeSession, isRunning, canOpenInTerminal, chat, setConversationMode } from "../../lib/chat";
+import { addTerminal, effectiveRoot, removeTerminal, setActiveTerminal, setStore, store, type TerminalKind } from "../../lib/store";
 import { agentColor } from "../../lib/agentMeta";
 import ValidationButton from "../ValidationButton";
 import { Icon } from "../shell/Icon";
@@ -21,6 +21,50 @@ function kindColor(kind: TerminalKind): string {
 
 const TerminalView: Component = () => {
   const [opening, setOpening] = createSignal(false);
+  const [splitId, setSplitId] = createSignal<string | null>(null);
+  const [splitRows, setSplitRows] = createSignal(false);
+  // Terminals opened from the composer belong to that thread; run/install
+  // terminals stay visible everywhere. A per-thread terminal keeps running when
+  // you switch threads, but its tab is hidden until you return.
+  const visibleTerminals = () => store.terminals.filter((terminal) => !terminal.threadId || terminal.threadId === (chat.activeId ?? "new"));
+  const displayed = () => {
+    const active = store.activeTerminalId;
+    const split = splitId();
+    const list = visibleTerminals();
+    if (!active) return list.slice(0, 1);
+    if (!split || !list.some((terminal) => terminal.sessionId === split)) return list.filter((terminal) => terminal.sessionId === active);
+    return list.filter((terminal) => terminal.sessionId === active || terminal.sessionId === split);
+  };
+  createEffect(on(() => [chat.activeId, store.terminals.length] as const, () => {
+    const list = visibleTerminals();
+    if (list.length && !list.some((terminal) => terminal.sessionId === store.activeTerminalId)) setActiveTerminal(list[0].sessionId);
+  }));
+  createEffect(() => {
+    const split = splitId();
+    if (!split) return;
+    if (split === store.activeTerminalId || !visibleTerminals().some((terminal) => terminal.sessionId === split)) setSplitId(null);
+  });
+  function chooseTerminal(id: string) {
+    if (splitId() === id) setSplitId(null);
+    setActiveTerminal(id);
+  }
+  function focusPane(id: string) {
+    const current = store.activeTerminalId;
+    if (splitId() === id && current && current !== id) setSplitId(current);
+    setActiveTerminal(id);
+  }
+  function toggleSplit() {
+    if (splitId()) { setSplitId(null); return; }
+    const target = visibleTerminals().find((terminal) => terminal.sessionId !== store.activeTerminalId);
+    if (!target) { toast("Open another terminal to split the view.", "info"); return; }
+    setSplitId(target.sessionId);
+  }
+  // A terminal opened on the new-session screen belongs to the session that is
+  // created from that draft.
+  createEffect(on(() => chat.activeId, (id) => {
+    if (!id) return;
+    setStore("terminals", (terminals) => terminals.map((terminal) => terminal.threadId === "new" ? { ...terminal, threadId: id } : terminal));
+  }, { defer: true }));
 
   async function newShell() {
     const root = effectiveRoot();
@@ -29,7 +73,7 @@ const TerminalView: Component = () => {
     setOpening(true);
     try {
       const sessionId = await openTerminal(project.path, root);
-      addTerminal({ sessionId, label: "Terminal", kind: "shell" });
+      addTerminal({ sessionId, label: "Terminal", kind: "shell", threadId: chat.activeId ?? "new" });
     } catch (e) {
       toast(`Failed to open terminal: ${String(e)}`, "error");
     } finally {
@@ -44,7 +88,7 @@ const TerminalView: Component = () => {
     <div class="terminal-view">
       <div class="terminal-bar">
         <div ref={tabs} class="terminal-tabs">
-          <For each={store.terminals}>
+          <For each={visibleTerminals()}>
             {(term) => {
               const active = () => term.sessionId === store.activeTerminalId;
               return (
@@ -54,7 +98,7 @@ const TerminalView: Component = () => {
                   aria-selected={active()}
                   class="terminal-tab" data-motion-key={term.sessionId}
                   classList={{ "terminal-tab-on": active() }}
-                  onClick={() => setActiveTerminal(term.sessionId)}
+                  onClick={() => chooseTerminal(term.sessionId)}
                   onAuxClick={(e) => { if (e.button === 1) removeTerminal(term.sessionId); }}
                 >
                   <span class="terminal-tab-dot" style={{ background: kindColor(term.kind) }} />
@@ -74,6 +118,15 @@ const TerminalView: Component = () => {
           <button class="icon-btn" onClick={() => void newShell()} disabled={!store.currentProject || opening()} title="New terminal" aria-label="New terminal">
             <Show when={opening()} fallback={<Icon name="plus" size={14} />}><Spinner size={12} /></Show>
           </button>
+          <button class="icon-btn" onClick={toggleSplit} disabled={!splitId() && visibleTerminals().length < 2}
+            classList={{ "terminal-split-on": !!splitId() }} title={splitId() ? "Close split terminal" : "Split terminal view"} aria-label={splitId() ? "Close split terminal" : "Split terminal view"}>
+            <Icon name="split" size={14} />
+          </button>
+          <Show when={splitId()}>
+            <button class="icon-btn" onClick={() => setSplitRows((rows) => !rows)} title={splitRows() ? "Split side by side" : "Split stacked"} aria-label={splitRows() ? "Split side by side" : "Split stacked"}>
+              <Icon name="splitRows" size={14} />
+            </button>
+          </Show>
         </div>
         <ValidationButton />
         <Show when={activeSession() && canOpenInTerminal(activeSession()!.id)}>
@@ -85,22 +138,26 @@ const TerminalView: Component = () => {
 
       <div class="terminal-body">
         <Show
-          when={store.terminals.length > 0}
+          when={displayed().length > 0}
           fallback={
             <div class="pane-empty">
               <Icon name="terminal" size={28} />
-              <p>No terminals open.</p>
+              <p>No terminals open{chat.activeId ? " in this thread" : ""}.</p>
               <button class="ui-btn ui-btn-outline" disabled={!store.currentProject} onClick={() => void newShell()}>
                 <Icon name="plus" size={14} /> New terminal
               </button>
             </div>
           }
         >
-          <For each={store.terminals}>
-            {(term) => (
-              <TerminalPane sessionId={term.sessionId} active={term.sessionId === store.activeTerminalId} />
-            )}
-          </For>
+          <div class="terminal-panes" data-split={splitId() ? (splitRows() ? "rows" : "columns") : undefined}>
+            <For each={displayed()}>
+              {(term) => (
+                <div class="terminal-pane-slot" onPointerDown={() => focusPane(term.sessionId)}>
+                  <TerminalPane sessionId={term.sessionId} active={term.sessionId === store.activeTerminalId} visible label={term.label} />
+                </div>
+              )}
+            </For>
+          </div>
         </Show>
       </div>
     </div>

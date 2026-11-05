@@ -76,12 +76,12 @@ pub trait Parser: Send {
 /// Agents that can run as a chat session.
 const CHAT_AGENTS: &[&str] = &[
     "claude", "codex", "cursor", "agy", "qwen", "opencode", "droid", "grok", "kimi", "aider",
-    "goose",
+    "goose", "dsh",
 ];
 
 /// Agents whose CLI can resume a native session by id.
 const RESUMABLE: &[&str] = &[
-    "claude", "codex", "cursor", "agy", "qwen", "opencode", "droid", "kimi",
+    "claude", "codex", "cursor", "agy", "qwen", "opencode", "droid", "kimi", "dsh",
 ];
 
 pub fn supports_chat(agent_id: &str) -> bool {
@@ -93,7 +93,7 @@ pub fn supports_resume(agent_id: &str) -> bool {
 }
 
 /// For agents with no native read-only mode: steer via the prompt instead.
-fn with_plan_preamble(prompt: &str, mode: PermissionMode) -> String {
+pub fn with_plan_preamble(prompt: &str, mode: PermissionMode) -> String {
     match mode {
         PermissionMode::Plan => format!(
             "Plan mode: do NOT modify any files or run commands that change state. \

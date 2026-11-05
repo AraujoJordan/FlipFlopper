@@ -9,3 +9,8 @@ desktop app's runtime assets.
 Until this folder grows, `AGENTS.md` is the source of truth for
 architecture, the source map, backend/frontend contracts, and build/check
 commands. Start there.
+
+## Guides
+
+- [T3 Code UI/UX parity](./t3-parity.md) — what is covered from the T3 Code comparison and the
+  remaining backlog for continuing the port.

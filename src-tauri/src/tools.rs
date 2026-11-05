@@ -252,6 +252,22 @@ pub static CATALOG: &[ToolEntry] = &[
         ],
     },
     ToolEntry {
+        id: "dsh",
+        name: "DeepSeek Harness",
+        description: "DeepSeek's plugin-based agent harness (developer preview)",
+        binary: "dsh",
+        icon: "/agents/deepseek.png",
+        category: "Agents",
+        installs: &[
+            InstallSpec::Shell { os: "macos", command: "npm install -g @deepseek-ai/dsh" },
+            InstallSpec::Shell { os: "linux", command: "npm install -g @deepseek-ai/dsh" },
+            InstallSpec::Shell { os: "windows", command: "npm install -g @deepseek-ai/dsh" },
+            InstallSpec::Package { os: "macos", manager: "npm", package: "-g @deepseek-ai/dsh" },
+            InstallSpec::Package { os: "linux", manager: "npm", package: "-g @deepseek-ai/dsh" },
+            InstallSpec::Package { os: "windows", manager: "npm", package: "-g @deepseek-ai/dsh" },
+        ],
+    },
+    ToolEntry {
         id: "droid",
         name: "Droid",
         description: "Factory's agent-native software development CLI",
@@ -495,7 +511,7 @@ fn get_tool_version(binary: &str) -> Option<String> {
 
     Command::new(binary)
         .arg("--version")
-        .env("PATH", augmented_path_string())
+        .env("PATH", augmented_path_string()).envs(crate::env::proxy_env())
         .output()
         .ok()
         .map(|o| {

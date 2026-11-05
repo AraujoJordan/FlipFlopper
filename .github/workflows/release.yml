@@ -115,10 +115,11 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            FlipFlopper 0.23.0 introduces a seamless Chat / CLI switcher in the session
-            header to toggle between conversation view and live native CLI terminal,
-            enhanced model integrations, Claude advisor ACP stability improvements, and
-            Explain panel refinements.
+            FlipFlopper 0.24.0 introduces the new Interlocking Rotational FF Switch
+            brand identity and application icon suite, modern Electric Indigo and Hot
+            Coral UI theme, integrated BrandMark touchpoints, Android Compose preview
+            discovery and layout inspection, iOS Simulator streaming, isolated Git
+            worktree enhancements, and comprehensive conversation tools.
 
             Installers include the pinned Node sidecar and Claude ACP helper. Native
             Claude requires macOS 13.5+ on a Mac.

@@ -7,7 +7,7 @@ import { escapeHtml, highlightCode } from "../lib/markdownLite";
 import {
   basename, buildPatchForFile, buildSelectionPrompt, formatColonRange,
   formatLineRange, formatMediaBytes, formatMediaSizeDelta, formatSnippetDetails,
-  indexFileHunks, isMediaFile, langForPath,
+  indexFileHunks, isMediaFile, isTestFile, langForPath,
   type IndexedDiffLine, type IndexedHunk, type LineSelection,
 } from "../lib/diffModel";
 import {
@@ -16,6 +16,8 @@ import {
   addReviewComment, removeReviewComment, clearReviewComments, formatReviewBatchPrompt,
   type ReviewCommentDraft,
 } from "../lib/store";
+import { addComposerContext } from "../lib/composerContexts";
+import { runAction } from "../lib/shortcuts";
 import { submitPrompt, isRunning, chat } from "../lib/chat";
 import { addPaths } from "../lib/attachments";
 import {
@@ -23,12 +25,14 @@ import {
   openAttachment, triggerHaptic, type FileDiff,
 } from "../lib/ipc";
 import { gitStatus } from "../lib/gitStatus";
+import FindBar from "./chat/FindBar";
 import { getFileIcon } from "../lib/fileIcons";
 import { writeClipboardText } from "../lib/native";
 import {
   Button, Spinner, useValueMotion, Disclosure,
   ContextMenu, MenuItem, MenuDivider, MenuLabel, confirmDialog, toast,
 } from "./ui";
+import { diffFileState, diffIgnoreWhitespace, diffLayout, setDiffIgnoreWhitespace, setDiffLayout } from "../lib/settings";
 import { Icon } from "./shell/Icon";
 
 // ── Layout toggle ────────────────────────────────────────────────────────────
@@ -1309,8 +1313,8 @@ const UnifiedRow: Component<RowInteractionProps & {
       style={{
         display: "flex", "align-items": "flex-start",
         background: bg(),
-        "min-height": "20px",
-        "line-height": "20px",
+        "min-height": "calc(20px * var(--code-scale, 1))",
+        "line-height": "calc(20px * var(--code-scale, 1))",
         cursor: "pointer",
       }}
     >
@@ -1448,7 +1452,7 @@ const SplitCell: Component<{
         display: "flex", "align-items": "flex-start",
         background: bg(),
         "border-right": props.side === "left" ? "1px solid var(--border-muted)" : "none",
-        "min-height": "20px", "line-height": "20px",
+        "min-height": "calc(20px * var(--code-scale, 1))", "line-height": "calc(20px * var(--code-scale, 1))",
         cursor: props.indexed ? "pointer" : "default",
       }}
     >
@@ -1516,10 +1520,10 @@ const FileBlock: Component<{
   const diffSig = createMemo(() => fileDiffSignature(props.file));
   const viewed = createMemo(() => isFileViewed(displayPath(), store.review?.rev, diffSig()));
   const isSingleFileReview = () => Boolean(store.review?.path);
-  const [collapsed, setCollapsed] = createSignal(isSingleFileReview() ? false : viewed());
+  const [collapsed, setCollapsed] = createSignal(isSingleFileReview() ? false : diffFileState() === "collapsed" || viewed());
 
   createEffect(() => {
-    setCollapsed(isSingleFileReview() ? false : viewed());
+    setCollapsed(isSingleFileReview() ? false : diffFileState() === "collapsed" || viewed());
   });
 
   const lang = createMemo(() => langForPath(props.file.new_path ?? props.file.old_path));
@@ -1743,7 +1747,7 @@ const FileBlock: Component<{
           </div>
         </Show>
         <Show when={(!isMedia() || svgViewMode() === "code") && !props.file.is_binary && props.file.hunks.length > 0}>
-          <div style={{ overflow: "visible", "font-family": MONO, "font-size": "12px" }}>
+          <div style={{ overflow: "visible", "font-family": MONO, "font-size": "calc(12px * var(--code-scale, 1))" }}>
             <For each={indexed().hunks}>
               {(hunk) => (
                 <>
@@ -1915,7 +1919,7 @@ const FileBlock: Component<{
 
 // ── Top-level pane ────────────────────────────────────────────────────────────
 const DiffPane: Component = () => {
-  const [mode, setMode] = createSignal<LayoutMode>("unified");
+  const [mode, setMode] = createSignal<LayoutMode>(diffLayout());
   const [unviewedOnly, setUnviewedOnly] = createSignal(false);
   const [selection, setSelection] = createSignal<LineSelection | null>(null);
   const [askText, setAskText] = createSignal("");
@@ -1938,11 +1942,16 @@ const DiffPane: Component = () => {
     () => ({
       review: store.review,
       gitVer: store.gitStatusVersion,
+      ignoreWhitespace: diffIgnoreWhitespace(),
     }),
-    ({ review: r }) => {
+    ({ review: r, ignoreWhitespace }) => {
       const project = store.currentProject;
       if (!project || !r) return Promise.resolve([]);
-      return getReviewDiff(effectiveRoot()!, r.rev, r.path, r.mode);
+      return getReviewDiff(effectiveRoot()!, r.rev, r.path, r.mode, ignoreWhitespace).then((list) => {
+        const paths = r.turnFiles ?? [];
+        const turnFiltered = paths.length ? list.filter((file) => paths.includes(file.new_path ?? file.old_path ?? "")) : list;
+        return r.hideTests ? turnFiltered.filter((file) => !isTestFile(file.new_path ?? file.old_path ?? "")) : turnFiltered;
+      });
     }
   );
 
@@ -2133,8 +2142,13 @@ const DiffPane: Component = () => {
       instruction || "Please update these lines as needed.",
     );
     if (modeAction === "seed") {
-      setPendingPromptSeed({ text: prompt });
+      addComposerContext({
+        kind: "review",
+        label: `Review · ${sel.filePath}`,
+        detail: prompt,
+      });
       setAskText("");
+      runAction("focus-prompt");
       toast("Added selected lines to composer", "success");
       return;
     }
@@ -2195,8 +2209,13 @@ const DiffPane: Component = () => {
     const prompt = formatReviewBatchPrompt();
     if (!prompt) return;
     if (modeAction === "seed") {
-      setPendingPromptSeed({ text: prompt });
+      addComposerContext({
+        kind: "review",
+        label: `Review · ${store.reviewComments.length} comment${store.reviewComments.length === 1 ? "" : "s"}`,
+        detail: prompt,
+      });
       clearReviewComments();
+      runAction("focus-prompt");
       toast("Added all review comments to composer", "success");
       return;
     }
@@ -2614,13 +2633,26 @@ const DiffPane: Component = () => {
   } as const;
 
   return (
-    <div style={{
+    <div data-diff-find style={{
       height: "100%",
       display: "flex", "flex-direction": "column",
       background: "var(--surface-2)",
       "min-height": 0,
       position: "relative",
     }}>
+      <FindBar
+        scroller={() => bodyRef}
+        hasEarlier={() => false}
+        showAll={() => {}}
+        shortcut="find-in-diff"
+        label="diff"
+        placeholder="Find in diff"
+        enabled={() => !!bodyRef && (diffs()?.length ?? 0) > 0}
+        resetOnSessionChange={false}
+        highlightKey="diff-find"
+        onClose={() => bodyRef?.focus({ preventScroll: true })}
+        style={{ top: "46px" }}
+      />
       {/* ── Header ── */}
       <div style={headerStyle}>
         <Icon name="fileCheck" size={14} style={{ color: "var(--accent)" }} />
@@ -2656,17 +2688,34 @@ const DiffPane: Component = () => {
             }}>
               <button
                 class={mode() === "unified" ? undefined : "hover-tint"}
-                onclick={() => setMode("unified")} style={segBtnStyle(mode() === "unified")}
+                onclick={() => { setMode("unified"); setDiffLayout("unified"); }} style={segBtnStyle(mode() === "unified")}
               >
                 Unified
               </button>
               <button
                 class={mode() === "split" ? undefined : "hover-tint"}
-                onclick={() => setMode("split")} style={segBtnStyle(mode() === "split")}
+                onclick={() => { setMode("split"); setDiffLayout("split"); }} style={segBtnStyle(mode() === "split")}
               >
                 Split
               </button>
             </div>
+
+            <button
+              type="button"
+              class={diffIgnoreWhitespace() ? undefined : "hover-tint"}
+              aria-pressed={diffIgnoreWhitespace()}
+              title="Ignore whitespace-only changes"
+              onClick={() => setDiffIgnoreWhitespace(!diffIgnoreWhitespace())}
+              style={segBtnStyle(diffIgnoreWhitespace())}
+            >
+              Whitespace
+            </button>
+
+            <Show when={(store.review?.turnFiles?.length ?? 0) > 0}>
+              <Button variant="ghost" size="sm" onClick={() => openReview(undefined, "Working changes")} title="Show all working changes" style={{ border: "1px solid var(--border-default)" }}>
+                All changes
+              </Button>
+            </Show>
 
             <Button variant="ghost" size="sm" onClick={() => refetch()} title="Reload diff" style={{ border: "1px solid var(--border-default)" }}>
               <Icon name="refresh" size={11} />

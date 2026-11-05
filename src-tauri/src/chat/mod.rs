@@ -85,13 +85,26 @@ pub struct NewSession {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// Set on every session started by one multi-agent fan-out send.
+    #[serde(default)]
+    pub compare_group: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SessionPatch {
     pub title: Option<String>,
+    /// `Some(None)` clears the goal; absent leaves it unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    pub goal: Option<Option<store::Goal>>,
+    /// `Some(None)` wakes the session; absent leaves it unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    pub snoozed_until: Option<Option<u64>>,
+    /// Un-hides a side question that the user decided to keep.
+    pub hidden: Option<bool>,
     pub archived: Option<bool>,
     pub pinned: Option<bool>,
+    /// Opt-out of automatic settlement for this session.
+    pub settle_disabled: Option<bool>,
     pub agent_id: Option<String>,
     /// `Some(None)` clears; absent leaves unchanged.
     #[serde(default, deserialize_with = "double_option")]
@@ -135,8 +148,32 @@ pub struct SendArgs {
     /// session's conversation (used by orchestrator steps that "carry context").
     #[serde(default)]
     pub context_from: Option<String>,
+    /// Other sessions whose bounded digests ride along with this message (`@#` mentions).
+    #[serde(default)]
+    pub references: Vec<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+}
+
+/// Most referenced conversations and bytes per reference attached to one message.
+const MAX_REFERENCES: usize = 3;
+const REFERENCE_BYTES: usize = 12_000;
+
+/// `## Referenced conversation` blocks for `@#` mentions; skips the session itself and missing ones.
+fn reference_blocks(own_id: &str, references: &[String], names: &HashMap<String, String>) -> Option<String> {
+    let mut seen = Vec::new();
+    let blocks: Vec<String> = references
+        .iter()
+        .filter(|id| id.as_str() != own_id && !seen.contains(id) && { seen.push(*id); true })
+        .filter_map(|id| {
+            let source = store::get_session(id)?;
+            let body = store::digest_body(&store::load_entries(id), names, REFERENCE_BYTES)?;
+            let title = if source.title.is_empty() { "Untitled" } else { source.title.as_str() };
+            Some(format!("## Referenced conversation: {title}\n{body}"))
+        })
+        .take(MAX_REFERENCES)
+        .collect();
+    if blocks.is_empty() { None } else { Some(blocks.join("\n\n")) }
 }
 
 /// Delivers a transcript entry to the UI: `(session_id, entry)`. Injected so the
@@ -201,6 +238,11 @@ pub fn create_session(mut args: NewSession) -> Result<SessionMeta, String> {
         archived: false,
         pinned: false,
         parent_id: args.parent_id,
+        goal: None,
+        snoozed_until: None,
+        settle_disabled: false,
+        hidden: false,
+        compare_group: args.compare_group,
         created_at: now,
         updated_at: now,
     };
@@ -219,6 +261,18 @@ pub fn update_session(id: &str, patch: SessionPatch) -> Result<SessionMeta, Stri
         }
         if let Some(p) = patch.pinned {
             m.pinned = p;
+        }
+        if let Some(g) = patch.goal {
+            m.goal = g;
+        }
+        if let Some(until) = patch.snoozed_until {
+            m.snoozed_until = until;
+        }
+        if let Some(disabled) = patch.settle_disabled {
+            m.settle_disabled = disabled;
+        }
+        if let Some(hidden) = patch.hidden {
+            m.hidden = hidden;
         }
         if let Some(a) = patch.agent_id {
             m.agent_id = a;
@@ -395,6 +449,62 @@ impl ChatManager {
         Ok(ClearResult { session, archived })
     }
 
+    /// Branch a conversation into a new top-level session containing the entries up
+    /// to (and including) the turn `upto_turn`, or everything finished when `None`.
+    /// Native ids are not copied, so the next send replays a transcript digest.
+    pub fn fork_session(&self, session_id: &str, upto_turn: Option<&str>, keep_worktree: bool, hidden: bool) -> Result<store::SessionMeta, String> {
+        let operation = self.session_operation(session_id);
+        let _fork = operation.lock().unwrap();
+        let meta = store::get_session(session_id).ok_or("Session not found")?;
+        let entries = store::load_entries(session_id);
+        let ended = |e: &Entry, turn: Option<&str>| matches!(e, Entry::Event { event: ChatEvent::TurnEnded { turn_id, .. }, .. } if turn.map_or(true, |t| t == turn_id));
+        let cut = match upto_turn {
+            Some(turn) => entries.iter().position(|e| ended(e, Some(turn))).map(|i| i + 1).ok_or("That message is no longer in the conversation")?,
+            None => {
+                if self.is_running(session_id) || self.native.state(session_id).active_turn_id.is_some() {
+                    return Err("Stop the current turn before branching the whole conversation".into());
+                }
+                entries.iter().rposition(|e| ended(e, None)).map(|i| i + 1).ok_or("Nothing to branch yet")?
+            }
+        };
+        let mut copy = meta.clone();
+        copy.id = Uuid::new_v4().to_string();
+        copy.title = if meta.title.is_empty() { "Branched conversation".into() } else { format!("{} (fork)", meta.title) };
+        copy.title_locked = true;
+        copy.archived = false;
+        copy.pinned = false;
+        // A hidden fork is a side chat about this conversation; visible branches are top-level.
+        copy.parent_id = if hidden { Some(meta.id.clone()) } else { None };
+        copy.goal = None;
+        copy.snoozed_until = None;
+        copy.settle_disabled = false;
+        copy.compare_group = None;
+        copy.hidden = hidden;
+        // A plain branch gets its own folder (two sessions must not share a worktree).
+        // A read-only second opinion keeps it, so the reviewer can see unmerged work.
+        if !keep_worktree {
+            copy.worktree = None;
+            copy.cwd = meta.project_path.clone();
+        }
+        copy.native_ids.clear();
+        copy.acp_sessions.clear();
+        copy.agent_last_entry.clear();
+        copy.entry_count = cut;
+        copy.status = "idle".into();
+        copy.created_at = store::now_ms();
+        copy.updated_at = copy.created_at;
+        store::insert_session(copy.clone())?;
+        store::write_entries(&copy.id, &entries[..cut])?;
+        Ok(copy)
+    }
+
+    /// Turns still working (headless processes and native connections), for quit protection.
+    pub fn running_count(&self) -> usize {
+        let headless = self.running.lock().unwrap().len();
+        let native = self.native.active_turn_count();
+        headless + native
+    }
+
     pub fn is_running(&self, session_id: &str) -> bool {
         self.running.lock().unwrap().contains_key(session_id)
     }
@@ -408,6 +518,24 @@ impl ChatManager {
         }
         self.native.cancel(session_id);
         terminal
+    }
+
+    /// Drop the native agent conversation (live connection and saved ids) while keeping the
+    /// transcript, so the next message starts a fresh agent process with a digest of the history.
+    /// The palette exposes this after skills, plugins or MCP servers change.
+    pub fn restart_native_session(&self, session_id: &str) -> Result<store::SessionMeta, String> {
+        let operation = self.session_operation(session_id);
+        let _restart = operation.lock().unwrap();
+        if self.is_running(session_id) {
+            return Err("Stop the current turn before restarting the agent session.".into());
+        }
+        self.native.close_session(session_id);
+        store::update_session(session_id, |m| {
+            m.native_ids.clear();
+            m.acp_sessions.clear();
+            m.agent_last_entry.clear();
+        })?
+        .ok_or_else(|| "Session not found".to_string())
     }
 
     pub fn cancel_all(&self) {
@@ -503,8 +631,11 @@ impl ChatManager {
         let is_native_slash = acp::handles(&args.agent_id)
             && agent_prompt.trim_start().starts_with('/')
             && args.attachments.is_empty();
-        let full_prompt = match digest {
-            Some(d) if !is_native_slash => format!("{d}\n\n## New request\n{agent_prompt}{skill_suffix}{note}"),
+        let references = if is_native_slash { None } else { reference_blocks(&meta.id, &args.references, &names) };
+        let full_prompt = match (digest, references) {
+            (Some(d), Some(r)) if !is_native_slash => format!("{r}\n\n{d}\n\n## New request\n{agent_prompt}{skill_suffix}{note}"),
+            (None, Some(r)) => format!("{r}\n\n## New request\n{agent_prompt}{skill_suffix}{note}"),
+            (Some(d), None) if !is_native_slash => format!("{d}\n\n## New request\n{agent_prompt}{skill_suffix}{note}"),
             _ => format!("{agent_prompt}{skill_suffix}{note}"),
         };
 
@@ -527,7 +658,7 @@ impl ChatManager {
         let mut cmd = Command::new(&binary);
         cmd.args(&inv.args)
             .current_dir(&meta.cwd)
-            .env("PATH", augmented_path_string())
+            .env("PATH", augmented_path_string()).envs(crate::env::proxy_env())
             .env("NO_COLOR", "1")
             .stdin(if inv.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
@@ -579,6 +710,11 @@ impl ChatManager {
 
         // Transcript preamble is emitted before the thread starts so the UI
         // sees the user message and divider immediately.
+        let checkpoint = if meta.worktree.is_some() {
+            crate::worktree::capture_checkpoint(&meta.cwd).ok()
+        } else {
+            None
+        };
         let preamble = (|| -> Result<(), String> {
             let ts = store::now_ms();
             if flipped {
@@ -599,6 +735,7 @@ impl ChatManager {
             emit_event(&app, &session_id, ChatEvent::TurnStarted {
                 turn_id: turn_id.clone(),
                 agent_id: args.agent_id.clone(),
+                checkpoint: checkpoint.clone(),
             })?;
             count += 1;
             emit_event(&app, &session_id, ChatEvent::RuntimeUpdated { state: self.runtime_state(&session_id) })?;
@@ -784,6 +921,11 @@ impl ChatManager {
             m.model = args.model.clone(); m.effort = args.effort.clone(); m.mode = args.mode; m.yolo = args.yolo;
             if m.title.is_empty() { m.title = first_line(&prompt, 60); }
         }) { self.running.lock().unwrap().remove(&meta.id); return Err(error); }
+        let checkpoint = if meta.worktree.is_some() {
+            crate::worktree::capture_checkpoint(&meta.cwd).ok()
+        } else {
+            None
+        };
         let preamble = (|| -> Result<(), String> {
             let ts = store::now_ms();
             if flipped {
@@ -792,7 +934,7 @@ impl ChatManager {
             }
             emit_entry(&app, &meta.id, &Entry::User { text: prompt, agent_id: args.agent_id.clone(), ts, attachments: args.attachments.clone() })?;
             count += 1;
-            emit_event(&app, &meta.id, ChatEvent::TurnStarted { turn_id: turn_id.clone(), agent_id: args.agent_id.clone() })?;
+            emit_event(&app, &meta.id, ChatEvent::TurnStarted { turn_id: turn_id.clone(), agent_id: args.agent_id.clone(), checkpoint: checkpoint.clone() })?;
             count += 1;
             emit_event(&app, &meta.id, ChatEvent::NativeSession { id: native_id })?;
             count += 1;
@@ -977,7 +1119,7 @@ mod tests {
         let manager = Arc::new(ChatManager::default());
         manager.terminals.lock().unwrap().insert("s".into(), OwnedTerminal { id: "pty".into(), ptys: crate::pty::PtyManager::new(), history: None });
         assert_eq!(manager.runtime_state("s").terminal_id.as_deref(), Some("pty"));
-        let args = SendArgs { recover_context: false, session_id: "s".into(), prompt: "hello".into(), agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, context_from: None, attachments: vec![] };
+        let args = SendArgs { recover_context: false, session_id: "s".into(), prompt: "hello".into(), agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, context_from: None, references: vec![], attachments: vec![] };
         assert!(manager.send(Arc::new(|_, _| {}), args).unwrap_err().contains("Exit the CLI"));
         assert!(manager.clear_session("s").is_err());
         let (id, receiver) = manager.open_terminal("s", &crate::pty::PtyManager::new()).unwrap();
@@ -1017,7 +1159,7 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-10-22T09:01:00Z","message":{"content":"CLI prompt"}}"#, "\n",
             r#"{"type":"assistant","timestamp":"2026-10-22T09:01:01Z","message":{"content":[{"type":"text","text":"CLI answer"}]}}"#, "\n",
         )).unwrap();
-        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: None }).unwrap();
+        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: None }).unwrap();
         let history = import::HistoryCheckpoint { agent_id: "claude".into(), cwd: "/test".into(), native_id: None, path: Some(native.clone()), line_offset: 2, started_at: 0, previous_entries: Vec::new() };
         let terminal = OwnedTerminal { id: "pty".into(), ptys: crate::pty::PtyManager::new(), history: Some(history) };
         let emitted = Arc::new(Mutex::new(0));
@@ -1040,14 +1182,138 @@ mod tests {
         native_contents.push('\n');
         std::fs::write(&native, native_contents).unwrap();
         let checkpoint = |line_offset| import::HistoryCheckpoint { agent_id: "claude".into(), cwd: "/test".into(), native_id: Some("fresh-native".into()), path: Some(native.clone()), line_offset, started_at: 0, previous_entries: Vec::new() };
-        let automatic = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: Some("Old automatic title".into()) }).unwrap();
+        let automatic = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: Some("Old automatic title".into()) }).unwrap();
         manager.sync_terminal(&automatic.id, OwnedTerminal { id: "pty-title".into(), ptys: crate::pty::PtyManager::new(), history: Some(checkpoint(4)) }, Arc::new(|_, _| {}));
         assert_eq!(store::get_session(&automatic.id).unwrap().title, "Native CLI title");
 
-        let manual = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: Some("My title".into()) }).unwrap();
+        let manual = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: Some("My title".into()) }).unwrap();
         store::update_session(&manual.id, |meta| meta.title_locked = true).unwrap();
         manager.sync_terminal(&manual.id, OwnedTerminal { id: "pty-manual".into(), ptys: crate::pty::PtyManager::new(), history: Some(checkpoint(5)) }, Arc::new(|_, _| {}));
         assert_eq!(store::get_session(&manual.id).unwrap().title, "My title");
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    fn two_turn_transcript() -> Vec<Entry> {
+        let turn = |n: u32, text: &str| vec![
+            Entry::User { text: text.into(), agent_id: "claude".into(), ts: n as u64 * 10, attachments: vec![] },
+            Entry::Event { event: ChatEvent::TurnStarted { turn_id: format!("t{n}"), agent_id: "claude".into(), checkpoint: None }, ts: n as u64 * 10 + 1 },
+            Entry::Event { event: ChatEvent::Text { delta: format!("answer {n}") }, ts: n as u64 * 10 + 2 },
+            Entry::Event { event: ChatEvent::TurnEnded { turn_id: format!("t{n}"), status: TurnStatus::Done, changed_files: vec![] }, ts: n as u64 * 10 + 3 },
+        ];
+        [turn(1, "first question"), turn(2, "second question")].concat()
+    }
+
+    #[test]
+    fn forking_copies_a_prefix_without_native_state_and_leaves_the_source_alone() {
+        let _env = store::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-fork-{}", Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let source = create_session(NewSession { project_path: "/test".into(), cwd: Some("/test/wt".into()), worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: Some("Plan".into()) }).unwrap();
+        store::write_entries(&source.id, &two_turn_transcript()).unwrap();
+        store::update_session(&source.id, |m| { m.native_ids.insert("claude".into(), "native".into()); m.pinned = true; }).unwrap();
+        let manager = ChatManager::default();
+
+        let fork = manager.fork_session(&source.id, Some("t1"), false, false).unwrap();
+        assert_ne!(fork.id, source.id);
+        assert_eq!((fork.title.as_str(), fork.entry_count, fork.pinned, fork.cwd.as_str()), ("Plan (fork)", 4, false, "/test"));
+        assert!(fork.native_ids.is_empty() && fork.parent_id.is_none() && fork.goal.is_none());
+        assert_eq!(store::load_entries(&fork.id).len(), 4);
+        assert_eq!(store::load_entries(&source.id).len(), 8);
+        assert_eq!(store::get_session(&source.id).unwrap().native_ids.len(), 1);
+
+        assert_eq!(store::load_entries(&manager.fork_session(&source.id, None, false, false).unwrap().id).len(), 8);
+        // A second opinion keeps the source worktree and folder.
+        store::update_session(&source.id, |m| { m.worktree = Some(store::WorktreeRef { path: "/test/wt".into(), branch: "flipflopper/wt-x".into(), source_branch: "main".into() }); m.cwd = "/test/wt".into(); }).unwrap();
+        let kept = manager.fork_session(&source.id, Some("t1"), true, false).unwrap();
+        assert_eq!((kept.cwd.as_str(), kept.worktree.as_ref().map(|w| w.path.as_str())), ("/test/wt", Some("/test/wt")));
+        let separate = manager.fork_session(&source.id, Some("t1"), false, true).unwrap();
+        assert!(separate.hidden && !kept.hidden);
+        assert_eq!(separate.parent_id.as_deref(), Some(source.id.as_str()), "a side chat points at the conversation it asked about");
+        assert_eq!((separate.cwd.as_str(), separate.worktree.is_none()), ("/test", true));
+        assert!(manager.fork_session(&source.id, Some("missing"), false, false).is_err());
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn reference_blocks_skip_self_missing_and_duplicates_and_cap_the_count() {
+        let _env = store::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-refs-{}", Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let new = |title: &str| {
+            let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: Some(title.into()) }).unwrap();
+            store::write_entries(&meta.id, &two_turn_transcript()).unwrap();
+            meta
+        };
+        let (own, a, b, c, d) = (new("Own"), new("Alpha"), new("Beta"), new("Gamma"), new("Delta"));
+        let names = HashMap::from([("claude".to_string(), "Claude Code".to_string())]);
+        let ids = |list: &[&store::SessionMeta]| list.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        let blocks = reference_blocks(&own.id, &[ids(&[&own, &a, &a]), vec!["nope".into()]].concat(), &names).unwrap();
+        assert!(blocks.contains("## Referenced conversation: Alpha") && blocks.contains("first question"));
+        assert!(!blocks.contains("Own") && blocks.matches("## Referenced conversation").count() == 1);
+        let capped = reference_blocks(&own.id, &ids(&[&a, &b, &c, &d]), &names).unwrap();
+        assert_eq!(capped.matches("## Referenced conversation").count(), MAX_REFERENCES);
+        assert!(reference_blocks(&own.id, &[], &names).is_none());
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn snooze_hidden_and_compare_group_patch_clear_and_default_for_old_data() {
+        let _env = store::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-snooze-{}", Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: Some("group-1".into()), title: None }).unwrap();
+        assert_eq!((meta.snoozed_until, meta.hidden, meta.compare_group.as_deref()), (None, false, Some("group-1")));
+        let snoozed = update_session(&meta.id, serde_json::from_str(r#"{"snoozed_until":1700000000000}"#).unwrap()).unwrap();
+        assert_eq!(snoozed.snoozed_until, Some(1_700_000_000_000));
+        // An unrelated patch keeps the snooze; null wakes the session.
+        assert_eq!(update_session(&meta.id, serde_json::from_str(r#"{"pinned":true}"#).unwrap()).unwrap().snoozed_until, Some(1_700_000_000_000));
+        assert_eq!(update_session(&meta.id, serde_json::from_str(r#"{"snoozed_until":null}"#).unwrap()).unwrap().snoozed_until, None);
+        assert!(update_session(&meta.id, serde_json::from_str(r#"{"hidden":true}"#).unwrap()).unwrap().hidden);
+        // Settlement opt-out is tri-state: true disables, false re-enables, absent keeps it.
+        assert!(update_session(&meta.id, serde_json::from_str(r#"{"settle_disabled":true}"#).unwrap()).unwrap().settle_disabled);
+        assert!(update_session(&meta.id, serde_json::from_str(r#"{"pinned":true}"#).unwrap()).unwrap().settle_disabled);
+        assert!(!update_session(&meta.id, serde_json::from_str(r#"{"settle_disabled":false}"#).unwrap()).unwrap().settle_disabled);
+        // Sessions saved before these fields existed load with defaults.
+        let mut old = serde_json::to_value(store::get_session(&meta.id).unwrap()).unwrap();
+        for key in ["snoozed_until", "hidden", "compare_group", "settle_disabled"] { old.as_object_mut().unwrap().remove(key); }
+        let loaded: store::SessionMeta = serde_json::from_value(old).unwrap();
+        assert_eq!((loaded.snoozed_until, loaded.hidden, loaded.compare_group, loaded.settle_disabled), (None, false, None, false));
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn running_count_counts_headless_turns() {
+        let manager = ChatManager::default();
+        assert_eq!(manager.running_count(), 0);
+        manager.running.lock().unwrap().insert("s".into(), Running { pid: 1, cancelled: Arc::new(AtomicBool::new(false)), agent_id: "codex".into(), mode: PermissionMode::AutoEdit, yolo: false, turn_id: "t".into() });
+        assert_eq!(manager.running_count(), 1);
+    }
+
+    #[test]
+    fn session_goal_round_trips_clears_and_defaults_for_old_data() {
+        let _env = store::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-goal-{}", Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: None }).unwrap();
+        assert!(meta.goal.is_none());
+        let patch: SessionPatch = serde_json::from_str(r#"{"goal":{"text":"ship it","status":"active"}}"#).unwrap();
+        let updated = update_session(&meta.id, patch).unwrap();
+        let goal = updated.goal.clone().unwrap();
+        assert_eq!((goal.text.as_str(), goal.status.as_str(), goal.rounds, goal.max_rounds), ("ship it", "active", 0, 5));
+        assert_eq!(store::get_session(&meta.id).unwrap().goal, updated.goal);
+        // An unrelated patch leaves the goal alone; null clears it.
+        let untouched = update_session(&meta.id, serde_json::from_str(r#"{"pinned":true}"#).unwrap()).unwrap();
+        assert!(untouched.goal.is_some());
+        let cleared = update_session(&meta.id, serde_json::from_str(r#"{"goal":null}"#).unwrap()).unwrap();
+        assert!(cleared.goal.is_none());
         match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
         let _ = std::fs::remove_dir_all(data);
     }
@@ -1058,7 +1324,7 @@ mod tests {
         let data = std::env::temp_dir().join(format!("ff-live-mode-{}", Uuid::new_v4()));
         let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
         std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
-        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "codex".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: None }).unwrap();
+        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "codex".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: None }).unwrap();
         let manager = ChatManager::default();
         let cancelled = Arc::new(AtomicBool::new(false));
         manager.running.lock().unwrap().insert(meta.id.clone(), Running { pid: 12345, cancelled: cancelled.clone(), agent_id: "codex".into(), mode: PermissionMode::AutoEdit, yolo: false, turn_id: "same-turn".into() });
@@ -1086,9 +1352,9 @@ mod tests {
         let data=std::env::temp_dir().join(format!("ff-recovery-{}",Uuid::new_v4()));
         let previous=std::env::var_os("FLIPFLOPPER_DATA_DIR");
         std::env::set_var("FLIPFLOPPER_DATA_DIR",&data);
-        let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,yolo: false,parent_id:None,title:None}).unwrap();
+        let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,yolo: false,parent_id:None,compare_group:None,title:None}).unwrap();
         store::update_session(&meta.id,|m|m.status="running".into()).unwrap();
-        let started=Entry::Event {event:ChatEvent::TurnStarted {turn_id:"interrupted".into(),agent_id:"claude".into()},ts:1};
+        let started=Entry::Event {event:ChatEvent::TurnStarted {turn_id:"interrupted".into(),agent_id:"claude".into(),checkpoint:None},ts:1};
         store::append_entry(&meta.id,&started).unwrap();
         recover_interrupted_sessions();recover_interrupted_sessions();
         let entries=store::load_entries(&meta.id);
@@ -1111,7 +1377,7 @@ mod tests {
         let previous=std::env::var_os("FLIPFLOPPER_DATA_DIR");
         std::env::set_var("FLIPFLOPPER_DATA_DIR",&data);
         let manager=ChatManager::default();
-        let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,yolo: false,parent_id:None,title:Some("Fix bug".into())}).unwrap();
+        let meta=create_session(NewSession {project_path:"/test".into(),cwd:None,worktree:None,agent_id:"claude".into(),model:None,effort:None,mode:PermissionMode::AutoEdit,yolo: false,parent_id:None,compare_group:None,title:Some("Fix bug".into())}).unwrap();
         store::append_entry(&meta.id,&Entry::User {text:"hi".into(),agent_id:"claude".into(),ts:1,attachments:vec![]}).unwrap();
         store::update_session(&meta.id,|m|{m.native_ids.insert("claude".into(),"native-1".into());m.entry_count=1;}).unwrap();
 
@@ -1267,6 +1533,7 @@ mod tests {
             mode: PermissionMode::AutoEdit,
             yolo: false,
             parent_id: None,
+            compare_group: None,
             title: None,
         })
         .unwrap();
@@ -1284,7 +1551,7 @@ mod tests {
                         effort: None,
                         mode,
                         yolo: false,
-                        context_from: None,
+                        context_from: None, references: vec![],
                         attachments: vec![],
                     },
                 )
@@ -1365,7 +1632,7 @@ mod tests {
         let manager = Arc::new(ChatManager::default());
         let meta = create_session(NewSession {
             project_path: repo.to_str().unwrap().into(), cwd: None, worktree: None, agent_id: "claude".into(),
-            model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, title: None,
+            model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: None,
         })
         .unwrap();
         let attachment = Attachment {
@@ -1378,7 +1645,7 @@ mod tests {
                 recover_context: false, session_id: meta.id.clone(),
                 prompt: "What is the vault code in the attached file? Answer with only the code.".into(),
                 agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::Plan, yolo: false,
-                context_from: None, attachments: vec![attachment.clone()],
+                context_from: None, references: vec![], attachments: vec![attachment.clone()],
             })
             .unwrap();
         let mut text = String::new();
@@ -1395,6 +1662,30 @@ mod tests {
         let _ = std::fs::remove_file(&notes);
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn restarting_a_native_session_keeps_history_and_clears_native_ids() {
+        let _env = store::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-restart-{}", Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let meta = create_session(NewSession { project_path: "/test".into(), cwd: None, worktree: None, agent_id: "claude".into(), model: None, effort: None, mode: PermissionMode::AutoEdit, yolo: false, parent_id: None, compare_group: None, title: None }).unwrap();
+        store::append_entry(&meta.id, &Entry::User { text: "keep me".into(), agent_id: "claude".into(), ts: 1, attachments: vec![] }).unwrap();
+        store::update_session(&meta.id, |m| {
+            m.native_ids.insert("claude".into(), "native-1".into());
+            m.agent_last_entry.insert("claude".into(), 1);
+        }).unwrap();
+        let manager = ChatManager::default();
+        let restarted = manager.restart_native_session(&meta.id).unwrap();
+        assert!(restarted.native_ids.is_empty(), "the next message starts a new native conversation");
+        assert!(restarted.acp_sessions.is_empty());
+        assert!(restarted.agent_last_entry.is_empty());
+        assert_eq!(store::load_entries(&meta.id).len(), 1, "the visible transcript is kept");
+        manager.running.lock().unwrap().insert(meta.id.clone(), Running { pid: 0, cancelled: Arc::new(AtomicBool::new(false)), agent_id: "claude".into(), mode: PermissionMode::AutoEdit, yolo: false, turn_id: "t".into() });
+        assert!(manager.restart_native_session(&meta.id).is_err(), "a running turn must stop first");
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
     }
 
     #[test]

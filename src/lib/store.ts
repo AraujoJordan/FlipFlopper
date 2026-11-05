@@ -16,6 +16,8 @@ export interface TerminalTab {
   sessionId: string;
   label: string;
   kind: TerminalKind;
+  /** Chat session that opened this terminal; omitted for app-wide run/install terminals. */
+  threadId?: string;
 }
 
 export interface WorktreeInfoRef {
@@ -23,6 +25,8 @@ export interface WorktreeInfoRef {
   branch: string;
   sourceBranch: string;
 }
+
+export type DiffSource = "working" | "turn" | "branch" | "commit";
 
 export interface ReviewState {
   /** git revision range (e.g. "sha~1..sha") or undefined for working-tree */
@@ -33,6 +37,14 @@ export interface ReviewState {
   /** "staged" | "unstaged" scopes the diff to the index or worktree only;
    *  omitted means the default working-tree-vs-HEAD (or commit range) view */
   mode?: "staged" | "unstaged";
+  /** Optional allow-list of paths from one turn, so its review excludes unrelated work. */
+  turnFiles?: string[];
+  /** Which source picker entry produced this review. */
+  source?: DiffSource;
+  /** Base branch/ref for a branch comparison. */
+  baseRef?: string;
+  /** Hide test/spec files from the rendered diff. */
+  hideTests?: boolean;
 }
 
 export interface ReviewCommentDraft {
@@ -68,6 +80,8 @@ export interface AppStore {
    *  ready-made instruction. The composer appends/focuses it as editable text
    *  and clears this. */
   pendingPromptSeed: { text: string; projectPath?: string } | null;
+  /** One-shot request to open a URL in the preview panel (terminal links, shared links). */
+  previewRequest: { url: string; ts: number } | null;
   /** Keyed by `${root}::${revScope}::${path}` → diff/status signature or `"*"`. */
   viewedFiles: Record<string, string>;
   /** Queued inline review comments across files/lines before batch submission. */
@@ -97,6 +111,7 @@ const initial: AppStore = {
   gitPanelTab: "changes",
   historyFilterPath: null,
   pendingPromptSeed: null,
+  previewRequest: null,
   viewedFiles: { ...viewedFilesCache },
   reviewComments: [],
   restoringWorkspace: true,
@@ -214,9 +229,20 @@ export function openReview(
   title: string,
   path?: string,
   mode?: "staged" | "unstaged",
+  turnFiles?: string[],
+  options?: { source?: DiffSource; baseRef?: string; hideTests?: boolean },
 ) {
   if (!store.currentProject) return;
-  setStore("review", { rev, path, title, mode });
+  setStore("review", {
+    rev,
+    path,
+    title,
+    mode,
+    ...(turnFiles?.length ? { turnFiles } : {}),
+    ...(options?.source ? { source: options.source } : {}),
+    ...(options?.baseRef ? { baseRef: options.baseRef } : {}),
+    ...(options?.hideTests !== undefined ? { hideTests: options.hideTests } : {}),
+  });
   openSide("changes");
 }
 

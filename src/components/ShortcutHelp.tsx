@@ -1,7 +1,7 @@
 import { Presence } from "./ui";
 import { Icon } from "./shell/Icon";
 import { Component, For, createSignal, onCleanup, onMount } from "solid-js";
-import { registerShortcutHandler, SHORTCUT_GROUPS } from "../lib/shortcuts";
+import { registerShortcutHandler, shortcutGroups } from "../lib/shortcuts";
 
 /** Keyboard-shortcut reference modal, opened with "?" (see shortcuts.ts) or
  *  the help button in the title bar. Purely informational — closes on
@@ -74,7 +74,7 @@ const ShortcutHelp: Component = () => {
             </button>
           </div>
 
-          <For each={SHORTCUT_GROUPS}>
+          <For each={shortcutGroups()}>
             {(group) => (
               <div style={{ "margin-bottom": "14px" }}>
                 <div style={{

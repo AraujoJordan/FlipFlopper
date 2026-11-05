@@ -19,6 +19,7 @@ const ProjectPicker: Component<{
   onPickFolder: () => void;
   onOpenRecent: (path: string) => void;
   onRemoveRecent: (path: string) => void;
+  onCloneRepository?: () => void;
 }> = (props) => {
   function handleKeyDown(e: KeyboardEvent) {
     e.stopPropagation();
@@ -63,10 +64,15 @@ const ProjectPicker: Component<{
             <span style={{ "font-size": "13.5px", "font-weight": "600", color: "var(--fg-default)" }}>
               Open project
             </span>
-            <Button variant="solid" size="sm" onClick={props.onPickFolder} disabled={props.busy}>
-              <Show when={props.busy}><Spinner size={11} /></Show>
-              Open Folder…
-            </Button>
+            <div style={{ display: "flex", gap: "6px" }}>
+              <Show when={props.onCloneRepository}>
+                <Button variant="outline" size="sm" onClick={props.onCloneRepository}>Clone…</Button>
+              </Show>
+              <Button variant="solid" size="sm" onClick={props.onPickFolder} disabled={props.busy}>
+                <Show when={props.busy}><Spinner size={11} /></Show>
+                Open Folder…
+              </Button>
+            </div>
           </div>
 
           <Show

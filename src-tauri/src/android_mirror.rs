@@ -151,7 +151,7 @@ pub(crate) fn send_raw(channel: &Channel<InvokeResponseBody>, flags: u8, pts: u6
 fn adb_cmd(adb: &Path, serial: &str) -> Command {
     let mut cmd = Command::new(adb);
     cmd.args(["-s", serial])
-        .env("PATH", crate::env::augmented_path_string())
+        .env("PATH", crate::env::augmented_path_string()).envs(crate::env::proxy_env())
         .stdin(Stdio::null());
     cmd
 }

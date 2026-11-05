@@ -78,8 +78,42 @@ pub struct SessionMeta {
     /// Set for sessions spawned by an orchestrator flow step.
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Durable objective the app keeps continuing toward (see `src/lib/goals.ts`).
+    #[serde(default)]
+    pub goal: Option<Goal>,
+    /// Hidden from the main list until this time (ms); woken early when it needs the user.
+    #[serde(default)]
+    pub snoozed_until: Option<u64>,
+    /// Opt-out of automatic settlement (idle archiving) for this session.
+    #[serde(default)]
+    pub settle_disabled: bool,
+    /// A throwaway side-question session: never listed in the sidebar.
+    #[serde(default)]
+    pub hidden: bool,
+    /// Sessions started together by one multi-agent send share this id.
+    #[serde(default)]
+    pub compare_group: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+/// One durable completion objective per session. The frontend drives the rounds;
+/// the backend only persists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Goal {
+    pub text: String,
+    /// "active" | "paused" | "done" | "blocked"
+    pub status: String,
+    #[serde(default)]
+    pub rounds: u32,
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: u32,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+fn default_max_rounds() -> u32 {
+    5
 }
 
 /// A file attached to a user message.
@@ -133,7 +167,7 @@ fn index_path() -> PathBuf {
     root_dir().join("sessions.json")
 }
 
-fn transcript_path(id: &str) -> PathBuf {
+pub(crate) fn transcript_path(id: &str) -> PathBuf {
     // Session ids are uuids we generate; reject anything path-like anyway.
     let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
     root_dir().join(format!("{safe}.jsonl"))
@@ -605,7 +639,7 @@ mod tests {
     fn sample() -> Vec<Entry> {
         vec![
             Entry::User { text: "add a button".into(), agent_id: "claude".into(), ts: 0, attachments: vec![] },
-            ev(ChatEvent::TurnStarted { turn_id: "t".into(), agent_id: "claude".into() }),
+            ev(ChatEvent::TurnStarted { turn_id: "t".into(), agent_id: "claude".into(), checkpoint: None }),
             ev(ChatEvent::ToolCall {
                 id: "1".into(),
                 kind: ToolKind::Edit,
@@ -731,7 +765,7 @@ mod tests {
             id: id.into(), project_path: "/p".into(), cwd: "/p".into(), worktree: None,
             title: "Fix pty".into(), agent_id: "claude".into(), model: None, effort: None,
             mode: PermissionMode::AutoEdit, yolo: false, title_locked: false, native_ids: HashMap::new(), acp_sessions: HashMap::new(), agent_last_entry: HashMap::new(),
-            entry_count: 2, status: "idle".into(), archived: false, pinned: false, parent_id: None,
+            entry_count: 2, status: "idle".into(), archived: false, pinned: false, parent_id: None, goal: None, snoozed_until: None, settle_disabled: false, hidden: false, compare_group: None,
             created_at: 1, updated_at: 2,
         };
         insert_session(meta).unwrap();
@@ -760,7 +794,7 @@ mod tests {
             id: id.into(), project_path: "/p".into(), cwd: "/p".into(), worktree: None,
             title: "Keep me".into(), agent_id: "claude".into(), model: None, effort: None,
             mode: PermissionMode::AutoEdit, yolo: false, title_locked: false, native_ids: HashMap::new(), acp_sessions: HashMap::new(), agent_last_entry: HashMap::new(),
-            entry_count: 0, status: "idle".into(), archived: false, pinned: false, parent_id: None,
+            entry_count: 0, status: "idle".into(), archived: false, pinned: false, parent_id: None, goal: None, snoozed_until: None, settle_disabled: false, hidden: false, compare_group: None,
             created_at: 1, updated_at: 2,
         };
         insert_session(meta.clone()).unwrap();

@@ -235,6 +235,7 @@ pub fn spawn_shell_command(
     cmd.arg(command);
     cmd.cwd(project_path);
     cmd.env("PATH", augmented_path_string());
+    for (name, value) in crate::env::proxy_env() { cmd.env(name, value); }
 
     let child = pair
         .slave
@@ -276,6 +277,7 @@ pub fn spawn_agent_terminal(
     command.args(args);
     command.cwd(cwd);
     command.env("PATH", augmented_path_string());
+    for (name, value) in crate::env::proxy_env() { command.env(name, value); }
     command.env("TERM", "xterm-256color");
     let reader = pair.master.try_clone_reader().map_err(|e| format!("Reader error: {e}"))?;
     let writer = pair.master.take_writer().map_err(|e| format!("Writer error: {e}"))?;
@@ -323,6 +325,7 @@ pub fn spawn_interactive_shell(
         cmd
     };
     cmd.env("PATH", augmented_path_string());
+    for (name, value) in crate::env::proxy_env() { cmd.env(name, value); }
     cmd.cwd(cwd.unwrap_or(project_path));
 
     let child = pair

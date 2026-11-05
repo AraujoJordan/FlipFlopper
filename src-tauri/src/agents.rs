@@ -156,6 +156,15 @@ pub static AGENTS: &[AgentDef] = &[
         icon: "/agents/kimi.png",
         headless_args: Some(&["-p"]),
     },
+    AgentDef {
+        id: "dsh",
+        name: "DeepSeek Harness",
+        binary: "dsh",
+        aliases: &[],
+        description: "DeepSeek's plugin-based agent harness (ACP)",
+        icon: "/agents/deepseek.png",
+        headless_args: Some(&["--profile", "headless"]),
+    },
 ];
 
 /// Resolve the binary to actually invoke (primary or first alias found).
@@ -180,7 +189,7 @@ fn get_version(def: &AgentDef, binary: &str) -> Option<String> {
 
     std::process::Command::new(binary)
         .arg("--version")
-        .env("PATH", augmented_path_string())
+        .env("PATH", augmented_path_string()).envs(crate::env::proxy_env())
         .output()
         .ok()
         .and_then(|o| {
@@ -455,7 +464,7 @@ pub async fn list_ollama_models() -> Vec<String> {
     };
     let mut cmd = tokio::process::Command::new(binary);
     cmd.arg("list")
-        .env("PATH", augmented_path_string())
+        .env("PATH", augmented_path_string()).envs(crate::env::proxy_env())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -637,7 +646,7 @@ pub async fn fetch_agent_models(agent_id: &str) -> Result<Vec<ModelChoice>, Stri
     let binary = launch_binary(def).ok_or_else(|| format!("Agent '{}' is not installed.", def.name))?;
     let child = tokio::process::Command::new(binary)
         .args(args)
-        .env("PATH", augmented_path_string())
+        .env("PATH", augmented_path_string()).envs(crate::env::proxy_env())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -683,7 +692,7 @@ pub async fn run_ollama(model: &str, prompt: &str) -> Result<String, String> {
     cmd.arg("run")
         .arg(model)
         .arg(prompt)
-        .env("PATH", augmented_path_string())
+        .env("PATH", augmented_path_string()).envs(crate::env::proxy_env())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -768,7 +777,7 @@ fn headless_command(
     }
     cmd.current_dir(project_path)
         .kill_on_drop(true)
-        .env("PATH", augmented_path_string())
+        .env("PATH", augmented_path_string()).envs(crate::env::proxy_env())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

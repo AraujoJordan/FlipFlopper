@@ -174,7 +174,7 @@ const HistoryTab: Component<{ tick: Accessor<number> }> = (props) => {
             return (
               <div
                 class="git-row"
-                onclick={() => !isRenaming() && openReview(`${commit.sha}~1..${commit.sha}`, commit.short_sha)}
+                onclick={() => !isRenaming() && openReview(`${commit.sha}~1..${commit.sha}`, commit.short_sha, undefined, undefined, undefined, { source: "commit" })}
                 title={`Review commit ${commit.short_sha} — ${new Date(commit.date_iso).toLocaleString()}`}
                 style={{
                   position: "relative",

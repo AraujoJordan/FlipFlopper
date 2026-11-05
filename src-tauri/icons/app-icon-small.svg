@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="FlipFlopper: interlocking rotational FF switch">
+  <!-- Optical master for 16–32 px. Integer pixel coordinates (4px stems, 2px channels)
+       keep both interlocking F glyphs razor-sharp at 16x16 and 32x32. -->
+  <rect x="0" y="0" width="32" height="32" rx="7" fill="#11131A"/>
+  <path fill="#6366F1" d="M7 6H21L19 10H10V12H18V15H10V24H6V7Q6 6 7 6Z"/>
+  <path fill="#FF5E7E" d="M25 26H11L13 22H22V20H14V17H22V8H26V25Q26 26 25 26Z"/>
+</svg>

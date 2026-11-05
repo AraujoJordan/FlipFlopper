@@ -1,10 +1,13 @@
 import { Component, Index, Show, createSignal } from "solid-js";
 import type { ToolBlock } from "../../lib/chat";
+import { formatDuration, todosOf, toolDurationMs } from "../../lib/transcript";
 import type { ToolKind } from "../../lib/ipc";
 import { Icon, type IconName } from "../shell/Icon";
 import { Spinner, Disclosure, useValueMotion } from "../ui";
 import InlineDiff, { DiffStat, diffFromInput } from "./InlineDiff";
+import { maskForDisplay } from "../../lib/secrets";
 import { renderPlainTextWithFileRefs } from "../../lib/markdownLite";
+import McpAppCard from "./McpAppCard";
 
 const KIND_ICON: Record<ToolKind, IconName> = {
   read: "file",
@@ -28,25 +31,6 @@ const KIND_VERB: Record<ToolKind, [string, string]> = {
   todo: ["Updating", "Updated"],
   other: ["Using", "Used"],
 };
-
-interface Todo { text: string; done: boolean; active: boolean }
-
-/** Checklist items from a todo tool call (Claude `TodoWrite`, Codex `todo_list`). */
-function todosOf(input: unknown): Todo[] | null {
-  if (!input || typeof input !== "object") return null;
-  const obj = input as Record<string, unknown>;
-  const raw = Array.isArray(obj.todos) ? obj.todos : Array.isArray(obj.items) ? obj.items : null;
-  if (!raw) return null;
-  const todos = raw
-    .filter((t): t is Record<string, unknown> => !!t && typeof t === "object")
-    .map((t) => ({
-      text: String(t.content ?? t.text ?? t.title ?? ""),
-      done: t.status === "completed" || t.completed === true,
-      active: t.status === "in_progress",
-    }))
-    .filter((t) => t.text);
-  return todos.length > 0 ? todos : null;
-}
 
 function inputText(input: unknown): string {
   if (input == null) return "";
@@ -78,6 +62,7 @@ const ToolCallRow: Component<{ block: ToolBlock }> = (props) => {
   let state: HTMLSpanElement | undefined;
   useValueMotion(() => state, () => props.block.status);
   return (
+    <Show when={props.block.app} fallback={
     <div data-motion-id={props.block.id} class="tool-row" classList={{ "tool-row-error": props.block.status === "error" }}>
       <button
         type="button"
@@ -89,6 +74,7 @@ const ToolCallRow: Component<{ block: ToolBlock }> = (props) => {
         <span class="tool-row-verb">{verb()}</span>
         <span class="tool-row-title">{title()}</span>
         <Show when={diff()}>{(d) => <DiffStat adds={d().adds} dels={d().dels} />}</Show>
+        <Show when={(toolDurationMs(props.block) ?? 0) >= 1000}><span class="tool-row-time" title="How long this call took">{formatDuration(toolDurationMs(props.block)!)}</span></Show>
         <span class="tool-row-state" ref={state}>
           <Show when={props.block.status === "running"}><Spinner size={12} /></Show>
           <Show when={props.block.status === "error"}><Icon name="x" size={13} /></Show>
@@ -116,16 +102,19 @@ const ToolCallRow: Component<{ block: ToolBlock }> = (props) => {
           </Show>
           <Show when={!todos() && diff()}>{(d) => <InlineDiff diff={d()} />}</Show>
           <Show when={!todos() && !diff() && command()}>
-            <pre class="tool-pre"><span class="tool-prompt">$ </span><span innerHTML={renderPlainTextWithFileRefs(command())} /></pre>
+            <pre class="tool-pre"><span class="tool-prompt">$ </span><span innerHTML={renderPlainTextWithFileRefs(maskForDisplay(command()))} /></pre>
           </Show>
           <Show when={!todos() && !diff() && !command() && props.block.input != null}>
-            <pre class="tool-pre" innerHTML={renderPlainTextWithFileRefs(inputText(props.block.input))} />
+            <pre class="tool-pre" innerHTML={renderPlainTextWithFileRefs(maskForDisplay(inputText(props.block.input)))} />
           </Show>
           <Show when={props.block.output}>
-            <pre class="tool-pre tool-pre-output" innerHTML={renderPlainTextWithFileRefs(props.block.output!)} />
+            <pre class="tool-pre tool-pre-output" innerHTML={renderPlainTextWithFileRefs(maskForDisplay(props.block.output!))} />
           </Show>
       </Disclosure>
     </div>
+    }>
+      {(app) => <McpAppCard app={app()} block={props.block} />}
+    </Show>
   );
 };
 

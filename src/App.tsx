@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  effectiveRoot,
   hydrateStorePreferences,
   openReview,
   setGitPanelTab,
@@ -11,21 +12,37 @@ import {
   updateCurrentBranch,
 } from "./lib/store";
 import {
+  autoPull as pullProject,
+  forceQuit,
   getAgents,
   getRecentProjects,
+  launchArgs,
+  drainOpenLinks,
   onNativeMenuCommand,
+  onQuitRequested,
   onSingleInstance,
   syncNativeMenuState,
   type NativeMenuState,
 } from "./lib/ipc";
-import { cancelTurn, chat, initChat, isRunning, setYolo, startNewSession, conversationMode, conversationTerminal, conversationTerminalView, conversationTerminalBusy, setConversationMode, endConversationTerminal, canOpenInTerminal } from "./lib/chat";
+import { cancelTurn, chat, initChat, markLeft, markReturned, onTurnEnd, runAutoSettle, selectSession, setSnoozeClock, isRunning, setYolo, startNewSession, conversationMode, conversationTerminal, conversationTerminalView, conversationTerminalBusy, setConversationMode, endConversationTerminal, canOpenInTerminal } from "./lib/chat";
 import { PANEL_INSET, PANEL_GAP, hydrateLayout, watchMotionPreferences, watchLayoutSizes, paneIsOverlay, sidebarIsOverlay, renderedSidebarWidth, layout, openSide, resetZoom, setLayout, setSidebarWidth, stepZoom, toggleSide, toggleSidebar } from "./lib/layout";
 import { openProjectPath, forgetRecentProject, pickAndOpenProject, projectCreated } from "./lib/projects";
 import { watchNativeAppearance, isMacDesktop, handleWindowHeaderMouseDown, handleWindowHeaderDoubleClick } from "./lib/native";
 import { initAppPrefs } from "./lib/appPrefs";
 import { hydrateSettings } from "./lib/settings";
+import { hydratePrWatch } from "./lib/prWatch";
+import { hydrateLinkedPrs } from "./lib/linkedPrs";
+import { hydrateForkLineage } from "./lib/forkLineage";
+import "./lib/autoSettle";
 import { gitChangedCount, startGitPolling } from "./lib/gitStatus";
 import { hydrateOrchestratorPersistence, initOrchestrator } from "./lib/orchestrator";
+import { onGoalTurnEnd } from "./lib/goals";
+import { loadOpenInApps } from "./lib/openIn";
+import { hydrateStashes } from "./lib/stash";
+import { hydrateKeybindings } from "./lib/keybindings";
+import { hydrateProjectScripts } from "./lib/scripts";
+import { hydratePaletteHistory } from "./lib/palette";
+import { REFRESH_MS, refreshPrStatus } from "./lib/prStatus";
 import { hydrateImporter, scanImportable } from "./lib/importer";
 import { addPaths, dragActive, setDragActive } from "./lib/attachments";
 import { cycleSession, installGlobalShortcuts, registerShortcutHandler, runAction } from "./lib/shortcuts";
@@ -33,19 +50,51 @@ import { checkForUpdates, isUpdaterEnabled } from "./lib/updater";
 import { useResizable } from "./lib/useResizable";
 import Sidebar from "./components/shell/Sidebar";
 import SessionHeader from "./components/shell/SessionHeader";
+import TerminalDrawer from "./components/TerminalDrawer";
 import Transcript from "./components/chat/Transcript";
 import Composer from "./components/chat/Composer";
+import UsageLimitBanner from "./components/chat/UsageLimitBanner";
+import WorktreeSetupCards from "./components/chat/WorktreeSetupCard";
 import EmptyState from "./components/chat/EmptyState";
 import SidePane from "./components/side/SidePane";
 import { Icon } from "./components/shell/Icon";
 import ShortcutHelp from "./components/ShortcutHelp";
+import SchedulesDialog from "./components/SchedulesDialog";
+import SnoozeDialog from "./components/SnoozeDialog";
+import CompareDialog, { setCompareGroup } from "./components/CompareDialog";
+import HtmlPreviewDialog from "./components/HtmlPreviewDialog";
+import UsageDialog, { setUsageOpen } from "./components/UsageDialog";
+import ModelPricesDialog from "./components/ModelPricesDialog";
+import ProjectSettingsDialog from "./components/ProjectSettingsDialog";
+import LicensesDialog from "./components/LicensesDialog";
+import ModelCatalogDialog from "./components/ModelCatalogDialog";
+import CloneRepositoryDialog from "./components/CloneRepositoryDialog";
+import { openCloneRepository } from "./components/CloneRepositoryDialog";
+import WelcomeWizard, { maybeShowWelcome } from "./components/WelcomeWizard";
+import { hydrateSchedules, runDueSchedules, scheduledSessionIds } from "./lib/schedule";
+import { hydrateSnoozeOptions } from "./lib/snooze";
+import { hydrateThreadDetails } from "./lib/threadDetails";
+import { hydrateUnread } from "./lib/unread";
+import { hydrateMuted } from "./lib/muted";
+import { hydrateModelPrices } from "./lib/modelPrices";
+import { hydrateBrowserProfiles } from "./lib/browserProfiles";
+import { hydrateDrafts } from "./lib/drafts";
+import { hydratePrViewed } from "./lib/prViewed";
+import { hydrateProjectDefaults } from "./lib/projectDefaults";
+import { hydratePreviewRecent } from "./lib/previewRecent";
+import { hydrateAutoPull, resolveAutoPull } from "./lib/autoPull";
+import { hydrateCustomModels } from "./lib/customModels";
+import { consumeSavedPromptLink, openPromptLink } from "./lib/promptLinks";
+import { settleDays, worktreeCleanupDays } from "./lib/settings";
+import { cleanupArchivedWorktrees } from "./lib/worktreeCleanup";
 import { ConflictFixDialogHost } from "./components/git/ConflictFixDialog";
 import { SquashPushDialogHost } from "./components/git/SquashPushDialog";
 import { WorktreeCloseDialogHost } from "./components/git/WorktreeCloseDialog";
 import ImportDialog from "./components/ImportDialog";
+import PromptLinkDialog from "./components/PromptLinkDialog";
 import CommandPalette from "./components/shell/CommandPalette";
 import { togglePalette } from "./lib/palette";
-import { ToastHost, ConfirmHost, toast, Presence, usePresence, useThemeMotion } from "./components/ui";
+import { ToastHost, ConfirmHost, confirmDialog, toast, Presence, usePresence, useThemeMotion } from "./components/ui";
 import "./App.css";
 
 // Lazy modals: each is also wrapped in a `Show` at its call site — without
@@ -66,6 +115,20 @@ const App: Component = () => {
   const win = getCurrentWindow();
   const macDesktop = isMacDesktop();
   const [nativeFullscreen, setNativeFullscreen] = createSignal(false);
+  // A URL can arrive through argv, macOS's opened-URL queue and the second-instance
+  // plugin at nearly the same time. Open each link only once.
+  const openedSharedLinks = new Set<string>();
+  function openSharedLink(link: string, persist = true) {
+    if (openedSharedLinks.has(link)) return;
+    openedSharedLinks.add(link);
+    setTimeout(() => openedSharedLinks.delete(link), 10_000);
+    if (/^https?:/i.test(link)) {
+      setStore("previewRequest", { url: link, ts: Date.now() });
+      openSide("preview");
+      return;
+    }
+    void openPromptLink(link, { persist }).catch((error) => toast(`Couldn't open the shared link: ${String(error)}`, "error"));
+  }
   onMount(() => {
     if (!macDesktop) return;
     let disposed = false;
@@ -94,6 +157,55 @@ const App: Component = () => {
   let mainElement: HTMLElement | undefined;
   onMount(() => { if (rootElement && mainBody) onCleanup(watchLayoutSizes(rootElement, mainBody)); });
   initOrchestrator();
+  onMount(() => onCleanup(onTurnEnd(onGoalTurnEnd)));
+  onMount(() => { void loadOpenInApps(); void hydrateStashes(); void hydratePaletteHistory(); void hydrateKeybindings(); void hydrateProjectScripts(); void hydrateBrowserProfiles(); void hydrateDrafts(); void hydratePrViewed(); void hydrateProjectDefaults(); void hydratePreviewRecent(); });
+  // Pull request chip: look when the checkout changes, when the window regains focus, and every minute.
+  const checkPullRequest = (force = false) => {
+    const cwd = effectiveRoot();
+    if (cwd && store.currentProject?.is_git && document.visibilityState === "visible") void refreshPrStatus(cwd, force);
+  };
+  createEffect(() => { effectiveRoot(); checkPullRequest(); });
+  onMount(() => {
+    const onFocus = () => { checkPullRequest(); markReturned(chat.activeId); };
+    const onBlur = () => markLeft(chat.activeId);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    const timer = setInterval(onFocus, REFRESH_MS);
+    onCleanup(() => { window.removeEventListener("focus", onFocus); window.removeEventListener("blur", onBlur); clearInterval(timer); });
+  });
+  onMount(() => {
+    void hydrateSchedules().then(() => runDueSchedules());
+    const timer = setInterval(() => { runDueSchedules(); setSnoozeClock(Date.now()); }, 30_000);
+    // Idle sessions are archived at startup and then hourly, when the user opted in.
+    const settle = () => {
+      if (!chat.ready || settleDays() <= 0) return;
+      void runAutoSettle(settleDays(), scheduledSessionIds()).then(() => {
+        const days = worktreeCleanupDays();
+        if (days <= 0) return;
+        void cleanupArchivedWorktrees(days).then((result) => {
+          if (result.removed > 0) toast(`Removed ${result.removed} old worktree${result.removed === 1 ? "" : "s"}.`, "info");
+        });
+      });
+    };
+    const settleTimer = setInterval(settle, 3_600_000);
+    const settleStart = setTimeout(settle, 8_000);
+    // A brand-new install gets the setup flow once sessions and recent projects have loaded.
+    const welcomeStart = setTimeout(() => void maybeShowWelcome(chat.sessions.length > 0, (store.recentProjects?.length ?? 0) > 0), 2_500);
+    onCleanup(() => { clearInterval(timer); clearInterval(settleTimer); clearTimeout(settleStart); clearTimeout(welcomeStart); });
+  });
+
+  // Screen readers: announce background conversations that finish while another one is open.
+  const [backgroundAnnouncement, setBackgroundAnnouncement] = createSignal("");
+  let announcedAttention = new Set<string>();
+  createEffect(() => {
+    const now = new Set(Object.entries(chat.attention).filter(([, active]) => active).map(([id]) => id));
+    const fresh = [...now].filter((id) => !announcedAttention.has(id) && id !== chat.activeId);
+    announcedAttention = now;
+    const latest = fresh[fresh.length - 1];
+    if (!latest) return;
+    const title = chat.sessions.find((session) => session.id === latest)?.title || "A conversation";
+    setBackgroundAnnouncement(`${title} finished working.`);
+  });
 
   const [pickerOpen, setPickerOpen] = createSignal(false);
   const [newProjectOpen, setNewProjectOpen] = createSignal(false);
@@ -162,6 +274,8 @@ const App: Component = () => {
       case "menu-show-terminal": toggleSide("terminal"); return;
       case "menu-show-flow": toggleSide("flow"); return;
       case "menu-show-explain": toggleSide("explain"); return;
+      case "menu-show-files": toggleSide("files"); return;
+      case "menu-show-pulls": toggleSide("pulls"); return;
       case "menu-review-working-changes":
         if (store.currentProject) openReview(undefined, "Working changes");
         return;
@@ -218,11 +332,17 @@ const App: Component = () => {
     void appearance.ready.then(() => win.show()).then(() => win.setFocus()).catch((error) => console.error("Window activation failed:", error));
     void initAppPrefs();
 
-    const [, , , , agents, recents] = await Promise.all([
+    const [, , , , , , , , , , agents, recents] = await Promise.all([
       hydrateSettings(),
       hydrateStorePreferences(),
       hydrateLayout(),
       hydrateOrchestratorPersistence(),
+      hydrateSnoozeOptions(),
+      hydrateThreadDetails(),
+      hydrateModelPrices(),
+      hydratePrWatch(),
+      hydrateLinkedPrs(),
+      hydrateForkLineage(),
       getAgents(false),
       getRecentProjects(),
     ]);
@@ -230,12 +350,38 @@ const App: Component = () => {
     setStore("recentProjects", recents);
 
     await initChat();
+    await hydrateAutoPull();
+    await hydrateCustomModels();
+    await hydrateUnread(new Set(chat.sessions.map((session) => session.id)));
+    await hydrateMuted(new Set(chat.sessions.map((session) => session.id)));
     // First run, or the last session is gone: aim the new-session screen at
     // the most recent project.
     if (!chat.activeId && !store.currentProject && recents[0]) {
       await openProjectPath(recents[0].path);
     }
     setStore("restoringWorkspace", false);
+
+    // A prompt/thread link can arrive on the command line or be left pending by
+    // a previous launch. Open it only after sessions and recents are ready.
+    const openIncomingLaunchLink = async () => {
+      try {
+        const arg = (await launchArgs()).find((value) => value.startsWith("flipflopper://") || /^https?:/i.test(value));
+        const queued = await drainOpenLinks().catch(() => [] as string[]);
+        const saved = arg || queued.length > 0 ? null : await consumeSavedPromptLink();
+        const link = arg ?? queued[0] ?? saved;
+        if (link) openSharedLink(link, !saved);
+      } catch (error) {
+        toast(`Couldn't open the shared link: ${String(error)}`, "error");
+      }
+    };
+    void openIncomingLaunchLink();
+    // macOS can deliver another URL while the app is already running; drain the queue.
+    const openLinkTimer = setInterval(() => {
+      void drainOpenLinks().then((links) => {
+        for (const link of links) openSharedLink(link);
+      }).catch(() => {});
+    }, 1_500);
+    onCleanup(() => clearInterval(openLinkTimer));
     void hydrateImporter().then(scanImportable);
 
     // Backfill agent versions (spawns `--version` per installed agent).
@@ -255,10 +401,18 @@ const App: Component = () => {
     startGitPolling();
 
     const unlistenMenu = await onNativeMenuCommand(handleNativeMenuCommand);
-    const unlistenSingleInstance = await onSingleInstance(() => {
+    const unlistenSingleInstance = await onSingleInstance((payload) => {
       requestAnimationFrame(() => {
         void win.show().then(() => win.setFocus()).catch((error) => console.error("Window activation failed:", error));
       });
+      const link = payload.args.find((value) => value.startsWith("flipflopper://"));
+      if (link) openSharedLink(link);
+    });
+
+    // Quitting with agents still working asks first; the backend holds the exit until we confirm.
+    const unlistenQuit = await onQuitRequested((running) => {
+      void confirmDialog(`${running} agent${running === 1 ? " is" : "s are"} still working. Quit anyway? Their current turns will be stopped.`, { confirmLabel: "Quit anyway", danger: true })
+        .then((quit) => { if (quit) void forceQuit(); });
     });
     // The native app menu is one process-wide object; re-push our state when
     // the window regains focus so it always reflects what the user sees.
@@ -288,13 +442,34 @@ const App: Component = () => {
     window.addEventListener("resize", onResize);
 
     // Files dropped anywhere on the window become attachments to the next message.
+    // A session row under the pointer: a drop there attaches the files to that session's composer.
+    const rowAt = (position: { x: number; y: number }): HTMLElement | null => {
+      const scale = window.devicePixelRatio || 1;
+      return document.elementFromPoint(position.x / scale, position.y / scale)?.closest<HTMLElement>(".session-row[data-session-id]") ?? null;
+    };
+    let dropRow: HTMLElement | null = null;
+    const markDropRow = (row: HTMLElement | null) => {
+      if (row === dropRow) return;
+      dropRow?.classList.remove("session-row-drop");
+      row?.classList.add("session-row-drop");
+      dropRow = row;
+    };
     const unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
-      const t = event.payload.type;
-      if (t === "enter" || t === "over") setDragActive(true);
-      else if (t === "leave") setDragActive(false);
-      else if (t === "drop") {
+      const payload = event.payload;
+      if (payload.type === "enter" || payload.type === "over") {
+        setDragActive(true);
+        markDropRow(rowAt(payload.position));
+      } else if (payload.type === "leave") {
         setDragActive(false);
-        if (event.payload.paths.length > 0) addPaths(event.payload.paths);
+        markDropRow(null);
+      } else if (payload.type === "drop") {
+        const row = rowAt(payload.position);
+        setDragActive(false);
+        markDropRow(null);
+        if (payload.paths.length === 0) return;
+        const id = row?.dataset.sessionId;
+        if (id && id !== chat.activeId) void selectSession(id).then(() => addPaths(payload.paths));
+        else addPaths(payload.paths);
       }
     });
 
@@ -303,6 +478,9 @@ const App: Component = () => {
       registerShortcutHandler("open-project", () => setPickerOpen(true)),
       registerShortcutHandler("new-project", () => setNewProjectOpen(true)),
       registerShortcutHandler("open-settings", () => setSettingsOpen(true)),
+      registerShortcutHandler("open-usage", () => setUsageOpen(true)),
+      registerShortcutHandler("open-compare", () => { const group = chat.sessions.find((s) => s.id === chat.activeId)?.compare_group; if (group) setCompareGroup(group); else toast("This session wasn't started together with other agents.", "info"); }),
+      registerShortcutHandler("ask-side-question", () => { setStore("pendingPromptSeed", { text: "/btw " }); runAction("focus-prompt"); }),
     ];
 
     onCleanup(() => {
@@ -313,6 +491,7 @@ const App: Component = () => {
       uninstallShortcuts();
       unlistenMenu();
       unlistenSingleInstance();
+      unlistenQuit();
       unlistenFocus();
       offs.forEach((off) => off());
     });
@@ -322,7 +501,7 @@ const App: Component = () => {
 
   let sidebarElement: HTMLDivElement | undefined;
   const sidebarPresent = usePresence(() => layout.sidebarOpen, () => sidebarElement, {
-    axis: "width", size: sidebarWidth, duration: 240, slide: sidebarIsOverlay,
+    axis: "width", size: sidebarWidth, duration: layout.panelMotionMs, slide: sidebarIsOverlay,
     anchor: () => document.querySelector<HTMLElement>('[aria-label="Show sidebar"]') ?? undefined,
   });
   createEffect(() => {
@@ -330,6 +509,20 @@ const App: Component = () => {
     if (mainElement) mainElement.inert = overlay;
     if (overlay) queueMicrotask(() => sidebarElement?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true }));
     onCleanup(() => { if (mainElement) mainElement.inert = false; });
+  });
+
+  // T3-style "Automatically pull": try once per opened project when enabled for it.
+  let autoPulledFor: string | null = null;
+  createEffect(() => {
+    const path = store.currentProject?.path;
+    if (!path || path === autoPulledFor || !resolveAutoPull(path)) return;
+    autoPulledFor = path;
+    void pullProject(path).then((result) => {
+      if (!result.pulled) return;
+      updateCurrentBranch();
+      setStore("gitStatusVersion", (value) => (value ?? 0) + 1);
+      toast(`Pulled ${result.branch}.`, "info");
+    }).catch(() => {});
   });
 
   return (
@@ -370,6 +563,7 @@ const App: Component = () => {
             <SessionHeader changeCount={gitChangedCount()} />
             <div class="conversation-stage">
               <div ref={chatSurface} class="conversation-surface" style={{ display: chatPresent() ? "flex" : "none" }}>
+                <WorktreeSetupCards />
                 <Show
                   when={chat.activeId}
                   fallback={
@@ -381,7 +575,9 @@ const App: Component = () => {
                 >
                   <Transcript />
                 </Show>
+                <TerminalDrawer />
                 <div class="dock" style={{ display: conversationTerminal() ? "none" : undefined }}>
+                  <UsageLimitBanner />
                   <Composer onOpenProjects={() => setPickerOpen(true)} />
                 </div>
                 <Show when={conversationTerminal()}>
@@ -416,8 +612,21 @@ const App: Component = () => {
       <Show when={dropPresent()}>
         <div ref={dropOverlay} class="drop-overlay"><div class="drop-overlay-card"><Icon name="upload" size={22} /> Drop files to attach</div></div>
       </Show>
+      <div class="sr-only" role="status" aria-live="polite">{backgroundAnnouncement()}</div>
       <ToastHost />
       <ShortcutHelp />
+      <SchedulesDialog />
+      <PromptLinkDialog />
+      <SnoozeDialog />
+      <CompareDialog />
+      <UsageDialog />
+      <ModelPricesDialog />
+      <ProjectSettingsDialog />
+      <LicensesDialog />
+      <ModelCatalogDialog />
+      <CloneRepositoryDialog />
+      <WelcomeWizard />
+      <HtmlPreviewDialog />
       <ConfirmHost />
       <ConflictFixDialogHost />
       <SquashPushDialogHost />
@@ -435,6 +644,7 @@ const App: Component = () => {
           onPickFolder={() => void openFolder()}
           onOpenRecent={(path) => void openRecent(path)}
           onRemoveRecent={(path) => void forgetRecentProject(path)}
+          onCloneRepository={() => { setPickerOpen(false); openCloneRepository(); }}
         />
       </Presence>
       <Presence when={newProjectOpen()}>

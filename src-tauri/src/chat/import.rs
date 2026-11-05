@@ -598,7 +598,7 @@ impl Builder {
         if self.turn.is_none() {
             let id = Uuid::new_v4().to_string();
             self.entries.push(Entry::Event {
-                event: ChatEvent::TurnStarted { turn_id: id.clone(), agent_id: self.agent.clone() },
+                event: ChatEvent::TurnStarted { turn_id: id.clone(), agent_id: self.agent.clone(), checkpoint: None },
                 ts,
             });
             self.turn = Some(id);
@@ -997,7 +997,7 @@ fn convert_opencode(value: &Value) -> Option<(Vec<Entry>, u64, u64)> {
 }
 
 fn opencode_export(id: &str) -> Option<(Vec<Entry>, u64, u64, Option<String>)> {
-    let output = Command::new("opencode").args(["export", id]).env("PATH", augmented_path_string()).output().ok()?;
+    let output = Command::new("opencode").args(["export", id]).env("PATH", augmented_path_string()).envs(crate::env::proxy_env()).output().ok()?;
     if !output.status.success() { return None; }
     let value = serde_json::from_slice::<Value>(&output.stdout).ok()?;
     let title = value.get("info").and_then(|info| info.get("title")).and_then(Value::as_str).map(str::trim).filter(|title| !title.is_empty()).map(|title| first_line(title, 80));
@@ -1006,7 +1006,7 @@ fn opencode_export(id: &str) -> Option<(Vec<Entry>, u64, u64, Option<String>)> {
 }
 
 fn opencode_histories(cwd: &str) -> Vec<ImportCandidate> {
-    let Ok(output) = Command::new("opencode").args(["session", "list", "--format", "json"]).env("PATH", augmented_path_string()).output() else { return Vec::new() };
+    let Ok(output) = Command::new("opencode").args(["session", "list", "--format", "json"]).env("PATH", augmented_path_string()).envs(crate::env::proxy_env()).output() else { return Vec::new() };
     if !output.status.success() { return Vec::new() }
     let Ok(sessions) = serde_json::from_slice::<Vec<Value>>(&output.stdout) else { return Vec::new() };
     sessions.into_iter().filter(|session| session.get("directory").and_then(Value::as_str) == Some(cwd)).map(|session| {
@@ -1066,6 +1066,11 @@ pub fn import(requests: Vec<ImportRequest>) -> Vec<SessionMeta> {
             archived: false,
             pinned: false,
             parent_id: None,
+            goal: None,
+            snoozed_until: None,
+            settle_disabled: false,
+            hidden: false,
+            compare_group: None,
             created_at: created,
             updated_at: updated,
         };
@@ -1301,7 +1306,7 @@ mod tests {
         let out = Command::new("claude")
             .args(["-p", "Remember the secret word PINEAPPLE. Reply ok."])
             .current_dir(&repo)
-            .env("PATH", crate::env::augmented_path_string())
+            .env("PATH", crate::env::augmented_path_string()).envs(crate::env::proxy_env())
             .stdin(std::process::Stdio::null())
             .output()
             .expect("claude not runnable");
@@ -1339,7 +1344,7 @@ mod tests {
                 effort: None,
                 mode: PermissionMode::Plan,
                 yolo: false,
-                context_from: None,
+                context_from: None, references: vec![],
                 attachments: vec![],
             })
             .unwrap();

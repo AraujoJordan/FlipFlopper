@@ -3,7 +3,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { writeText as writeClipboardTextRaw } from "@tauri-apps/plugin-clipboard-manager";
+import { writeText as writeClipboardTextRaw, readText as readClipboardTextRaw } from "@tauri-apps/plugin-clipboard-manager";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { platform } from "@tauri-apps/plugin-os";
@@ -108,4 +108,30 @@ export async function sendNativeNotification(title: string, body?: string): Prom
 
 export async function writeClipboardText(text: string, label?: string): Promise<void> {
   await writeClipboardTextRaw(text, label ? { label } : undefined);
+}
+
+/** Read plain text for a paste action; an unavailable clipboard is an empty paste. */
+export async function readClipboardText(): Promise<string> {
+  try {
+    return await readClipboardTextRaw();
+  } catch {
+    return "";
+  }
+}
+
+/** Put an image on the clipboard as PNG. `url` is a displayable (asset) URL. The ClipboardItem is
+ *  created synchronously, with a promised blob, so WebKit keeps the user's click activation. */
+export async function copyImageToClipboard(url: string): Promise<void> {
+  const png = (async () => {
+    const blob = await (await fetch(url)).blob();
+    if (blob.type === "image/png") return blob;
+    const bitmap = await createImageBitmap(blob);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return new Promise<Blob>((resolve, reject) => canvas.toBlob((out) => (out ? resolve(out) : reject(new Error("Couldn't encode the image"))), "image/png"));
+  })();
+  await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
 }

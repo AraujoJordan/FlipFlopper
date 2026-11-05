@@ -91,6 +91,7 @@ const AGENT_COLORS: Record<string, string> = {
   droid: "#f778ba",
   grok: "#ffffff",
   kimi: "#6E56CF",
+  dsh: "#4D6BFE",
   run: "#3fb950",
   validate: "#58a6ff",
 };
@@ -102,7 +103,7 @@ export function agentColor(agentId: string): string {
 export function agentLetter(agentId: string): string {
   const map: Record<string, string> = {
     claude: "C", qwen: "Q", gemini: "G", codex: "X", cursor: "C",
-    agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R", grok: "G", kimi: "K",
+    agy: "A", aider: "D", opencode: "O", cline: "L", goose: "S", plandex: "P", droid: "R", grok: "G", kimi: "K", dsh: "D",
     run: "▶",
     validate: "✓",
   };

@@ -46,6 +46,7 @@ pub fn preview_source(path: &str) -> Result<PreviewSource, String> {
         Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp" | "ico") => "image",
         Some("mp4" | "webm" | "mov" | "m4v" | "ogv" | "mkv" | "avi") => "video",
         Some("mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" | "opus") => "audio",
+        Some("ttf" | "otf" | "woff" | "woff2") => "font",
         Some("pdf") => "pdf",
         _ => return Err("This file type has no inline preview. Open it in its default app.".into()),
     };

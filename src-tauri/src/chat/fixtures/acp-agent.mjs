@@ -13,7 +13,8 @@ const configs = [
   { id: "model", name: "Model", type: "select", category: "model", currentValue: "model-a", options: [{ value: "model-a", name: "Model A" }, { value: "model-b", name: "Model B" }] },
   { id: "effort", name: "Effort", type: "select", category: "thought_level", currentValue: "medium", options: [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }] },
 ];
-const session = () => ({ sessionId, configOptions: configs, modes: { currentModeId: "acceptEdits", availableModes: ["plan", "acceptEdits", "bypassPermissions", "agent"].map((id) => ({ id, name: id })) } });
+const noModes = process.env.ACP_NO_MODES === "1";
+const session = () => ({ sessionId, configOptions: configs, ...(noModes ? {} : { modes: { currentModeId: "acceptEdits", availableModes: ["plan", "acceptEdits", "bypassPermissions", "agent"].map((id) => ({ id, name: id })) } }) });
 
 async function handle(message) {
   if (!message.method) { pending.get(message.id)?.(message); pending.delete(message.id); return; }

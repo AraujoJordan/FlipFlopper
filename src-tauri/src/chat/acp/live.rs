@@ -5,7 +5,8 @@ use std::sync::mpsc;
 
 use super::super::acp_types::RuntimeState;
 use super::super::adapters::PermissionMode;
-use super::super::event::{truncate_output, ChatEvent, ToolKind, MAX_TOOL_OUTPUT};
+use super::super::event::{truncate_output, ChatEvent, McpAppData, ToolKind, MAX_TOOL_OUTPUT};
+use base64::Engine as _;
 use super::{Message, Pending};
 
 pub(super) struct Current {
@@ -337,11 +338,15 @@ impl Live {
             } else {
                 output
             };
+            let app = mcp_app_data(&merged);
             self.emit(ChatEvent::ToolResult {
-                id,
+                id: id.clone(),
                 ok: merged["status"] != "failed",
                 output: truncate_output(output, MAX_TOOL_OUTPUT),
             });
+            if let Some(app) = app {
+                self.emit(ChatEvent::McpApp { tool_id: id, app });
+            }
         }
     }
 }
@@ -353,6 +358,139 @@ fn content_text_blocks(v: &Value) -> String {
 
 fn content_text(v: &Value) -> String {
     v.as_array().map(|a| a.iter().filter_map(|p| p["content"]["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default()
+}
+
+const MCP_APP_MIME: &str = "text/html;profile=mcp-app";
+const MAX_MCP_APP_HTML: usize = 5 * 1024 * 1024;
+
+fn app_meta_uri(meta: &Value) -> Option<String> {
+    meta.get("ui")
+        .and_then(|ui| ui.get("resourceUri"))
+        .or_else(|| meta.get("ui/resourceUri"))
+        .and_then(Value::as_str)
+        .map(String::from)
+}
+
+/// Some providers put MCP app metadata on the raw tool output rather than the call.
+fn find_app_meta(value: &Value, depth: usize) -> Option<&Value> {
+    if depth > 12 { return None; }
+    match value {
+        Value::Array(items) => items.iter().take(1000).find_map(|item| find_app_meta(item, depth + 1)),
+        Value::Object(map) => {
+            if let Some(meta) = map.get("_meta") {
+                if app_meta_uri(meta).is_some_and(|uri| uri.starts_with("ui://")) {
+                    return Some(meta);
+                }
+            }
+            for key in ["rawOutput", "result", "content", "resource", "toolResult", "structuredContent"] {
+                if let Some(found) = map.get(key).and_then(|child| find_app_meta(child, depth + 1)) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Find a `text/html;profile=mcp-app` resource (or an HTML resource under a ui:// URI).
+/// Returns html, its own URI, CSP and permissions.
+fn find_mcp_resource(value: &Value, depth: usize) -> Option<(String, Option<String>, Option<Value>, Option<Value>)> {
+    if depth > 12 { return None; }
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim_start();
+            if (trimmed.starts_with('{') || trimmed.starts_with('[')) && trimmed.len() < 4 * 1024 * 1024 {
+                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                    return find_mcp_resource(&parsed, depth + 1);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().take(1000).find_map(|item| find_mcp_resource(item, depth + 1)),
+        Value::Object(map) => {
+            let mime = map.get("mimeType").and_then(Value::as_str).unwrap_or("")
+                .replace(' ', "").to_lowercase();
+            let uri = map.get("uri").and_then(Value::as_str).map(String::from);
+            let app_mime = mime == MCP_APP_MIME
+                || (mime.starts_with("text/html") && uri.as_deref().is_some_and(|value| value.starts_with("ui://")));
+            if app_mime {
+                let html = map.get("text").and_then(Value::as_str).map(String::from)
+                    .or_else(|| map.get("blob").and_then(Value::as_str).and_then(|blob| {
+                        base64::engine::general_purpose::STANDARD.decode(blob).ok()
+                            .and_then(|bytes| String::from_utf8(bytes).ok())
+                    }));
+                if let Some(html) = html.filter(|html| !html.trim().is_empty() && html.len() <= MAX_MCP_APP_HTML) {
+                    let ui = map.get("_meta").and_then(|meta| meta.get("ui"));
+                    return Some((
+                        html,
+                        uri,
+                        ui.and_then(|ui| ui.get("csp")).cloned(),
+                        ui.and_then(|ui| ui.get("permissions")).cloned(),
+                    ));
+                }
+            }
+            for key in ["content", "resource", "resources", "rawOutput", "result", "structuredContent", "app"] {
+                if let Some(found) = map.get(key).and_then(|child| find_mcp_resource(child, depth + 1)) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Read an MCP Apps reference and its embedded HTML from a completed ACP tool call.
+fn mcp_app_data(merged: &Value) -> Option<McpAppData> {
+    let meta = find_app_meta(merged, 0)?;
+    let ui = meta.get("ui");
+    let meta_uri = app_meta_uri(meta)?;
+    if !meta_uri.starts_with("ui://") { return None; }
+    let (html, resource_uri, resource_csp, resource_permissions) = find_mcp_resource(merged, 0)
+        .or_else(|| {
+            // Some hosts put the page in a text block and only the URI in `_meta`.
+            let nested = content_text(&merged["content"]);
+            let direct = merged["content"].as_array().map(|parts| {
+                parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n")
+            }).unwrap_or_default();
+            let raw = merged.get("rawOutput").and_then(Value::as_str).unwrap_or("");
+            let text = if !nested.trim().is_empty() { nested } else if !direct.trim().is_empty() { direct } else { raw.to_string() };
+            let trimmed = text.trim_start();
+            (trimmed.starts_with("<!doctype") || trimmed.starts_with("<html"))
+                .then(|| (text, None, None, None))
+        })?;
+    if html.trim().is_empty() || html.len() > MAX_MCP_APP_HTML { return None; }
+    let tool = ui.and_then(|ui| ui.get("tool")).and_then(Value::as_str)
+        .or_else(|| merged.get("title").and_then(Value::as_str))
+        .unwrap_or("app");
+    let server = ui.and_then(|ui| ui.get("server")).and_then(Value::as_str)
+        .or_else(|| meta.get("server").and_then(Value::as_str))
+        .or_else(|| tool.strip_prefix("mcp__").and_then(|rest| rest.split("__").next()))
+        .unwrap_or("MCP");
+    let title = ui.and_then(|ui| ui.get("title")).and_then(Value::as_str)
+        .or_else(|| merged.get("title").and_then(Value::as_str))
+        .unwrap_or(tool);
+    let structured_content = merged.get("structuredContent").cloned()
+        .or_else(|| merged.get("rawOutput").and_then(|raw| {
+            if let Some(object) = raw.as_object() {
+                object.get("structuredContent").cloned()
+            } else {
+                raw.as_str().and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .and_then(|parsed| parsed.get("structuredContent").cloned())
+            }
+        }));
+    Some(McpAppData {
+        server: server.into(),
+        tool: tool.into(),
+        resource_uri: resource_uri.unwrap_or(meta_uri),
+        title: title.into(),
+        html,
+        structured_content,
+        csp: resource_csp.or_else(|| ui.and_then(|ui| ui.get("csp")).cloned()),
+        permissions: resource_permissions.or_else(|| ui.and_then(|ui| ui.get("permissions")).cloned()),
+        prefers_border: ui.and_then(|ui| ui.get("prefersBorder")).and_then(Value::as_bool).unwrap_or(false),
+    })
 }
 
 pub(super) fn public_config(v: &Value) -> Vec<Value> {
@@ -415,6 +553,82 @@ mod tests {
         assert!(matches!(&events[2], ChatEvent::Compaction { status, summary: None, .. } if status == "in_progress"));
         assert!(matches!(&events[3], ChatEvent::Compaction { summary: Some(t), .. } if t == "Summary"));
         assert!(matches!(&events[4], ChatEvent::Compaction { status, summary: Some(t), .. } if status == "completed" && t == "Tail"));
+    }
+
+    #[test]
+    fn completed_tool_calls_emit_an_mcp_app_event_after_their_result() {
+        let (mut l, rx) = live();
+        l.notification("session/update", &json!({
+            "sessionId": "native",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "weather-1",
+                "title": "Weather",
+                "kind": "other",
+                "status": "completed",
+                "rawInput": { "city": "Paris" },
+                "_meta": { "ui": { "resourceUri": "ui://weather/app", "server": "weather", "tool": "forecast", "title": "Weather card" } },
+                "content": [{ "type": "resource", "resource": {
+                    "uri": "ui://weather/app",
+                    "mimeType": "text/html;profile=mcp-app",
+                    "text": "<!doctype html><html><body>sunny</body></html>"
+                } }]
+            }
+        }));
+        let events: Vec<_> = rx.try_iter().filter_map(|message| match message {
+            Message::Event(event) => Some(event),
+            _ => None,
+        }).collect();
+        assert!(matches!(&events[0], ChatEvent::ToolCall { id, .. } if id == "weather-1"));
+        assert!(matches!(&events[1], ChatEvent::ToolResult { id, .. } if id == "weather-1"));
+        assert!(matches!(&events[2], ChatEvent::McpApp { tool_id, app } if tool_id == "weather-1" && app.title == "Weather card" && app.html.contains("sunny")));
+    }
+
+    #[test]
+    fn mcp_app_resources_are_detected_with_metadata_and_html() {
+        let call = json!({
+            "title": "Weather",
+            "_meta": { "ui": {
+                "resourceUri": "ui://weather/app",
+                "server": "weather", "tool": "forecast", "title": "Weather card",
+                "csp": { "connectDomains": ["https://api.weather.test"] },
+                "permissions": { "clipboardWrite": {} },
+                "prefersBorder": true
+            } },
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "ui://weather/app",
+                    "mimeType": "text/html;profile=mcp-app",
+                    "text": "<!doctype html><html><body>sunny</body></html>"
+                }
+            }],
+            "structuredContent": { "temperature": 20 }
+        });
+        let app = mcp_app_data(&call).unwrap();
+        assert_eq!((app.server.as_str(), app.tool.as_str(), app.resource_uri.as_str()), ("weather", "forecast", "ui://weather/app"));
+        assert_eq!((app.title.as_str(), app.prefers_border), ("Weather card", true));
+        assert!(app.html.contains("sunny"));
+        assert_eq!(app.structured_content.unwrap()["temperature"], 20);
+        assert_eq!(app.csp.unwrap()["connectDomains"][0], "https://api.weather.test");
+        assert!(app.permissions.is_some());
+
+        let nested = json!({
+            "title": "Nested",
+            "rawOutput": {
+                "_meta": { "ui": { "resourceUri": "ui://nested/app", "server": "nested" } },
+                "content": [{ "type": "resource", "resource": {
+                    "uri": "ui://nested/app", "mimeType": "text/html;profile=mcp-app", "text": "<p>nested</p>"
+                } }]
+            }
+        });
+        assert_eq!(mcp_app_data(&nested).unwrap().html, "<p>nested</p>");
+        assert!(mcp_app_data(&json!({ "title": "No metadata", "content": [] })).is_none());
+        assert!(mcp_app_data(&json!({
+            "title": "Wrong mime",
+            "_meta": { "ui": { "resourceUri": "ui://x/app" } },
+            "content": [{ "type": "resource", "resource": { "uri": "ui://x/app", "mimeType": "text/plain", "text": "hi" } }]
+        })).is_none());
     }
 
     #[test]

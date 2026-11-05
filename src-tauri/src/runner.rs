@@ -4794,7 +4794,7 @@ pub mod android_cli {
         let mut cmd = Command::new(executable);
         cmd.args(args)
             .current_dir(root)
-            .env("PATH", crate::env::augmented_path_string())
+            .env("PATH", crate::env::augmented_path_string()).envs(crate::env::proxy_env())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

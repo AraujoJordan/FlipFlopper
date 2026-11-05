@@ -35,7 +35,7 @@ pub fn set_resource_dir(path: PathBuf) {
     let _ = RESOURCE_DIR.set(path);
 }
 pub fn handles(agent: &str) -> bool {
-    matches!(agent, "claude" | "cursor")
+    matches!(agent, "claude" | "cursor" | "dsh")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,11 +134,14 @@ impl Launch {
             ("NO_COLOR".into(), "1".into()),
             ("NO_OPEN_BROWSER".into(), "1".into()),
         ];
+        env.extend(crate::env::proxy_env());
         let (binary, args) = if agent == "claude" {
             let (node, helper) = helper_paths()?;
             env.push(("CLAUDE_CODE_EXECUTABLE".into(), binary.into()));
             env.push(("CLAUDE_AGENT_ACP_PROTOCOL".into(), "v1".into()));
             (node, vec![helper.to_string_lossy().into_owned()])
+        } else if agent == "dsh" {
+            (PathBuf::from(binary), vec!["--profile".into(), "acp".into()])
         } else {
             (PathBuf::from(binary), vec!["acp".into()])
         };
@@ -422,6 +425,11 @@ impl Pool {
             }
         }
     }
+    /// Native connections with a turn in flight (idle pooled ones do not count).
+    pub fn active_turn_count(&self) -> usize {
+        self.connections.lock().unwrap().values().filter(|c| c.busy.load(Ordering::SeqCst)).count()
+    }
+
     pub fn state(&self, session: &str) -> RuntimeState {
         let agent = store::get_session(session)
             .map(|m| m.agent_id)
@@ -870,11 +878,14 @@ async fn run_agent(
                 // start of the prompt so the ACP adapter recognizes them.
                 let text = {
                     let snap = foreground.snapshot();
-                    if snap.permission_mode == Some(PermissionMode::Ask)
+                    let steer = matches!(snap.permission_mode, Some(PermissionMode::Ask))
+                        || (snap.agent_id == "dsh" && matches!(snap.permission_mode, Some(PermissionMode::Plan)));
+                    if steer
                         && snap.current_mode.as_deref() != Some("ask")
+                        && snap.current_mode.as_deref() != Some("plan")
                         && !prompt.trim_start().starts_with('/')
                     {
-                        super::adapters::ask_preamble(&prompt)
+                        super::adapters::with_plan_preamble(&prompt, snap.permission_mode.unwrap_or(PermissionMode::Ask))
                     } else {
                         prompt.to_string()
                     }
@@ -1005,21 +1016,26 @@ async fn apply_mode(c: &Connection, cx: &ConnectionTo<Agent>, mode: PermissionMo
         ("claude", _, _) => "acceptEdits",
         _ => "agent",
     };
+    // dsh's ACP server advertises no modes: enforcement is client-side
+    // (automatic_choice + prompt preamble), so skip session/set_mode.
+    let modeless = snapshot.agent_id == "dsh" && snapshot.modes.is_empty();
     if !snapshot.modes.is_empty() && !snapshot.modes.iter().any(|m| m["id"] == mode_id) {
         return Err(format!("This CLI does not offer {mode_id} mode. Update the CLI or select an available permission mode."));
     }
     if c.closing.load(Ordering::SeqCst) || c.cancelled.load(Ordering::SeqCst) { return Err("Agent turn is closing".into()); }
-    request(
-        cx,
-        "session/set_mode",
-        json!({"sessionId":id,"modeId":mode_id}),
-    )
-    .await?;
+    if !modeless {
+        request(
+            cx,
+            "session/set_mode",
+            json!({"sessionId":id,"modeId":mode_id}),
+        )
+        .await?;
+    }
     let mut live = c.live.lock().unwrap();
     if c.closing.load(Ordering::SeqCst) || c.cancelled.load(Ordering::SeqCst) { return Err("Agent turn is closing".into()); }
     live.mode = mode;
     live.yolo = yolo;
-    live.state.current_mode = Some(mode_id.into());
+    live.state.current_mode = if modeless { None } else { Some(mode_id.into()) };
     if yolo {
         let approvals: Vec<_> = live.pending.iter().filter_map(|(id, pending)| {
             if pending.request.kind != InteractionKind::Permission { return None; }
@@ -1054,7 +1070,7 @@ async fn configure(
                 .find(|o| {
                     o["category"] == category
                         || o["id"] == category
-                        || (category == "thought_level" && o["id"] == "effort")
+                        || (category == "thought_level" && (o["id"] == "effort" || o["id"] == "reasoning_effort"))
                 })
                 .and_then(|o| o["currentValue"].as_str().map(String::from))
         });
@@ -1279,6 +1295,10 @@ mod tests {
         fixture_agent(resume, "claude", false)
     }
     fn fixture_agent(resume: Option<&str>, agent: &str, requires_auth: bool) -> Fixture {
+        let env = if requires_auth { vec![("ACP_REQUIRE_AUTH".into(), "1".into())] } else { vec![] };
+        fixture_env(resume, agent, env)
+    }
+    fn fixture_env(resume: Option<&str>, agent: &str, env: Vec<(String, String)>) -> Fixture {
         let (node, _) = helper_paths().expect("run npm run prepare:agents before Rust tests");
         let launch = Launch {
             binary: node,
@@ -1286,11 +1306,7 @@ mod tests {
                 "{}/src/chat/fixtures/acp-agent.mjs",
                 env!("CARGO_MANIFEST_DIR")
             )],
-            env: if requires_auth {
-                vec![("ACP_REQUIRE_AUTH".into(), "1".into())]
-            } else {
-                vec![]
-            },
+            env,
             cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         };
         let (c, ready) = start_connection(
@@ -1551,6 +1567,18 @@ mod tests {
         assert_eq!(c.snapshot().pending.len(), 1);
         answer(&c, &approval);
         collect(&c, rx);
+    }
+    #[test]
+    fn dsh_without_native_modes_keeps_client_side_mode_state() {
+        let c = fixture_env(None, "dsh", vec![("ACP_NO_MODES".into(), "1".into())]);
+        assert!(c.snapshot().modes.is_empty());
+        c.set_mode(PermissionMode::Plan, false).unwrap();
+        let snap = c.snapshot();
+        assert_eq!(snap.permission_mode, Some(PermissionMode::Plan));
+        assert_eq!(snap.current_mode, None);
+        c.set_mode(PermissionMode::AutoEdit, true).unwrap();
+        assert_eq!(c.snapshot().permission_mode, Some(PermissionMode::AutoEdit));
+        assert!(c.snapshot().yolo);
     }
     #[test]
     fn pool_evicts_idle_connections_but_preserves_busy_ones() {

@@ -103,6 +103,93 @@ const SETTINGS_TEMPLATE: &str = r#"{
 // ────────────────────────────────────────────────
 
 /// Inspect an existing folder without creating files or initializing Git.
+/// The folder name a clone will get: the last `/` or `:` segment, minus a `.git` suffix,
+/// with anything Git dislikes in a path replaced by a hyphen. `None` when nothing is left.
+pub fn repository_name(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() { return None; }
+    // For a URL, drop the scheme and host so "https://host/" has no repository name.
+    let candidate = match trimmed.split_once("://") {
+        Some((_, rest)) => rest.split_once('/').map(|(_, path)| path).unwrap_or(""),
+        None => trimmed,
+    };
+    let last = candidate.rsplit(|ch| ch == '/' || ch == ':').next()?.trim_end_matches(".git");
+    let mut clean: String = last.chars().map(|ch| {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') { ch } else { '-' }
+    }).collect();
+    clean = clean.trim_matches(|ch| ch == '.' || ch == '-').to_string();
+    (!clean.is_empty()).then_some(clean)
+}
+
+/// Accept the URL shapes `git clone` understands (plus an absolute local path), never
+/// something that would be read as an option.
+pub fn validate_clone_url(url: &str) -> Result<(), String> {
+    let value = url.trim();
+    if value.is_empty() { return Err("Enter a repository URL.".into()); }
+    if value.starts_with('-') { return Err("That doesn't look like a repository URL.".into()); }
+    let remote = ["https://", "http://", "ssh://", "git://", "file://"].iter().any(|prefix| value.starts_with(prefix))
+        || (value.starts_with("git@") && value.contains(':'));
+    if !remote && !Path::new(value).is_absolute() {
+        return Err("Use an https:// or ssh:// URL, a git@host:owner/repo address, or an absolute path to a repository.".into());
+    }
+    Ok(())
+}
+
+/// Clone `url` into a new folder under `destination_parent` and inspect it as a project.
+pub fn clone_repository(url: &str, destination_parent: &str) -> Result<ProjectInfo, String> {
+    validate_clone_url(url)?;
+    let parent = Path::new(destination_parent);
+    if !parent.is_dir() {
+        return Err(format!("Choose an existing folder to clone into: {destination_parent}"));
+    }
+    let name = repository_name(url).ok_or_else(|| "Couldn't work out a folder name from that URL.".to_string())?;
+    let target = parent.join(&name);
+    if target.exists() {
+        let empty = target.is_dir() && fs::read_dir(&target).map(|mut entries| entries.next().is_none()).unwrap_or(false);
+        if !empty {
+            return Err(format!("{} already exists and isn't an empty folder.", target.display()));
+        }
+    }
+    let target_string = target.to_string_lossy().to_string();
+    crate::git::git(destination_parent, &["clone", "--", url.trim(), &target_string])?;
+    inspect_project(&target_string)
+}
+
+/// GitHub repository names: letters, digits, `. _ -`, up to 100 characters.
+pub fn validate_repository_name(name: &str) -> Result<(), String> {
+    let value = name.trim();
+    if value.is_empty() { return Err("Enter a repository name.".into()); }
+    if value.len() > 100 { return Err("Repository names can be at most 100 characters.".into()); }
+    if value.starts_with('-') || value.starts_with('.') || !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
+        return Err("Use letters, digits, dots, underscores and hyphens; the name cannot start with '-' or '.'.".into());
+    }
+    Ok(())
+}
+
+/// Create a GitHub repository from this checkout with `gh repo create --source . --push`.
+/// The project must be a Git repository without an `origin`, and `gh` must be installed and signed in.
+pub fn publish_repository(project_path: &str, name: &str, private: bool, description: Option<&str>) -> Result<String, String> {
+    validate_repository_name(name)?;
+    if !crate::git::is_inside_work_tree(project_path) {
+        return Err("Publish needs a Git repository: initialize Git in this project first.".into());
+    }
+    if crate::git::git(project_path, &["remote", "get-url", "origin"]).is_ok() {
+        return Err("This project already has an 'origin' remote. Push it from the Git controls instead.".into());
+    }
+    let gh = std::process::Command::new("gh")
+        .args(["repo", "create", name.trim(), "--source", ".", "--push", if private { "--private" } else { "--public" }])
+        .args(description.filter(|value| !value.trim().is_empty()).map(|value| format!("--description={}", value.trim())).into_iter())
+        .envs(crate::env::proxy_env())
+        .current_dir(project_path)
+        .output()
+        .map_err(|error| format!("Couldn't run the GitHub CLI: {error}. Install gh and run `gh auth login`."))?;
+    if !gh.status.success() {
+        let detail = String::from_utf8_lossy(&gh.stderr).trim().to_string();
+        return Err(if detail.is_empty() { "gh repo create failed.".into() } else { detail });
+    }
+    Ok(String::from_utf8_lossy(&gh.stdout).trim().to_string())
+}
+
 pub fn inspect_project(project_path: &str) -> Result<ProjectInfo, String> {
     let root = Path::new(project_path);
     if !root.is_dir() {
@@ -311,6 +398,47 @@ pub fn scaffold(project_path: &str) -> Result<ProjectInfo, String> {
         }
     }
     inspect_project(project_path)
+}
+
+/// Run project setup commands in `cwd` (usually a fresh worktree) in order.
+/// Stops at the first failure and returns the combined output for the UI.
+pub fn run_setup_commands(cwd: &str, commands: &[String]) -> Result<String, String> {
+    let directory = Path::new(cwd);
+    if !directory.is_dir() {
+        return Err(format!("Setup directory does not exist: {cwd}"));
+    }
+    let mut log = String::new();
+    for command in commands {
+        let command = command.trim();
+        if command.is_empty() { continue; }
+        let mut process = if cfg!(windows) {
+            let mut process = std::process::Command::new("cmd");
+            process.args(["/C", command]);
+            process
+        } else {
+            let mut process = std::process::Command::new("sh");
+            process.args(["-lc", command]);
+            process
+        };
+        process.current_dir(directory)
+            .env("PATH", crate::env::augmented_path_string())
+            .envs(crate::env::proxy_env())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = process.output().map_err(|error| format!("Couldn't run setup command: {error}"))?;
+        log.push_str(&format!("$ {command}\n"));
+        log.push_str(&String::from_utf8_lossy(&output.stdout));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            log.push_str(&stderr);
+            if !log.ends_with('\n') { log.push('\n'); }
+        }
+        if !output.status.success() {
+            return Err(format!("Setup command failed ({command}):\n{}", log.trim()));
+        }
+    }
+    Ok(log)
 }
 
 /// Create one new folder with Git when available. Agent files remain opt-in.
@@ -666,6 +794,354 @@ fn join_display_path(parent: &str, child: &str) -> String {
         format!("/{child}")
     } else {
         format!("{}/{child}", parent.trim_end_matches('/'))
+    }
+}
+
+// ── Read-only workspace browsing (the Files tab) ────────────────────────────
+
+/// Largest file the viewer reads; bigger files are cut here and marked truncated.
+pub const MAX_PREVIEW_BYTES: usize = 512 * 1024;
+
+/// Resolve `path` (absolute, or relative to `root`; empty means `root`) and require the result to
+/// stay inside `root` once symlinks are resolved, so the viewer can never read outside the checkout.
+pub fn resolve_inside(root: &str, path: &str) -> Result<PathBuf, String> {
+    let root = std::fs::canonicalize(root).map_err(|_| "The project folder is not available.".to_string())?;
+    let joined = if path.trim().is_empty() { root.clone() } else if Path::new(path).is_absolute() { PathBuf::from(path) } else { root.join(path) };
+    let resolved = std::fs::canonicalize(&joined).map_err(|_| format!("{path} does not exist."))?;
+    if !resolved.starts_with(&root) {
+        return Err("That file is outside the project, so it can't be previewed here. Use Open in editor.".into());
+    }
+    Ok(resolved)
+}
+
+/// Folders first, then files, hidden files included; `.git` is left out.
+pub fn list_workspace_dir(root: &str, dir: &str) -> Result<Vec<FileEntry>, String> {
+    let resolved = resolve_inside(root, dir)?;
+    let mut entries = list_dir(&resolved.to_string_lossy())?;
+    entries.retain(|entry| entry.name != ".git");
+    Ok(entries)
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct ContentMatch {
+    /// Path relative to the project root, using `/`.
+    pub path: String,
+    /// 1-based line number.
+    pub line: usize,
+    /// The line's text, trimmed to a short window around the match.
+    pub text: String,
+    /// Character offset of the match inside `text`.
+    pub column: usize,
+}
+
+/// Files larger than this are skipped by content search so a stray binary or
+/// minified bundle cannot stall the palette.
+const MAX_SEARCH_BYTES: u64 = 1024 * 1024;
+const MAX_SEARCH_FILES: usize = 5_000;
+const SEARCH_SKIP_DIRS: &[&str] = &[
+    ".git", "node_modules", "target", "dist", "build", ".next", ".turbo", ".cache", "vendor",
+];
+
+fn is_probably_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8000).any(|byte| *byte == 0)
+}
+
+fn search_needle(line: &str, query: &str, case_sensitive: bool, whole_word: bool) -> Option<usize> {
+    let matches = |at: usize, haystack: &str| {
+        if !whole_word {
+            return true;
+        }
+        let before = haystack[..at].chars().next_back();
+        let after = haystack[at + query.len()..].chars().next();
+        let wordish = |c: char| c.is_alphanumeric() || c == '_';
+        !before.is_some_and(wordish) && !after.is_some_and(wordish)
+    };
+    if case_sensitive {
+        line.match_indices(query).find(|(at, _)| matches(*at, line)).map(|(at, _)| at)
+    } else {
+        let lower_line = line.to_lowercase();
+        // Lowercasing can change byte lengths for some scripts; only use offsets
+        // when the two strings still line up.
+        if lower_line.len() != line.len() {
+            return lower_line.contains(&query.to_lowercase()).then_some(0);
+        }
+        let lower_query = query.to_lowercase();
+        lower_line.match_indices(&lower_query).find(|(at, _)| matches(*at, &lower_line)).map(|(at, _)| at)
+    }
+}
+
+/// Search file contents under `root` for a literal string, respecting
+/// `.gitignore` and skipping generated folders and large/binary files.
+/// Results are grouped by walk order (shallow paths first) and capped.
+pub fn search_project_content(
+    root: &str,
+    query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+    limit: usize,
+) -> Result<Vec<ContentMatch>, String> {
+    let root_path = PathBuf::from(root);
+    if !root_path.is_dir() {
+        return Err(format!("Not a directory: {root}"));
+    }
+    let query = query.trim();
+    if query.chars().count() < 2 {
+        return Ok(Vec::new());
+    }
+    let limit = limit.clamp(1, 500);
+
+    let walker = WalkBuilder::new(&root_path)
+        .hidden(false) // dotfiles can hold real source (e.g. .github workflows)
+        .git_ignore(true)
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            !(entry.file_type().is_some_and(|kind| kind.is_dir()) && SEARCH_SKIP_DIRS.contains(&name.as_ref()))
+        })
+        .build();
+
+    let mut matches = Vec::new();
+    let mut files = 0usize;
+    for entry in walker {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path == root_path || !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        files += 1;
+        if files > MAX_SEARCH_FILES || matches.len() >= limit {
+            break;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.len() > MAX_SEARCH_BYTES {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        if is_probably_binary(&bytes) {
+            continue;
+        }
+        let Ok(text) = String::from_utf8(bytes) else { continue };
+        let Ok(relative) = path.strip_prefix(&root_path) else { continue };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        for (index, line) in text.lines().enumerate() {
+            if matches.len() >= limit {
+                break;
+            }
+            if let Some(column) = search_needle(line, query, case_sensitive, whole_word) {
+                let trimmed = line.trim_end();
+                matches.push(ContentMatch {
+                    path: relative.clone(),
+                    line: index + 1,
+                    column: line[..column].chars().count(),
+                    text: if trimmed.chars().count() > 240 {
+                        trimmed.chars().take(240).collect::<String>() + "…"
+                    } else {
+                        trimmed.to_string()
+                    },
+                });
+            }
+        }
+    }
+    Ok(matches)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FilePreview {
+    /// Absolute path of the file that was read.
+    pub path: String,
+    pub size: u64,
+    /// `None` for binary files.
+    pub text: Option<String>,
+    pub truncated: bool,
+    pub binary: bool,
+}
+
+/// Read a file for display: text up to `MAX_PREVIEW_BYTES`, or just its size when it looks binary.
+pub fn read_workspace_file(root: &str, path: &str) -> Result<FilePreview, String> {
+    use std::io::Read;
+    let resolved = resolve_inside(root, path)?;
+    let meta = std::fs::metadata(&resolved).map_err(|e| format!("Couldn't read {path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path} is not a file."));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&resolved)
+        .and_then(|file| file.take(MAX_PREVIEW_BYTES as u64 + 1).read_to_end(&mut bytes))
+        .map_err(|e| format!("Couldn't read {path}: {e}"))?;
+    let truncated = bytes.len() > MAX_PREVIEW_BYTES;
+    bytes.truncate(MAX_PREVIEW_BYTES);
+    let binary = bytes.iter().take(8000).any(|b| *b == 0);
+    Ok(FilePreview {
+        path: resolved.to_string_lossy().into_owned(),
+        size: meta.len(),
+        text: if binary { None } else { Some(String::from_utf8_lossy(&bytes).into_owned()) },
+        truncated: truncated && !binary,
+        binary,
+    })
+}
+
+#[cfg(test)]
+mod workspace_browse_tests {
+    use super::*;
+
+    fn workspace() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("ff-browse-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("README.md"), "# Hi\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(root.join(".env.example"), "A=1\n").unwrap();
+        root
+    }
+
+    #[test]
+    fn listing_puts_folders_first_shows_dotfiles_and_hides_git() {
+        let root = workspace();
+        let names: Vec<_> = list_workspace_dir(root.to_str().unwrap(), "").unwrap().into_iter().map(|e| (e.name, e.is_dir)).collect();
+        assert_eq!(names, vec![("src".to_string(), true), (".env.example".to_string(), false), ("README.md".to_string(), false)]);
+        let src: Vec<_> = list_workspace_dir(root.to_str().unwrap(), "src").unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(src, vec!["deep", "main.rs"]);
+        assert!(list_workspace_dir(root.to_str().unwrap(), "README.md").is_err(), "a file is not a directory");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn paths_cannot_escape_the_project() {
+        let root = workspace();
+        let r = root.to_str().unwrap();
+        assert!(resolve_inside(r, "src/main.rs").is_ok());
+        assert!(resolve_inside(r, root.join("src/main.rs").to_str().unwrap()).is_ok(), "absolute paths inside are fine");
+        for outside in ["..", "../etc/passwd", "/etc/passwd", "src/../../x"] {
+            assert!(resolve_inside(r, outside).is_err(), "{outside}");
+        }
+        #[cfg(unix)]
+        {
+            let target = std::env::temp_dir().join(format!("ff-outside-{}", uuid::Uuid::new_v4()));
+            std::fs::write(&target, "secret").unwrap();
+            std::os::unix::fs::symlink(&target, root.join("link")).unwrap();
+            assert!(read_workspace_file(r, "link").unwrap_err().contains("outside the project"), "symlinks out are refused");
+            let _ = std::fs::remove_file(target);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn files_read_as_text_truncate_or_report_binary() {
+        let root = workspace();
+        let r = root.to_str().unwrap();
+        let readme = read_workspace_file(r, "README.md").unwrap();
+        assert_eq!((readme.text.as_deref(), readme.binary, readme.truncated, readme.size), (Some("# Hi\n"), false, false, 5));
+        std::fs::write(root.join("big.txt"), "x".repeat(MAX_PREVIEW_BYTES + 10)).unwrap();
+        let big = read_workspace_file(r, "big.txt").unwrap();
+        assert!(big.truncated && big.text.unwrap().len() == MAX_PREVIEW_BYTES);
+        std::fs::write(root.join("blob.bin"), [1u8, 2, 0, 3]).unwrap();
+        let blob = read_workspace_file(r, "blob.bin").unwrap();
+        assert!(blob.binary && blob.text.is_none() && !blob.truncated);
+        assert!(read_workspace_file(r, "src").unwrap_err().contains("not a file"));
+        assert!(read_workspace_file(r, "missing.txt").is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_search_matches_lines_words_and_case() {
+        let root = workspace();
+        std::fs::write(root.join("src/words.txt"), "the needle is here\nNeedle elsewhere\nneedles plural\n").unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target/generated.txt"), "needle\n").unwrap();
+        std::fs::write(root.join("blob.bin"), [0u8, 110, 101, 101, 100, 108, 101]).unwrap();
+        let r = root.to_str().unwrap();
+
+        let all = search_project_content(r, "needle", false, false, 20).unwrap();
+        assert_eq!(all.iter().filter(|m| m.path == "src/words.txt").count(), 3);
+        assert!(all.iter().all(|m| m.path != "target/generated.txt"), "generated folders are skipped");
+        assert!(all.iter().all(|m| m.path != "blob.bin"), "binary files are skipped");
+        assert_eq!((all[0].line, all[0].column), (1, 4));
+
+        let sensitive = search_project_content(r, "Needle", true, false, 20).unwrap();
+        assert_eq!(sensitive.len(), 1);
+        assert_eq!(sensitive[0].line, 2);
+
+        let word = search_project_content(r, "needle", false, true, 20).unwrap();
+        assert_eq!(word.len(), 2, "plural is excluded by whole-word");
+        assert!(search_project_content(r, "n", false, false, 20).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+// ── Scratch folders (sessions without a project) ────────────────────────────
+
+/// Folder holding the working directories of sessions started without a project.
+pub fn scratch_root() -> std::path::PathBuf {
+    crate::chat::store::data_root().join("scratch")
+}
+
+/// Civil date (UTC) for a day count since 1970-01-01 (Howard Hinnant's algorithm).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// `2026-09-25-convert-these-pngs-to-webp`: a date and the first words of the prompt.
+fn scratch_name(hint: &str, now_ms: u64) -> String {
+    let (year, month, day) = civil_from_days((now_ms / 86_400_000) as i64);
+    let words: Vec<String> = hint
+        .split_whitespace()
+        .map(|w| w.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase())
+        .filter(|w| !w.is_empty())
+        .take(6)
+        .collect();
+    let slug = if words.is_empty() { "scratch".to_string() } else { words.join("-") };
+    let slug: String = slug.chars().take(48).collect::<String>().trim_end_matches('-').to_string();
+    format!("{year:04}-{month:02}-{day:02}-{slug}")
+}
+
+/// Create a fresh folder under `scratch_root()` for a session with no project.
+pub fn create_scratch_dir(hint: &str) -> Result<String, String> {
+    let root = scratch_root();
+    std::fs::create_dir_all(&root).map_err(|e| format!("Could not create the scratch folder: {e}"))?;
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let dir = root.join(format!("{}-{}", scratch_name(hint, crate::chat::store::now_ms()), &id[..8]));
+    std::fs::create_dir(&dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+
+    #[test]
+    fn dates_and_names_follow_the_first_words_of_the_prompt() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
+        assert_eq!(civil_from_days(20_356), (2025, 9, 25));
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29), "leap day");
+        let ms = 20_356 * 86_400_000;
+        assert_eq!(scratch_name("Convert these PNGs to WebP, please! Thanks a lot", ms), "2025-09-25-convert-these-pngs-to-webp-please");
+        assert_eq!(scratch_name("   ", ms), "2025-09-25-scratch");
+        assert_eq!(scratch_name("日本語 only!!", ms), "2025-09-25-only");
+        assert!(scratch_name(&"abcdefghij ".repeat(20), ms).len() <= 10 + 1 + 48);
+    }
+
+    #[test]
+    fn scratch_folders_are_created_under_the_data_dir() {
+        let _env = crate::chat::store::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let data = std::env::temp_dir().join(format!("ff-scratch-{}", uuid::Uuid::new_v4()));
+        let previous = std::env::var_os("FLIPFLOPPER_DATA_DIR");
+        std::env::set_var("FLIPFLOPPER_DATA_DIR", &data);
+        let first = create_scratch_dir("Resize my screenshots").unwrap();
+        let second = create_scratch_dir("Resize my screenshots").unwrap();
+        assert_ne!(first, second, "each session gets its own folder");
+        assert!(std::path::Path::new(&first).is_dir() && first.starts_with(scratch_root().to_str().unwrap()));
+        assert!(first.contains("resize-my-screenshots"));
+        match previous { Some(value) => std::env::set_var("FLIPFLOPPER_DATA_DIR", value), None => std::env::remove_var("FLIPFLOPPER_DATA_DIR") }
+        let _ = std::fs::remove_dir_all(data);
     }
 }
 
@@ -2005,6 +2481,69 @@ mod create_project_tests {
         let disabled = servers.iter().find(|s| s.name == "disabled-srv").unwrap();
         assert!(!disabled.enabled);
 
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("flipflopper-{label}-{}-{id}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn repository_names_and_urls_are_checked() {
+        assert_eq!(repository_name("https://github.com/a/b.git").as_deref(), Some("b"));
+        assert_eq!(repository_name("git@github.com:owner/repo.git").as_deref(), Some("repo"));
+        assert_eq!(repository_name("https://host/team/My Repo/").as_deref(), Some("My-Repo"));
+        assert_eq!(repository_name("file:///tmp/some/repo").as_deref(), Some("repo"));
+        assert_eq!(repository_name("/tmp/local-repo").as_deref(), Some("local-repo"));
+        assert_eq!(repository_name("https://host/"), None);
+        assert_eq!(repository_name(""), None);
+
+        assert!(validate_clone_url("https://github.com/a/b").is_ok());
+        assert!(validate_clone_url("git@github.com:a/b.git").is_ok());
+        assert!(validate_clone_url("ssh://git@host/a/b").is_ok());
+        assert!(validate_clone_url("file:///tmp/x").is_ok());
+        assert!(validate_clone_url("/tmp/x").is_ok());
+        assert!(validate_clone_url("").is_err());
+        assert!(validate_clone_url("-oProxyCommand=evil").is_err());
+        assert!(validate_clone_url("github.com/a/b").is_err());
+    }
+
+    #[test]
+    fn repository_names_are_validated_for_publishing() {
+        for good in ["flipflopper", "my.repo_name-2", "A1"] { assert!(validate_repository_name(good).is_ok(), "{good}"); }
+        for bad in ["", "  ", "-repo", ".repo", "my repo", "repo/name", &"x".repeat(101)] {
+            assert!(validate_repository_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn cloning_a_local_repository_creates_a_project() {
+        let root = temp_dir("clone");
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        let source_path = source.to_str().unwrap();
+        crate::git::git(source_path, &["init"]).unwrap();
+        fs::write(source.join("README.md"), "hello\n").unwrap();
+        crate::git::git(source_path, &["add", "."]).unwrap();
+        crate::git::git(source_path, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"]).unwrap();
+        let destination = root.join("dest");
+        fs::create_dir_all(&destination).unwrap();
+
+        let info = clone_repository(source_path, destination.to_str().unwrap()).unwrap();
+        assert_eq!(info.name, "source");
+        assert!(info.is_git);
+        assert_eq!(fs::read_to_string(Path::new(&info.path).join("README.md")).unwrap(), "hello\n");
+        // A non-empty target is refused instead of being overwritten.
+        assert!(clone_repository(source_path, destination.to_str().unwrap()).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

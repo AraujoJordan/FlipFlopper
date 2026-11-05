@@ -1,19 +1,35 @@
 import {
-  Component, For, Show, batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount,
+  Component, For, Show, batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount, untrack,
 } from "solid-js";
 import {
-  agentTuning, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, sendQueuedNow, isRunning, splitMode, onCliSessionCreated,
+  agentTuning, isAcpAgent, askSideQuestion, clearFanOut, setScratchDraft, toggleFanOutAgent, forkSession, reviewPullRequest, activeView, nativeCommands, contextUsage, cancelTurn, chat, projectName, setComposer, setComposerAgent, setYolo, cycleMode, modeAvailable, permissionModeUpdating, sessionModePending, startNewSession, clearSession, submitPrompt, sendQueuedNow, isRunning, splitMode, onCliSessionCreated,
 } from "../../lib/chat";
+import { addSchedule, setSchedulesOpen } from "../../lib/schedule";
+import TaskStrip from "./TaskStrip";
+import { formatUsage, sessionUsage } from "../../lib/usage";
+import { discardStash, stashDraft, stashes, takeStash } from "../../lib/stash";
+import { draftFor, drafts as persistedDrafts, removeDraft, saveDraft } from "../../lib/drafts";
+import {
+  clearComposerContexts, composerContextsForDraft, contextToken, removeComposerContext,
+  resolveComposerContexts, restoreComposerContexts, addComposerContext, type ComposerContext,
+} from "../../lib/composerContexts";
+import { exportConversation } from "../../lib/exportTranscript";
+import { startTriageSession } from "../../lib/triage";
+import { projectScripts, runProjectScript } from "../../lib/scripts";
+import { clearPendingPromptLink, copyPromptLink, openPromptLink, setPromptLinkOpen } from "../../lib/promptLinks";
+import { clearGoal, pauseGoal, resumeGoal, sessionGoal, startGoal } from "../../lib/goals";
 import { AgentLogo, agentModelsError, agentModelsLoading, hydrateAgentModels, refreshAgentModels } from "../../lib/agentMeta";
-import { listMcpServers, listPromptSkills, openAttachment, searchPromptFiles, type FileEntry, type McpServerInfo, type PermissionMode, type PromptSkill } from "../../lib/ipc";
-import { openSide } from "../../lib/layout";
+import { addCustomModel, customModelsFor, mergeModelChoices } from "../../lib/customModels";
+import { listMcpServers, listPromptSkills, listPullRequests, openAttachment, searchPromptFiles, gitListBranches, type BranchInfo, type FileEntry, type McpServerInfo, type PermissionMode, type PromptSkill, type PrSummary } from "../../lib/ipc";import { openSide, toggleFocusView } from "../../lib/layout";
+import { followUpBehavior, richTextComposer, sendShortcut } from "../../lib/settings";
+import RichEditor, { type RichEditorHandle } from "./RichEditor";
 import { registerShortcutHandler, runAction } from "../../lib/shortcuts";
 import { effectiveRoot, setStore, store } from "../../lib/store";
 import { Menu, MenuDivider, MenuItem, MenuLabel, Presence, Spinner, animateElement, cancelMotion, startPromptLaunch, useValueMotion, useListMotion, usePresence, useSelectionMotion, toast } from "../ui";
 import { Icon, type IconName } from "../shell/Icon";
 import { getFileIcon } from "../../lib/fileIcons";
 import {
-  addPastedFiles, attachments, clearAttachments, pasteClipboardImage, pickAndAddFiles, removeAttachment,
+  addPastedFiles, addPastedText, shouldAttachPaste, attachments, captureSnapShot, clearAttachments, pasteClipboardImage, pickAndAddFiles, removeAttachment,
   setAttachments,
 } from "../../lib/attachments";
 import type { Attachment } from "../../lib/ipc";
@@ -63,17 +79,30 @@ const DEFAULT_CLAUDE_COMMANDS: { name: string; description: string; input?: { hi
 const draftKey = () => chat.activeId ?? "new";
 const drafts = new Map<string, string>();
 const attachmentDrafts = new Map<string, Attachment[]>();
+interface Ref { id: string; title: string }
+const refDrafts = new Map<string, Ref[]>();
+const MAX_REFS = 3;
 
 const HISTORY_MAX = 50;
-const history: string[] = [];
+/** Sent prompts by session (or the new-session draft), for ArrowUp recall. */
+const histories = new Map<string, string[]>();
+const historyFor = (key: string): string[] => {
+  let list = histories.get(key);
+  if (!list) { list = []; histories.set(key, list); }
+  return list;
+};
+/** Mirrors the agent's prompt size guard; the draft stays editable instead of being dropped. */
+const MAX_PROMPT_CHARS = 120_000;
 
-interface Token { kind: "file" | "slash"; start: number; end: number; query: string }
+interface Token { kind: "file" | "session" | "slash" | "pr"; start: number; end: number; query: string }
 
 function tokenAtCaret(text: string, caret: number): Token | null {
   let start = caret;
   while (start > 0 && !/\s/.test(text[start - 1])) start -= 1;
   const word = text.slice(start, caret);
+  if (word.startsWith("@#")) return { kind: "session", start, end: caret, query: word.slice(2) };
   if (word.startsWith("@")) return { kind: "file", start, end: caret, query: word.slice(1) };
+  if (word.startsWith("#")) return { kind: "pr", start, end: caret, query: word.slice(1) };
   if (word.startsWith("/") && !text.slice(0, start).trim()) {
     return { kind: "slash", start, end: caret, query: word.slice(1) };
   }
@@ -82,6 +111,7 @@ function tokenAtCaret(text: string, caret: number): Token | null {
 
 const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   let textarea: HTMLTextAreaElement | undefined;
+  let richEditor: RichEditorHandle | undefined;
   const [value, setValue] = createSignal("");
   const [submitting, setSubmitting] = createSignal(false);
   const [customModel, setCustomModel] = createSignal("");
@@ -95,6 +125,12 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   const [plusMenu, setPlusMenu] = createSignal(false);
   const [inspectorTab, setInspectorTab] = createSignal<"mcp" | "skills" | "commands" | null>(null);
   const [inspectorQuery, setInspectorQuery] = createSignal("");
+  // Declared after the signals the composer test fixture indexes by creation order.
+  const [refs, setRefs] = createSignal<Ref[]>([]);
+  const [stashMenu, setStashMenu] = createSignal(false);
+  let stashAnchor: HTMLButtonElement | undefined;
+  const [modelFilter, setModelFilter] = createSignal("");
+  let plainPaste = false;
   let plusAnchor: HTMLButtonElement | undefined;
   let agentAnchor: HTMLButtonElement | undefined;
   let modelAnchor: HTMLButtonElement | undefined;
@@ -104,6 +140,67 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   let sendingStatus: HTMLSpanElement | undefined;
   let inspectorSearchRef: HTMLInputElement | undefined;
   let draftMove: { from: string; to: string } | undefined;
+
+  const rich = () => richTextComposer();
+  const editorElement = (): HTMLElement | undefined => (rich() ? richEditor?.element() : textarea);
+  const focusEditor = () => { if (rich()) richEditor?.focus(); else textarea?.focus(); };
+  const caretPosition = () => (rich() ? richEditor?.selectionStart() ?? 0 : textarea?.selectionStart ?? 0);
+  const selectRange = (start: number, end = start) => {
+    if (rich()) richEditor?.setSelectionRange(start, end);
+    else textarea?.setSelectionRange(start, end);
+  };
+  const onEdited = (text: string, at: number) => {
+    setValue(text);
+    setCaret(at);
+    setDismissedKey(null);
+    setHistoryIndex(null);
+    for (const context of composerContextsForDraft()) {
+      if (!text.includes(contextToken(context))) removeComposerContext(context.id);
+    }
+    resize();
+  };
+
+  const contextIcon = (kind: ComposerContext["kind"]): IconName =>
+    kind === "pr" ? "merge" : kind === "terminal" ? "terminal" : kind === "review" ? "diff" : kind === "snapshot" ? "camera" : "pick";
+
+  function insertContextToken(token: string) {
+    const active = document.activeElement === editorElement();
+    const at = active ? caretPosition() : value().length;
+    const source = value();
+    const before = source.slice(0, at);
+    const after = source.slice(at);
+    const prefix = before && !/\s$/.test(before) ? " " : "";
+    const suffix = after && /^\s/.test(after) ? "" : " ";
+    const inserted = `${prefix}${token}${suffix}`;
+    setValue(before + inserted + after);
+    const next = before.length + inserted.length;
+    setCaret(next);
+    queueMicrotask(() => { focusEditor(); selectRange(next); resize(); });
+  }
+
+  function removeContext(context: ComposerContext) {
+    const token = contextToken(context);
+    removeComposerContext(context.id);
+    setValue((current) => current.replace(token, "").replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").trim());
+    queueMicrotask(() => { resize(); focusEditor(); });
+  }
+
+  // A context added from the preview, a PR, a terminal or a review appears in
+  // the editor at the caret as a short token; the chip row shows its label.
+  const knownContexts = new Set<string>();
+  createEffect(() => {
+    const list = composerContextsForDraft();
+    for (const context of list) {
+      if (knownContexts.has(context.id)) continue;
+      knownContexts.add(context.id);
+      const token = contextToken(context);
+      if (value().includes(token)) continue;
+      insertContextToken(token);
+    }
+    for (const id of [...knownContexts]) {
+      if (!list.some((context) => context.id === id)) knownContexts.delete(id);
+    }
+  });
 
   const running = () => (chat.activeId ? isRunning(chat.activeId) : false);
   const effectiveNativeCommands = createMemo(() => {
@@ -127,7 +224,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
 
   function closeInspector() {
     setInspectorTab(null);
-    queueMicrotask(() => textarea?.focus());
+    queueMicrotask(() => focusEditor());
   }
 
   // ── Drafts follow the session ──
@@ -138,12 +235,35 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     draftMove = { from: "new", to: id };
   }));
   let lastKey = draftKey();
+  const restoredDrafts = new Set<string>();
+  const persistCurrent = (key: string) => {
+    const text = value();
+    const files = attachments();
+    const refsNow = refs();
+    const contextsNow = composerContextsForDraft(key);
+    if (!text.trim() && files.length === 0 && refsNow.length === 0 && contextsNow.length === 0) { removeDraft(key); return; }
+    saveDraft({
+      key,
+      text,
+      attachments: files,
+      references: refsNow.map(({ id, title }) => ({ id, title })),
+      contexts: contextsNow,
+      project_path: chat.sessions.find((session) => session.id === key)?.project_path
+        ?? (key === "new" ? chat.draftProject ?? store.currentProject?.path ?? null : null),
+    });
+  };
   createEffect(on(() => chat.activeId, () => {
     drafts.set(lastKey, value());
     attachmentDrafts.set(lastKey, attachments());
+    refDrafts.set(lastKey, refs());
+    persistCurrent(lastKey);
     lastKey = draftKey();
-    setValue(drafts.get(lastKey) ?? "");
-    setAttachments(attachmentDrafts.get(lastKey) ?? []);
+    const saved = untrack(() => draftFor(lastKey));
+    restoreComposerContexts(lastKey, saved?.contexts ?? []);
+    setValue(drafts.get(lastKey) ?? saved?.text ?? "");
+    setRefs(refDrafts.get(lastKey) ?? saved?.references ?? []);
+    setAttachments(attachmentDrafts.get(lastKey) ?? saved?.attachments ?? []);
+    setHistoryIndex(null);
     if (draftMove?.to === lastKey) {
       drafts.delete(draftMove.from);
       attachmentDrafts.delete(draftMove.from);
@@ -151,6 +271,63 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     }
     resize();
   }, { defer: true }));
+
+  // Restore a persisted draft once the preference store has hydrated. Only the
+  // first visit to a key restores, so clearing the composer stays empty.
+  createEffect(() => {
+    const list = persistedDrafts();
+    const key = draftKey();
+    if (restoredDrafts.has(key)) return;
+    if (value().trim() || attachments().length || refs().length) { restoredDrafts.add(key); return; }
+    const saved = list.find((draft) => draft.key === key);
+    if (!saved) return;
+    restoredDrafts.add(key);
+    batch(() => {
+      restoreComposerContexts(key, saved.contexts ?? []);
+      setValue(saved.text);
+      setRefs(saved.references);
+      setAttachments(saved.attachments);
+    });
+    queueMicrotask(resize);
+  });
+
+  // Debounced persistence: typing and attachments survive switching sessions.
+  let draftSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(() => {
+    const key = draftKey();
+    const text = value();
+    const files = attachments();
+    const refsNow = refs();
+    const contextsNow = composerContextsForDraft(key);
+    const projectPath = chat.draftProject ?? store.currentProject?.path ?? null;
+    void projectPath;
+    clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(() => {
+      if (!text.trim() && files.length === 0 && refsNow.length === 0 && contextsNow.length === 0) { removeDraft(key); return; }
+      saveDraft({
+        key,
+        text,
+        attachments: files,
+        references: refsNow.map(({ id, title }) => ({ id, title })),
+        contexts: contextsNow,
+        project_path: chat.sessions.find((session) => session.id === key)?.project_path
+          ?? (key === "new" ? projectPath : null),
+      });
+    }, 400);
+  });
+  onCleanup(() => clearTimeout(draftSaveTimer));
+
+  onMount(() => {
+    const discard = (event: Event) => {
+      const key = (event as CustomEvent<string>).detail;
+      if (key !== draftKey()) return;
+      clearComposerContexts(key);
+      batch(() => { setValue(""); setRefs([]); clearAttachments(); setCaret(0); });
+      queueMicrotask(resize);
+    };
+    window.addEventListener("flipflopper:draft-discarded", discard);
+    onCleanup(() => window.removeEventListener("flipflopper:draft-discarded", discard));
+  });
 
   // ── Keep the selected agent usable ──
   createEffect(() => {
@@ -169,19 +346,45 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     if (!seed) return;
     setStore("pendingPromptSeed", null);
     setValue((v) => (v.trim() ? `${v.trimEnd()}\n${seed.text}` : seed.text));
-    queueMicrotask(() => { resize(); textarea?.focus(); });
+    queueMicrotask(() => { resize(); focusEditor(); });
   });
 
   onMount(() => {
-    const offFocus = registerShortcutHandler("focus-prompt", () => textarea?.focus());
+    const offFocus = registerShortcutHandler("focus-prompt", () => focusEditor());
     const offMcp = registerShortcutHandler("open-mcp", (q) => openInspector("mcp", q ?? ""));
     const offSkills = registerShortcutHandler("open-skills", (q) => openInspector("skills", q ?? ""));
-    onCleanup(() => { offFocus(); offMcp(); offSkills(); });
-    textarea?.focus();
+    const offStash = registerShortcutHandler("stash-prompt", () => stashOrRestore());
+    onCleanup(() => { offFocus(); offMcp(); offSkills(); offStash(); });
+    queueMicrotask(focusEditor);
   });
 
+  /** ⌘S: park the draft; with an empty composer, bring the newest stash back (a menu when there are several). */
+  function stashOrRestore() {
+    if (value().trim() || attachments().length > 0) {
+      if (stashDraft(value(), attachments())) {
+        batch(() => { setValue(""); clearAttachments(); setRefs([]); setCaret(0); });
+        drafts.delete(draftKey());
+        attachmentDrafts.delete(draftKey());
+        removeDraft(draftKey());
+        clearComposerContexts(draftKey());
+        queueMicrotask(resize);
+        toast(`Prompt stashed. ${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘S" : "Ctrl+S"} on an empty composer brings it back.`, "info");
+      }
+      return;
+    }
+    if (stashes().length > 1) { setStashMenu(true); return; }
+    restoreStash(stashes()[0]?.id);
+  }
+  function restoreStash(id?: string) {
+    const entry = takeStash(id);
+    if (!entry) { toast("Nothing is stashed.", "info"); return; }
+    setStashMenu(false);
+    batch(() => { setValue(entry.text); setAttachments(entry.attachments); });
+    queueMicrotask(() => { resize(); focusEditor(); selectRange(entry.text.length); });
+  }
+
   function resize() {
-    if (!textarea) return;
+    if (rich() || !textarea) return;
     const before = textarea.getBoundingClientRect().height;
     textarea.style.height = "auto";
     const max = 220;
@@ -202,6 +405,14 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
       return t?.kind === "file" && root ? { root, query: t.query } : null;
     },
     (k) => searchPromptFiles(k.root, k.query, 8).catch(() => [] as FileEntry[]),
+  );
+  const [pullRequests] = createResource(
+    () => {
+      const t = token();
+      const root = projectRoot();
+      return t?.kind === "pr" && root ? { root, query: t.query } : null;
+    },
+    (k) => listPullRequests(k.root, "all").catch(() => [] as PrSummary[]),
   );
   const resourceTrigger = () => {
     const root = projectRoot() ?? store.currentProject?.path ?? null;
@@ -280,18 +491,20 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
             return;
           }
           const u = contextUsage();
+          const total = formatUsage(sessionUsage(activeView()));
+          const context = u ? `Context usage: ${fmtTokens(u.used)} / ${fmtTokens(u.size)} tokens (${Math.round((u.used / Math.max(1, u.size)) * 100)}%)${u.cost != null ? ` · $${u.cost.toFixed(2)}` : ""}` : null;
           toast(
-            u
-              ? `Context usage: ${fmtTokens(u.used)} / ${fmtTokens(u.size)} tokens (${Math.round((u.used / Math.max(1, u.size)) * 100)}%)${u.cost != null ? ` · $${u.cost.toFixed(2)}` : ""}`
-              : "No context usage reported for this session yet.",
+            [context, total ? `Session total: ${total}` : null].filter(Boolean).join(" — ") || "No usage reported for this session yet.",
             "info",
           );
         },
       },
       { name: "review", detail: "Open the Changes pane", icon: "diff", badge: "App", aliases: ["changes", "diff", "status"], run: () => openSide("changes") },
       { name: "preview", detail: "Open the Preview pane", icon: "globe", badge: "App", run: () => openSide("preview") },
+      { name: "pulls", detail: "Browse GitHub pull requests for this project", icon: "merge", badge: "App", aliases: ["prs", "pull-requests"], run: () => openSide("pulls") },
       { name: "terminal", detail: "Open the terminal pane", icon: "terminal", badge: "App", aliases: ["shell", "bash"], run: () => openSide("terminal") },
       { name: "flow", detail: "Open the multi-agent Flow canvas", icon: "flow", badge: "App", run: () => openSide("flow") },
+      { name: "files", detail: "Browse the project's files (read-only)", icon: "folder", badge: "App", aliases: ["browse", "tree"], run: () => openSide("files") },
       { name: "explain", detail: "Open the Explain pane", icon: "document", badge: "App", run: () => openSide("explain") },
       { name: "plan", detail: "Switch to Plan mode", icon: "clipboard", badge: "Mode", run: () => setComposer({ mode: "plan" }) },
       { name: "ask", detail: "Switch to Ask mode", icon: "help", badge: "Mode", run: () => setComposer({ mode: "ask" }) },
@@ -322,6 +535,90 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           if (a) setComposer({ model: a === "default" ? null : a });
           else toggleModelMenu();
         },
+      },
+      {
+        name: "goal",
+        detail: "Keep working until a goal is done (/goal <text>, pause, resume, clear)",
+        hint: "[text|pause|resume|clear]",
+        icon: "fileCheck" as IconName,
+        badge: "App",
+        acceptsArgs: true,
+        run: (arg?: string) => {
+          const a = arg?.trim() ?? "";
+          const id = chat.activeId;
+          const current = sessionGoal(id);
+          if (!a) { toast(current ? `Goal (${current.status}): ${current.text}` : "No goal set. Use /goal <what to achieve>.", "info"); return; }
+          if (id && (a === "pause" || a === "resume" || a === "clear")) {
+            if (!current) { toast("No goal set for this session.", "info"); return; }
+            (a === "pause" ? pauseGoal : a === "resume" ? resumeGoal : clearGoal)(id);
+            return;
+          }
+          void startGoal(a, id);
+        },
+      },
+      {
+        name: "schedule",
+        detail: "Schedule a prompt (every 30m · daily 09:00 · weekdays 09:00 · once 14:30 · in 2h · add new for a fresh session each run)",
+        hint: "[new] every 30m <prompt>",
+        icon: "history",
+        badge: "App",
+        acceptsArgs: true,
+        run: (arg?: string) => {
+          const a = arg?.trim();
+          if (!a) { setSchedulesOpen(true); return; }
+          const id = chat.activeId;
+          const project = chat.sessions.find((s) => s.id === id)?.project_path ?? chat.draftProject ?? store.currentProject?.path;
+          const error = addSchedule({ session_id: id, project_path: project, agent_id: chat.composer.agentId }, a);
+          toast(error ?? "Scheduled. Prompts are delivered while FlipFlopper is open.", error ? "error" : "info");
+        },
+      },
+      {
+        name: "btw",
+        detail: "Ask about this conversation without adding to it (answered in a read-only branch)",
+        hint: "<question>",
+        icon: "help",
+        badge: "App",
+        aliases: ["side"],
+        acceptsArgs: true,
+        run: (arg?: string) => { void askSideQuestion(arg ?? ""); },
+      },
+      {
+        name: "focus",
+        detail: "Toggle final-answers-only view (hide thinking, tool rows and earlier text)",
+        icon: "list",
+        badge: "App",
+        aliases: ["final"],
+        run: () => toggleFocusView(),
+      },
+      {
+        name: "pr",
+        detail: "Review a pull request in a read-only worktree session",
+        hint: "<number|url>",
+        icon: "diff",
+        badge: "App",
+        aliases: ["pull-request"],
+        acceptsArgs: true,
+        run: (arg?: string) => {
+          const a = arg?.trim();
+          if (!a) { toast("Usage: /pr <number or pull request URL>", "info"); return; }
+          void reviewPullRequest(a);
+        },
+      },
+      {
+        name: "fork",
+        detail: "Branch this conversation into a new session",
+        icon: "layers",
+        badge: "App",
+        aliases: ["branch"],
+        run: () => { if (chat.activeId) void forkSession(chat.activeId); else toast("Open a conversation to branch it.", "info"); },
+      },
+      { name: "export", detail: "Export this conversation as Markdown", icon: "download", badge: "App", run: () => void exportConversation(chat.activeId) },
+      { name: "triage", detail: "Start a project-less conversation with this machine's diagnostics", icon: "help", badge: "App", run: () => void startTriageSession() },
+      { name: "snapshot", detail: "Capture a window and attach it to this message", icon: "camera", badge: "App", aliases: ["screenshot", "capture"], run: () => void captureSnapShot() },
+      {
+        name: "link", detail: "Open a shared prompt or thread link (or paste one without a command)", hint: "[link]",
+        icon: "link", badge: "App", aliases: ["prompt-link", "thread-link"], acceptsArgs: true,
+        run: (arg?: string) => { const link = arg?.trim(); if (link) void openPromptLink(link).catch((error) => toast(String(error), "error")); else setPromptLinkOpen(true); },
       },
       { name: "new", detail: "Start a new session", icon: "plus", badge: "App", run: () => startNewSession() },
       { name: "clear", detail: "Clear the conversation and start with fresh context", icon: "refresh", badge: "App", aliases: ["reset"], run: () => clearConversation() },
@@ -366,6 +663,24 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   const items = createMemo<MenuEntry[]>(() => {
     const t = token();
     if (!t || dismissedKey() === tokenKey()) return [];
+    if (t.kind === "session") {
+      const q = t.query.trim().toLowerCase();
+      return chat.sessions
+        .filter((s) => !s.archived && s.id !== chat.activeId && !refs().some((r) => r.id === s.id)
+          && (!q || s.title.toLowerCase().includes(q) || projectName(s.project_path).toLowerCase().includes(q)))
+        .slice(0, 8)
+        .map((s): MenuEntry => ({
+          label: s.title || "New session",
+          detail: projectName(s.project_path),
+          icon: "message",
+          badge: "Conversation",
+          apply: () => {
+            if (refs().length >= MAX_REFS) { toast(`You can reference up to ${MAX_REFS} conversations per message.`, "info"); return; }
+            setRefs((r) => [...r, { id: s.id, title: s.title || "New session" }]);
+            replaceToken("");
+          },
+        }));
+    }
     if (t.kind === "file") {
       return (files() ?? []).map((f) => ({
         label: f.name.split("/").filter(Boolean).pop() ?? f.name,
@@ -373,6 +688,31 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
         icon: f.is_dir ? "folder" : getFileIcon(f.name),
         apply: () => replaceToken(`@${f.name}${f.is_dir ? "/" : " "}`),
       }));
+    }
+    if (t.kind === "pr") {
+      const query = t.query.trim().replace(/^#/, "").toLowerCase();
+      return (pullRequests() ?? [])
+        .filter((pr) => !query || String(pr.number).includes(query) || pr.title.toLowerCase().includes(query)
+          || pr.head_ref_name.toLowerCase().includes(query) || pr.base_ref_name.toLowerCase().includes(query)
+          || pr.author.toLowerCase().includes(query))
+        .slice(0, 8)
+        .map((pr): MenuEntry => {
+          const state = pr.state === "MERGED" ? "Merged" : pr.state === "CLOSED" ? "Closed" : pr.is_draft ? "Draft" : "Open";
+          return {
+            label: `#${pr.number} ${pr.title}`,
+            detail: `${pr.head_ref_name || "?"} → ${pr.base_ref_name || "?"} · ${state}`,
+            icon: "merge",
+            badge: "Pull request",
+            apply: () => {
+              addComposerContext({
+                kind: "pr",
+                label: `PR #${pr.number} · ${pr.title}`,
+                detail: [`Pull request #${pr.number}: ${pr.title}`, pr.url, `State: ${state}`, `Branch: ${pr.head_ref_name} → ${pr.base_ref_name}`, `Author: ${pr.author}`].join("\n"),
+              });
+              replaceToken("");
+            },
+          };
+        });
     }
     const q = t.query.trim().toLowerCase();
     const score = (c: SlashItem): number => {
@@ -428,26 +768,26 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     setValue(next);
     const pos = t.start + text.length;
     queueMicrotask(() => {
-      textarea?.setSelectionRange(pos, pos);
+      selectRange(pos);
       setCaret(pos);
       resize();
-      textarea?.focus();
+      focusEditor();
     });
   }
 
   function insertMentionTrigger() {
-    const pos = textarea?.selectionStart ?? value().length;
+    const pos = caretPosition();
     const before = value().slice(0, pos);
     const sep = before && !/\s$/.test(before) ? " " : "";
     setValue(before + sep + "@" + value().slice(pos));
     const np = pos + sep.length + 1;
-    queueMicrotask(() => { textarea?.focus(); textarea?.setSelectionRange(np, np); setCaret(np); resize(); });
+    queueMicrotask(() => { focusEditor(); selectRange(np); setCaret(np); resize(); });
   }
 
   function insertSlashTrigger() {
     setValue("/");
     setDismissedKey(null);
-    queueMicrotask(() => { textarea?.focus(); textarea?.setSelectionRange(1, 1); setCaret(1); resize(); });
+    queueMicrotask(() => { focusEditor(); selectRange(1); setCaret(1); resize(); });
   }
 
   function insertCommandPrompt(promptText: string) {
@@ -456,8 +796,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     setDismissedKey(null);
     const pos = promptText.length;
     queueMicrotask(() => {
-      textarea?.focus();
-      textarea?.setSelectionRange(pos, pos);
+      focusEditor();
+      selectRange(pos);
       setCaret(pos);
       resize();
     });
@@ -467,6 +807,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     batch(() => { setValue(""); clearAttachments(); setCaret(0); setHistoryIndex(null); });
     drafts.delete(draftKey());
     attachmentDrafts.delete(draftKey());
+    removeDraft(draftKey());
+    clearComposerContexts(draftKey());
     queueMicrotask(resize);
     if (chat.activeId) void clearSession(chat.activeId);
   }
@@ -488,11 +830,22 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   }
 
   // ── Sending ──
-  async function send(force = false) {
+  async function send(force = false, background = false) {
     if (submitting() || permissionModeUpdating()) return;
     const original = value();
     const text = original.trim();
+    if (original.length > MAX_PROMPT_CHARS) {
+      toast(`This message is ${original.length.toLocaleString()} characters. Keep it under ${MAX_PROMPT_CHARS.toLocaleString()} or move the long part into an attachment.`, "error");
+      return;
+    }
     const files = [...attachments()];
+    const sentRefs = refs();
+    const sentContexts = composerContextsForDraft();
+    const resolved = resolveComposerContexts(text, sentContexts);
+    if (resolved.prompt.length > MAX_PROMPT_CHARS) {
+      toast(`This message is ${resolved.prompt.length.toLocaleString()} characters with its references. Keep it under ${MAX_PROMPT_CHARS.toLocaleString()}.`, "error");
+      return;
+    }
     // A typed `/command` behaves like picking it from the menu.
     const typed = files.length === 0 ? matchTypedSlashCommand(text) : undefined;
     if (typed?.item.run) {
@@ -501,12 +854,12 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
       typed.item.run(typed.arg);
       return;
     }
-    if (!text && files.length === 0) return;
+    if (!resolved.clean && files.length === 0 && sentContexts.length === 0) return;
     const launch = startPromptLaunch({
-      source: textarea,
+      source: editorElement(),
       box: composerBox,
       sendBtn: sendControl,
-      text: text || `${files.length} attachment${files.length === 1 ? "" : "s"}`,
+      text: resolved.clean || (files.length ? `${files.length} attachment${files.length === 1 ? "" : "s"}` : `${sentContexts.length} context reference${sentContexts.length === 1 ? "" : "s"}`),
       attachmentsCount: files.length,
       // YOLO owns the amber accent; the launch flight only needs one visual token.
       mode: chat.composer.yolo ? "full" : chat.composer.mode,
@@ -517,6 +870,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     batch(() => {
       setSubmitting(true);
       setValue("");
+      setRefs([]);
       clearAttachments();
       setCaret(0);
       setHistoryIndex(null);
@@ -524,6 +878,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
     });
     drafts.delete(source);
     attachmentDrafts.delete(source);
+    removeDraft(source);
     queueMicrotask(resize);
     let ok = false;
     try {
@@ -537,16 +892,21 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           draftMove = { from: source, to: id };
         }
       };
-      ok = await (force ? submitPrompt(text, files, onCreated, true) : submitPrompt(text, files, onCreated));
-      if (ok && text) {
-        history.unshift(text);
-        history.length = Math.min(history.length, HISTORY_MAX);
+      ok = await submitPrompt(resolved.prompt, files, background ? undefined : onCreated, force, sentRefs.map((r) => r.id), background);
+      if (ok) {
+        clearComposerContexts(source);
+        if (resolved.clean) {
+          const list = historyFor(target);
+          list.unshift(resolved.clean);
+          list.length = Math.min(list.length, HISTORY_MAX);
+        }
+        void clearPendingPromptLink();
       }
     } catch (error) {
       toast(`Couldn't send message: ${String(error)}`, "error");
     } finally {
       if (!ok) {
-        launch.rollback(textarea);
+        launch.rollback(editorElement());
         // Startup can fail after creating (or removing) a native session.
         const removed = target !== source && !chat.sessions.some((s) => s.id === target) ? target : undefined;
         const movedText = removed ? drafts.get(removed) ?? "" : "";
@@ -563,6 +923,8 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
         const restoredFiles = [...new Map([...files, ...nextFiles].map((a) => [a.path, a])).values()];
         drafts.set(target, restored);
         attachmentDrafts.set(target, restoredFiles);
+        if (visible) setRefs((now) => [...sentRefs, ...now.filter((r) => !sentRefs.some((s) => s.id === r.id))]);
+        else refDrafts.set(target, sentRefs);
         if (visible) {
           batch(() => { setValue(restored); setAttachments(restoredFiles); });
           queueMicrotask(resize);
@@ -574,6 +936,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
 
   function onKeyDown(e: KeyboardEvent) {
     if (e.isComposing) return;
+    plainPaste = (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "v";
 
     if (menuOpen()) {
       if (e.key === "ArrowDown") { e.preventDefault(); setSelected((i) => (i + 1) % items().length); return; }
@@ -582,33 +945,67 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
       if (e.key === "Escape") { e.preventDefault(); setDismissedKey(tokenKey()); return; }
     }
 
+    // ArrowUp in an empty composer recalls the thread's last sent prompt; ArrowDown walks forward.
+    // Advance only while the draft is empty or still an unedited recalled prompt.
+    if (!e.altKey && !e.shiftKey && !menuOpen() && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      const list = historyFor(chat.activeId ?? "new");
+      if (e.key === "ArrowUp" && (historyIndex() !== null || !value().trim())) {
+        if (list.length > 0) {
+          e.preventDefault();
+          const next = Math.min((historyIndex() ?? -1) + 1, list.length - 1);
+          setHistoryIndex(next);
+          setValue(list[next]);
+          queueMicrotask(() => { resize(); selectRange(0); });
+        }
+        return;
+      }
+      if (e.key === "ArrowDown" && historyIndex() !== null) {
+        e.preventDefault();
+        const next = historyIndex()! - 1;
+        if (next < 0) { setHistoryIndex(null); setValue(""); } else { setHistoryIndex(next); setValue(list[next]); }
+        queueMicrotask(() => { resize(); selectRange(list[next]?.length ?? 0); });
+        return;
+      }
+    }
+
     if (e.key === "Tab" && e.shiftKey) {
       e.preventDefault();
       if (!permissionModeUpdating()) cycleMode(1);
       return;
     }
 
+    // Follow-up behavior ("Chat" settings): the configured action is the primary one, and the
+    // opposite shortcut performs the other. Cmd/Ctrl+Enter also starts the new-session task in
+    // the background, and sends the first queued message when the draft is empty.
+    const primarySteers = () => followUpBehavior() === "steer";
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       if (!hasText() && chat.activeId && (chat.queued[chat.activeId]?.length ?? 0) > 0) {
         void sendQueuedNow(chat.activeId, 0);
+      } else if (!chat.activeId && hasText() && (sendShortcut() === "enter" || e.altKey)) {
+        // New-session screen: start the task in the background and stay on a fresh draft.
+        void send(false, true);
       } else {
-        void send(true);
+        const opposite = sendShortcut() === "enter" || e.shiftKey;
+        void send(opposite ? !primarySteers() : primarySteers());
       }
       return;
     }
 
     if (e.key === "Enter" && !e.shiftKey) {
+      // When ⌘/Ctrl+Enter is the send shortcut, plain Enter inserts a newline.
+      if (sendShortcut() === "mod+enter") return;
       e.preventDefault();
-      void send();
+      void send(primarySteers());
       return;
     }
 
     if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
+      const list = historyFor(chat.activeId ?? "new");
       const cur = historyIndex();
-      const next = e.key === "ArrowUp" ? Math.min((cur ?? -1) + 1, history.length - 1) : (cur ?? 0) - 1;
-      if (next < 0) { setHistoryIndex(null); setValue(""); } else if (history[next] !== undefined) { setHistoryIndex(next); setValue(history[next]); }
+      const next = e.key === "ArrowUp" ? Math.min((cur ?? -1) + 1, list.length - 1) : (cur ?? 0) - 1;
+      if (next < 0) { setHistoryIndex(null); setValue(""); } else if (list[next] !== undefined) { setHistoryIndex(next); setValue(list[next]); }
       queueMicrotask(resize);
       return;
     }
@@ -621,9 +1018,10 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
 
   // ── Pickers ──
   const chatAgents = () => store.agents.filter((a) => a.chat_supported);
+  const canFanOut = () => !chat.activeId && !chat.scratchDraft && !!store.currentProject?.is_git;
   const currentAgent = () => store.agents.find((a) => a.id === chat.composer.agentId);
   const tuning = () => agentTuning(chat.composer.agentId);
-  const native = () => chat.composer.agentId === "claude" || chat.composer.agentId === "cursor";
+  const native = () => isAcpAgent(chat.composer.agentId);
   const modelLabel = () => {
     const m = chat.composer.model;
     if (!m) return null;
@@ -647,8 +1045,49 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
 
   const session = () => chat.sessions.find((s) => s.id === chat.activeId);
   const canWorktree = () => !!store.currentProject?.is_git;
+  const [baseBranches, setBaseBranches] = createSignal<BranchInfo[]>([]);
+  createEffect(on(() => [canWorktree(), store.currentProject?.path, chat.activeId] as const, ([git, path]) => {
+    if (!git || !path || chat.activeId) { setBaseBranches([]); return; }
+    let cancelled = false;
+    void gitListBranches(path).then((list) => {
+      if (cancelled) return;
+      setBaseBranches(list);
+      const selected = chat.composer.worktreeBase;
+      if (selected && !list.some((branch) => (branch.remote_ref ?? branch.name) === selected)) setComposer({ worktreeBase: null });
+    }).catch(() => { if (!cancelled) setBaseBranches([]); });
+    onCleanup(() => { cancelled = true; });
+  }));
 
   const hasText = () => value().trim().length > 0 || attachments().length > 0;
+  const promptLength = () => value().length;
+  const promptTooLong = () => promptLength() > MAX_PROMPT_CHARS;
+  const editorPlaceholder = () =>
+    submitting()
+      ? "Write a follow-up while sending…"
+      : running()
+        ? (chat.activeId && (chat.queued[chat.activeId]?.length ?? 0) > 0
+          ? "Queue a follow-up, or Ctrl+Enter to send queued now…"
+          : "Queue a follow-up, or Ctrl+Enter to steer…")
+        : chat.activeId
+          ? "Reply, @ for files, @# for conversations, or / for commands…"
+          : "Describe a task, @ to mention a file, or / for commands…";
+
+  function handlePaste(event: ClipboardEvent) {
+    const files = [...(event.clipboardData?.files ?? [])];
+    if (files.some((file) => file.type.startsWith("image/"))) {
+      event.preventDefault();
+      void addPastedFiles(files);
+      return;
+    }
+    // Very large text becomes a file so it doesn't flood the prompt; ⌘/Ctrl+Shift+V pastes it inline.
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    const inline = plainPaste;
+    plainPaste = false;
+    if (!inline && shouldAttachPaste(text)) {
+      event.preventDefault();
+      void addPastedText(text);
+    }
+  }
   const projectLabel = () => {
     const path = session()?.project_path ?? chat.draftProject ?? store.currentProject?.path;
     return path ? projectName(path) : "Choose a project";
@@ -666,7 +1105,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   createEffect(on(submitting, (pending) => {
     if (pending) queueMicrotask(() => void animateElement(sendingStatus, [{ opacity: 0, transform: "translateX(4px)" }, { opacity: 1, transform: "none" }], 160));
   }));
-  onCleanup(() => { cancelMotion(composerBox); cancelMotion(sendControl); cancelMotion(sendingStatus); cancelMotion(textarea); });
+  onCleanup(() => { cancelMotion(composerBox); cancelMotion(sendControl); cancelMotion(sendingStatus); cancelMotion(editorElement()); });
   useValueMotion(() => agentAnchor, () => chat.composer.agentId, true);
   useValueMotion(() => modeAnchor, () => `${chat.composer.mode}:${chat.composer.yolo}`);
   useValueMotion(() => modelAnchor, modelSummary);
@@ -674,7 +1113,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
   useListMotion(() => composerElement, () => attachments().map((a) => a.path).join("|"), ".attach-chip");
   useSelectionMotion(() => suggestions, selected, ".mention-item-active");
   return (
-    <div ref={composerElement} class="composer">
+    <div ref={composerElement} class="composer" data-focus-area="composer">
       <div class="composer-context" aria-label="Working location">
         <Show
           when={!chat.activeId}
@@ -698,6 +1137,18 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
             <Icon name={chat.composer.worktree ? "gitBranch" : "folder"} size={13} />
             {chat.composer.worktree ? "Worktree" : "Local"}
           </button>
+          <Show when={!chat.activeId && chat.composer.worktree && canWorktree()}>
+            <select
+              class="composer-base-branch"
+              aria-label="Worktree base branch"
+              title="Branch or remote ref the new worktree starts from"
+              value={chat.composer.worktreeBase ?? ""}
+              onChange={(event) => setComposer({ worktreeBase: event.currentTarget.value || null })}
+            >
+              <option value="">From {store.currentBranch || "current branch"}</option>
+              <For each={baseBranches()}>{(branch) => <option value={branch.remote_ref ?? branch.name}>{branch.name}{branch.is_remote ? " · remote" : ""}</option>}</For>
+            </select>
+          </Show>
         </Show>
 
         <Show
@@ -712,7 +1163,31 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
             <Icon name="folder" size={13} /> <span class="picker-label">{projectLabel()}</span> <Icon name="chevronDown" size={11} />
           </button>
         </Show>
+        <Show when={!chat.activeId}>
+          <button type="button" class="pill" classList={{ "pill-on": chat.scratchDraft }} aria-pressed={chat.scratchDraft}
+            title="Start without a project: the agent works in its own scratch folder. Turn it into a project later from the session menu."
+            onClick={() => { setScratchDraft(!chat.scratchDraft); if (!chat.scratchDraft) clearFanOut(); }}>
+            <Icon name="document" size={13} /> No project
+          </button>
+        </Show>
+        <Show when={stashes().length > 0}>
+          <button ref={stashAnchor} type="button" class="pill" onClick={() => setStashMenu((v) => !v)} title="Stashed prompts" aria-haspopup="menu" aria-expanded={stashMenu()}>
+            <Icon name="archive" size={13} /> Stash {stashes().length}
+          </button>
+          <Menu open={stashMenu()} onClose={() => setStashMenu(false)} anchorRef={stashAnchor} width={320}>
+            <MenuLabel>Stashed prompts</MenuLabel>
+            <For each={stashes()}>
+              {(entry) => (
+                <MenuItem onSelect={() => restoreStash(entry.id)}>
+                  <span style={{ flex: 1, overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>{entry.text.trim().split("\n")[0] || `${entry.attachments.length} attachment${entry.attachments.length === 1 ? "" : "s"}`}</span>
+                  <button type="button" class="icon-btn" aria-label="Discard stash" title="Discard" onClick={(ev) => { ev.stopPropagation(); discardStash(entry.id); }}><Icon name="x" size={12} /></button>
+                </MenuItem>
+              )}
+            </For>
+          </Menu>
+        </Show>
       </div>
+      <TaskStrip />
       <div ref={composerBox} class="composer-box" data-mode={modeTint()} classList={{ "composer-box-full": chat.composer.yolo }}>
         <Show when={suggestionsPresent()}>
           <div ref={suggestions} class="mention-menu" role="listbox">
@@ -738,6 +1213,33 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           </div>
         </Show>
 
+        <Show when={composerContextsForDraft().length > 0}>
+          <div class="attach-row" aria-label="Referenced context">
+            <For each={composerContextsForDraft()}>
+              {(context) => (
+                <button type="button" class="pill context-chip" data-kind={context.kind} title={context.label}
+                  onClick={() => removeContext(context)} aria-label={`Remove context: ${context.label}`}>
+                  <Icon name={contextIcon(context.kind)} size={12} />
+                  <span class="picker-label">{context.label}</span>
+                  <Icon name="x" size={11} />
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+
+        <Show when={refs().length > 0}>
+          <div class="attach-row" aria-label="Referenced conversations">
+            <For each={refs()}>
+              {(r) => (
+                <button type="button" class="pill" title="Remove this conversation reference" onClick={() => setRefs((all) => all.filter((x) => x.id !== r.id))}>
+                  <Icon name="message" size={12} /> <span class="picker-label">{r.title}</span> <Icon name="x" size={11} />
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+
         <Show when={attachments().length > 0}>
           <div class="attach-row">
             <For each={attachments()}>
@@ -746,43 +1248,46 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
           </div>
         </Show>
 
-        <textarea
-          ref={textarea}
-          class="composer-input"
-          rows={1}
-          aria-label="Message"
-          placeholder={
-            submitting()
-              ? "Write a follow-up while sending…"
-              : running()
-              ? (chat.activeId && (chat.queued[chat.activeId]?.length ?? 0) > 0
-                ? "Queue a follow-up, or Ctrl+Enter to send queued now…"
-                : "Queue a follow-up, or Ctrl+Enter to steer…")
-              : chat.activeId
-                ? "Reply, @ to mention a file, or / for commands…"
-                : "Describe a task, @ to mention a file, or / for commands…"
+        <Show
+          when={richTextComposer()}
+          fallback={
+            <textarea
+              ref={textarea}
+              class="composer-input"
+              rows={1}
+              aria-label="Message"
+              placeholder={editorPlaceholder()}
+              value={value()}
+              spellcheck={false}
+              onInput={(event) => onEdited(event.currentTarget.value, event.currentTarget.selectionStart)}
+              onKeyDown={onKeyDown}
+              onKeyUp={(event) => setCaret(event.currentTarget.selectionStart)}
+              onClick={(event) => setCaret(event.currentTarget.selectionStart)}
+              onBlur={() => setDismissedKey(tokenKey())}
+              onPaste={handlePaste}
+            />
           }
-          value={value()}
-          spellcheck={false}
-          onInput={(e) => {
-            setValue(e.currentTarget.value);
-            setCaret(e.currentTarget.selectionStart);
-            setDismissedKey(null);
-            setHistoryIndex(null);
-            resize();
-          }}
-          onKeyDown={onKeyDown}
-          onKeyUp={(e) => setCaret(e.currentTarget.selectionStart)}
-          onClick={(e) => setCaret(e.currentTarget.selectionStart)}
-          onBlur={() => setDismissedKey(tokenKey())}
-          onPaste={(e) => {
-            const files = [...(e.clipboardData?.files ?? [])];
-            if (files.some((f) => f.type.startsWith("image/"))) {
-              e.preventDefault();
-              void addPastedFiles(files);
-            }
-          }}
-        />
+        >
+          <RichEditor
+            value={value()}
+            placeholder={editorPlaceholder()}
+            ariaLabel="Message"
+            onReady={(handle) => { richEditor = handle; }}
+            onInputText={onEdited}
+            onSelection={setCaret}
+            onKeyDown={onKeyDown}
+            onPaste={handlePaste}
+            onBlur={() => setDismissedKey(tokenKey())}
+          />
+        </Show>
+
+        <Show when={promptLength() > MAX_PROMPT_CHARS * 0.8}>
+          <div class="composer-limit" data-over={promptTooLong()} role="status">
+            <Icon name={promptTooLong() ? "alert" : "document"} size={12} />
+            <span>{promptLength().toLocaleString()} / {MAX_PROMPT_CHARS.toLocaleString()} characters</span>
+            <Show when={promptTooLong()}><span>Move long text into an attachment to send.</span></Show>
+          </div>
+        </Show>
 
         <div class="composer-bar">
           <div class="composer-bar-left">
@@ -803,6 +1308,9 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
               <MenuItem onSelect={() => { setPlusMenu(false); void pasteClipboardImage(); }}>
                 <Icon name="eye" size={15} /> <span style={{ flex: 1 }}>Paste image from clipboard</span>
               </MenuItem>
+              <MenuItem onSelect={() => { setPlusMenu(false); void captureSnapShot(); }}>
+                <Icon name="camera" size={15} /> <span style={{ flex: 1 }}>Capture a window…</span>
+              </MenuItem>
               <MenuItem onSelect={() => { setPlusMenu(false); insertMentionTrigger(); }}>
                 <Icon name="at" size={15} /> <span style={{ flex: 1 }}>Mention a file (@)</span>
               </MenuItem>
@@ -816,6 +1324,23 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
               <MenuItem onSelect={() => { setPlusMenu(false); openInspector("mcp"); }}>
                 <Icon name="layers" size={15} /> <span style={{ flex: 1 }}>Inspect MCP servers…</span>
               </MenuItem>
+              <Show when={value().trim().length > 0}>
+                <MenuDivider />
+                <MenuItem onSelect={() => { setPlusMenu(false); void copyPromptLink({ prompt: value(), provider: chat.composer.agentId, model: chat.composer.model }); }}>
+                  <Icon name="link" size={15} /> <span style={{ flex: 1 }}>Copy prompt link</span>
+                </MenuItem>
+              </Show>
+              <Show when={projectScripts(store.currentProject?.path ?? effectiveRoot()).length > 0}>
+                <MenuDivider />
+                <MenuLabel>Project scripts</MenuLabel>
+                <For each={projectScripts(store.currentProject?.path ?? effectiveRoot())}>
+                  {(script) => (
+                    <MenuItem onSelect={() => { setPlusMenu(false); void runProjectScript(script); }}>
+                      <Icon name="play" size={15} /> <span style={{ flex: 1 }}>{script.name}</span>
+                    </MenuItem>
+                  )}
+                </For>
+              </Show>
             </Menu>
             <button
               ref={modeAnchor}
@@ -897,6 +1422,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
             <button ref={agentAnchor} type="button" class="pill composer-agent" onClick={() => setAgentMenu((v) => !v)} title="Choose agent" aria-label={`Agent: ${currentAgent()?.name ?? chat.composer.agentId}`} aria-haspopup="menu" aria-expanded={agentMenu()}>
               <AgentLogo agentId={chat.composer.agentId} icon={currentAgent()?.icon} size={16} radius={4} />
               <span class="picker-label">{currentAgent()?.name ?? chat.composer.agentId}</span>
+              <Show when={chat.fanOut.length > 0}><span class="mention-badge" title={`Also starts ${chat.fanOut.length} more agent${chat.fanOut.length === 1 ? "" : "s"}`}>+{chat.fanOut.length}</span></Show>
               <Icon name="chevronDown" size={11} />
             </button>
             <Menu open={agentMenu()} onClose={() => setAgentMenu(false)} anchorRef={agentAnchor} align="right" width={300}>
@@ -905,26 +1431,37 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                 {(a) => (
                   <MenuItem
                     disabled={!a.installed}
-                    onSelect={() => { setComposerAgent(a.id); setAgentMenu(false); setCustomModel(""); }}
+                    onSelect={(event) => {
+                      // Shift-click adds more agents to the same send (new Git sessions only); each gets its own worktree.
+                      if (event?.shiftKey && canFanOut()) { toggleFanOutAgent(a.id); return; }
+                      clearFanOut();
+                      setComposerAgent(a.id); setAgentMenu(false); setCustomModel("");
+                    }}
                   >
                     <AgentLogo agentId={a.id} icon={a.icon} size={20} radius={5} />
                     <span style={{ flex: 1 }}>{a.name}</span>
                     <Show when={!a.installed}><span style={{ "font-size": "11px", color: "var(--fg-subtle)" }}>Not installed</span></Show>
-                    <Show when={chat.composer.agentId === a.id}><Icon name="check" size={14} /></Show>
+                    <Show when={chat.composer.agentId === a.id || chat.fanOut.includes(a.id)}><Icon name="check" size={14} /></Show>
                   </MenuItem>
                 )}
               </For>
+              <Show when={canFanOut()}>
+                <p class="agent-model-hint">Shift-click to start several agents on this prompt, each in its own worktree.</p>
+              </Show>
             </Menu>
             <button ref={modelAnchor} type="button" class="pill composer-model" onClick={toggleModelMenu} title="Model and effort" aria-label={`Model and effort: ${modelSummary() ?? (native() ? "CLI setting" : "Default")}`} aria-haspopup="menu" aria-expanded={modelMenu()}>
               <span class="picker-label">{modelSummary() ?? (native() ? "CLI setting" : "Default")}</span><Icon name="chevronDown" size={11} />
             </button>
             <Menu open={modelMenu()} onClose={() => setModelMenu(false)} anchorRef={modelAnchor} align="right" width={300}>
               <MenuLabel>Model</MenuLabel>
+              <Show when={(tuning()?.models.length ?? 0) > 8}>
+                <input class="ui-field" style={{ margin: "0 8px 6px", width: "calc(100% - 16px)" }} aria-label="Filter models" placeholder="Filter models" value={modelFilter()} onInput={(e) => setModelFilter(e.currentTarget.value)} />
+              </Show>
               <MenuItem onSelect={() => setComposer({ model: null })}>
                 <span style={{ flex: 1 }}>{native() ? "Use CLI setting" : "Default"}</span>
                 <Show when={!chat.composer.model}><Icon name="check" size={14} /></Show>
               </MenuItem>
-              <For each={tuning()?.models ?? []}>
+              <For each={mergeModelChoices(tuning()?.models ?? [], customModelsFor(chat.composer.agentId)).filter((m) => !modelFilter().trim() || `${m.label} ${m.id}`.toLowerCase().includes(modelFilter().trim().toLowerCase()))}>
                 {(m) => (
                   <MenuItem onSelect={() => setComposer({ model: m.id })}>
                     <span style={{ flex: 1 }}>{m.label}</span>
@@ -932,7 +1469,7 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                   </MenuItem>
                 )}
               </For>
-              <form class="agent-model-custom" onSubmit={(e) => { e.preventDefault(); setComposer({ model: customModel().trim() || null }); }}>
+              <form class="agent-model-custom" onSubmit={(e) => { e.preventDefault(); const id = customModel().trim(); if (id) addCustomModel(chat.composer.agentId, id); setComposer({ model: id || null }); }}>
                 <input class="ui-field" aria-label="Custom model ID" placeholder="Custom model ID" value={customModel()} onInput={(e) => setCustomModel(e.currentTarget.value)} />
                 <button type="submit" class="ui-btn ui-btn-outline">Use</button>
               </form>
@@ -967,9 +1504,9 @@ const Composer: Component<{ onOpenProjects?: () => void }> = (props) => {
                   <button
                     type="button"
                     class="send-btn"
-                    disabled={!hasText() || submitting() || permissionModeUpdating()}
-                    onClick={(e) => void send(e.ctrlKey || e.metaKey)}
-                    title={submitting() ? "Sending message" : running() ? "Queue follow-up (Enter) · Steer now (Ctrl+Enter)" : "Send (Enter)"}
+                    disabled={!hasText() || submitting() || permissionModeUpdating() || promptTooLong()}
+                    onClick={(e) => void send(e.ctrlKey || e.metaKey ? followUpBehavior() !== "steer" : followUpBehavior() === "steer")}
+                    title={promptTooLong() ? "Message is too long" : submitting() ? "Sending message" : running() ? `${followUpBehavior() === "steer" ? "Steer now" : "Queue follow-up"} (${sendShortcut() === "enter" ? "Enter" : "⌘/Ctrl+Enter"}) · ${followUpBehavior() === "steer" ? "Queue" : "Steer"} (${sendShortcut() === "enter" ? "⌘/Ctrl+Enter" : "⇧⌘/Ctrl+Enter"})` : sendShortcut() === "enter" ? "Send (Enter)" : "Send (⌘/Ctrl+Enter)"}
                     aria-label={submitting() ? "Sending message" : "Send"}
                   >
                     <Show when={submitting()} fallback={<Icon name="arrowUp" size={16} />}>

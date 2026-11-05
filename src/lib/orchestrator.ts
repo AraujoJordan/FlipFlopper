@@ -12,6 +12,7 @@ import {
 import { createWorktree, removeWorktree } from "./ipc";
 import { readLegacyJson, readPref, writePref } from "./appPrefs";
 import { toast } from "../components/ui";
+import { worktreePrefix } from "./settings";
 
 // The multi-agent flow canvas.
 //
@@ -266,7 +267,7 @@ function syncSessions() {
   if (project !== loadedProject) loadFlowsForProject(project);
   if (!project) return;
 
-  const sessions = chat.sessions.filter((s) => s.project_path === project && !s.archived);
+  const sessions = chat.sessions.filter((s) => s.project_path === project && !s.archived && !s.hidden);
   const byId = new Map(sessions.map((s) => [s.id, s]));
   const boundByStep = new Set(
     flow.nodes.filter((n) => n.prompt !== null && n.sessionId).map((n) => n.sessionId as string),
@@ -420,7 +421,7 @@ async function fireStep(nodeId: string, edgeId: string | null) {
   let worktree: FlowWorktree | undefined;
   try {
     if (node.worktree) {
-      const wt = await createWorktree(project.path, node.agentId);
+      const wt = await createWorktree(project.path, node.agentId, worktreePrefix());
       worktree = { path: wt.worktree_path, branch: wt.branch, sourceBranch: wt.source_branch };
     }
     const meta = await startSessionTurn({

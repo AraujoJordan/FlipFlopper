@@ -1,4 +1,5 @@
 import hljs from "highlight.js/lib/core";
+import { INLINE_MATH, renderMath } from "./math";
 import javascript from "highlight.js/lib/languages/javascript";
 import typescript from "highlight.js/lib/languages/typescript";
 import json from "highlight.js/lib/languages/json";
@@ -100,6 +101,32 @@ export function highlightCode(code: string, lang: string | null | undefined): st
   return escapeHtml(code);
 }
 
+/** Split highlighted HTML into lines, closing spans that cross a line break and re-opening them on the next. */
+export function splitHighlighted(html: string, endsWithNewline = false): string[] {
+  const lines: string[] = [];
+  const open: string[] = [];
+  let current = "";
+  for (const token of html.match(/<span[^>]*>|<\/span>|\n|[^<\n]+/g) ?? []) {
+    if (token === "\n") {
+      lines.push(current + "</span>".repeat(open.length));
+      current = open.join("");
+    } else {
+      if (token.startsWith("<span")) open.push(token);
+      else if (token === "</span>") open.pop();
+      current += token;
+    }
+  }
+  lines.push(current + "</span>".repeat(open.length));
+  // A trailing newline does not start another line.
+  if (endsWithNewline && lines.length > 1 && lines[lines.length - 1].replace(/<[^>]*>/g, "") === "") lines.pop();
+  return lines;
+}
+
+/** Syntax-highlight `code` and return one HTML string per line. */
+export function highlightLines(code: string, lang: string | null | undefined): string[] {
+  return splitHighlighted(highlightCode(code, lang), code.endsWith("\n"));
+}
+
 function safeHref(url: string): string | null {
   return /^(https?:\/\/|mailto:)/i.test(url) ? url : null;
 }
@@ -114,10 +141,18 @@ function filePath(value: string): string | null {
   return FILE_START.test(path) && !/[\\/]$/.test(path) && !path.includes("://") ? path : null;
 }
 
+/** `:line` of a `path:line[:col]` reference, if any. */
+function fileLine(value: string): number | null {
+  const match = /:(\d+)(?::\d+)?\.?$/.exec(value.replace(/&amp;/g, "&"));
+  const line = match ? Number(match[1]) : 0;
+  return line > 0 ? line : null;
+}
+
 const fileOpenModifier = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac") ? "Cmd" : "Ctrl";
 
-function fileLink(label: string, path: string): string {
-  return `<a href="#" data-file-path="${escapeHtml(path)}" title="${fileOpenModifier}-click to open in default app">${label}</a>`;
+function fileLink(label: string, path: string, line: number | null = null): string {
+  const at = line ? ` data-file-line="${line}"` : "";
+  return `<a href="#" data-file-path="${escapeHtml(path)}"${at} title="Click to preview · ${fileOpenModifier}-click to open in your editor">${label}</a>`;
 }
 
 function linkWebUrls(text: string, links: string[]): string {
@@ -127,6 +162,20 @@ function linkWebUrls(text: string, links: string[]): string {
   });
 }
 
+/** File references (`src/a.ts:42`, `./x`, `C:\\dir\\f`) in plain text, with their `:line`; used for terminal links. */
+export function findFileReferences(text: string): { start: number; end: number; path: string; line: number | null }[] {
+  const found: { start: number; end: number; path: string; line: number | null }[] = [];
+  const pattern = new RegExp(FILE_REF.source, "g");
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    const candidate = match[2].replace(/\.+$/, "");
+    const path = filePath(candidate);
+    if (!path) continue;
+    const start = match.index + match[1].length;
+    found.push({ start, end: start + candidate.length, path, line: fileLine(candidate) });
+  }
+  return found;
+}
+
 /** Link paths in already-escaped text. Generated links are held as tokens so
  * later Markdown formatting cannot change their attributes or labels. */
 function linkFileReferences(text: string, links: string[]): string {
@@ -134,7 +183,7 @@ function linkFileReferences(text: string, links: string[]): string {
     const label = candidate.replace(/\.+$/, "");
     const path = filePath(label);
     if (!path) return match;
-    links.push(fileLink(label, path));
+    links.push(fileLink(label, path, fileLine(label)));
     return `${before}\u0001${links.length - 1}\u0001${candidate.slice(label.length)}`;
   });
 }
@@ -148,14 +197,25 @@ export function renderPlainTextWithFileRefs(text: string): string {
 
 /** Inline spans. Code spans are lifted out first so their contents are never
  *  interpreted as emphasis or links. */
+let mathEnabled = true;
+/** Turn math rendering on or off (Settings → Appearance → Render math). */
+export function setMathRendering(enabled: boolean) { mathEnabled = enabled; }
+
 function renderInline(text: string): string {
   const codes: string[] = [];
   let out = text.replace(/`([^`\n]+)`/g, (_m, code: string) => {
     const path = filePath(escapeHtml(code));
     const label = `<code>${escapeHtml(code)}</code>`;
-    codes.push(path ? fileLink(label, path) : label);
+    codes.push(path ? fileLink(label, path, fileLine(escapeHtml(code))) : label);
     return `\u0000${codes.length - 1}\u0000`;
   });
+  // Math is lifted out before escaping and emphasis, so `_`, `*` and `<` inside formulas survive.
+  if (mathEnabled) {
+    out = out.replace(INLINE_MATH, (_m, parens: string | undefined, dollars: string | undefined) => {
+      codes.push(renderMath(parens ?? dollars ?? "", false));
+      return `\u0000${codes.length - 1}\u0000`;
+    });
+  }
   const links: string[] = [];
   out = escapeHtml(out)
     .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, label: string, url: string) => {
@@ -163,7 +223,7 @@ function renderInline(text: string): string {
       const href = safeHref(decoded);
       const path = href ? null : filePath(url);
       if (!href && !path) return m;
-      links.push(href ? `<a href="${escapeHtml(href)}" data-md-link>${label}</a>` : fileLink(label, path!));
+      links.push(href ? `<a href="${escapeHtml(href)}" data-md-link>${label}</a>` : fileLink(label, path!, fileLine(url)));
       return `\u0001${links.length - 1}\u0001`;
     });
   out = linkWebUrls(out, links);
@@ -202,6 +262,21 @@ function renderBlocks(src: string): string {
       continue;
     }
 
+    // Display math: `$$ … $$` or `\[ … \]`, on one line or spanning several.
+    const display = mathEnabled ? /^\s*(\$\$|\\\[)(.*)$/.exec(line) : null;
+    if (display) {
+      const close = display[1] === "$$" ? "$$" : "\\]";
+      let body = display[2];
+      let j = i;
+      while (!body.includes(close) && j + 1 < lines.length && j - i < 60) { j += 1; body += `\n${lines[j]}`; }
+      const end = body.indexOf(close);
+      if (end >= 0 && body.slice(end + close.length).trim() === "") {
+        html.push(`<div class="md-math-block">${renderMath(body.slice(0, end), true)}</div>`);
+        i = j + 1;
+        continue;
+      }
+    }
+
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       const level = heading[1].length;
@@ -222,7 +297,13 @@ function renderBlocks(src: string): string {
         quote.push(lines[i].replace(/^\s*>\s?/, ""));
         i += 1;
       }
-      html.push(`<blockquote>${renderBlocks(quote.join("\n"))}</blockquote>`);
+      const alert = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/i.exec(quote[0] ?? "");
+      if (alert) {
+        const kind = alert[1].toLowerCase();
+        html.push(`<div class="md-alert md-alert-${kind}" role="note"><div class="md-alert-title">${kind[0].toUpperCase()}${kind.slice(1)}</div>${renderBlocks(quote.slice(1).join("\n"))}</div>`);
+      } else {
+        html.push(`<blockquote>${renderBlocks(quote.join("\n"))}</blockquote>`);
+      }
       continue;
     }
 
@@ -236,7 +317,8 @@ function renderBlocks(src: string): string {
       }
       html.push(
         `<div class="md-table"><table><thead><tr>${head.map((c) => `<th>${renderInline(c)}</th>`).join("")}</tr></thead>` +
-          `<tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${renderInline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`,
+          `<tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${renderInline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>` +
+          `<button type="button" class="md-table-copy" data-md-copy-table>Copy table</button></div>`,
       );
       continue;
     }
@@ -295,6 +377,46 @@ function renderBlocks(src: string): string {
 
 /** Markdown → HTML. Fenced code blocks are highlighted; an unterminated fence
  *  (a message still streaming) renders as code too. */
+/** A fence carrying a whole page (not a snippet) can render as an inline visual reply. */
+function looksLikePage(source: string): boolean {
+  return /<!doctype\s+html|<\/html\s*>/i.test(source);
+}
+
+/** Read the page source carried on a visual-reply placeholder; JSON keeps quotes and markup safe in the attribute. */
+export function visualSourceOf(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "string" && parsed.trim() ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read a Mermaid fence carried on a diagram placeholder. */
+export function mermaidSourceOf(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "string" && parsed.trim() ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Policy for previews of agent-written HTML: scripts and inline styles run, nothing loads from the network. */
+export const PREVIEW_CSP = "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'";
+
+/** A standalone document for the sandboxed preview frame: our CSP and theme come first, the agent's HTML after. */
+export function buildPreviewDocument(source: string, scheme: "light" | "dark"): string {
+  const dark = scheme === "dark";
+  const head = `<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}"><meta name="color-scheme" content="${scheme}">` +
+    `<style>:root{color-scheme:${scheme}}html{background:${dark ? "#16181d" : "#ffffff"};color:${dark ? "#e6e8ee" : "#1c1e24"};font:14px/1.5 system-ui,sans-serif}body{margin:12px}</style>`;
+  if (/<head[\s>]/i.test(source)) return source.replace(/<head([^>]*)>/i, `<head$1>${head}`);
+  if (/<html[\s>]/i.test(source)) return source.replace(/<html([^>]*)>/i, `<html$1><head>${head}</head>`);
+  return `<!doctype html><html><head>${head}</head><body>${source}</body></html>`;
+}
+
 export function renderMarkdownLite(text: string): string {
   const parts: string[] = [];
   // `(?![\s\S])` is end-of-input: with the `m` flag a bare `$` would match at every line end.
@@ -305,9 +427,35 @@ export function renderMarkdownLite(text: string): string {
     parts.push(renderBlocks(text.slice(last, m.index)));
     const lang = m[1] || undefined;
     const code = m[2];
+    if (mathEnabled && lang && /^(math|latex|tex)$/i.test(lang)) {
+      parts.push(`<div class="md-math-block">${renderMath(code, true)}</div>`);
+      last = m.index + m[0].length;
+      if (m[0].length === 0) fence.lastIndex += 1;
+      continue;
+    }
+    const preview = lang && /^html?$/i.test(lang) ? `<button type="button" data-md-html-preview>Preview</button>` : "";
+    const runnable = lang && /^(bash|sh|shell|zsh|fish|console|terminal|powershell|ps1|cmd|bat)$/i.test(lang)
+      ? `<button type="button" data-md-run>Run</button>`
+      : "";
+    if (lang && /^mermaid$/i.test(lang)) {
+      parts.push(
+        `<div class="md-mermaid-card" data-md-mermaid="${escapeHtml(JSON.stringify(code))}">` +
+          `<div class="md-mermaid-body" aria-busy="true"></div>` +
+          `<div class="md-mermaid-actions"><span>mermaid</span><button type="button" data-md-mermaid-copy>Copy source</button></div>` +
+        `</div>`,
+      );
+      last = m.index + m[0].length;
+      if (m[0].length === 0) fence.lastIndex += 1;
+      continue;
+    }
+    // A full page answers visually first, with its source kept below for reference.
+    const visual = lang && /^html?$/i.test(lang) && looksLikePage(code)
+      ? `<div class="md-visual" data-md-visual="${escapeHtml(JSON.stringify(code))}"></div>`
+      : "";
     parts.push(
+      visual +
       `<div class="md-code"><div class="md-code-head"><span>${escapeHtml(lang ?? "text")}</span>` +
-        `<button type="button" data-md-copy>Copy</button></div>` +
+        `${preview}${runnable}<button type="button" data-md-copy>Copy</button></div>` +
         `<pre><code class="hljs">${highlightCode(code, lang)}</code></pre></div>`,
     );
     last = m.index + m[0].length;

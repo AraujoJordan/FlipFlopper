@@ -7,7 +7,7 @@ import {
 } from "../../lib/store";
 import { submitPrompt } from "../../lib/chat";
 import {
-  gitStage, gitUnstage, gitDiscard, gitCommit, gitStashPush, gitStashPop, getGitLog,
+  gitStage, gitUnstage, gitDiscard, gitCommit, gitStashPush, gitStashPop, getGitLog, generateGitText,
   type StatusEntry, type SyncStatus, triggerHaptic,
 } from "../../lib/ipc";
 import {
@@ -16,7 +16,8 @@ import {
 } from "../ui";
 import { writeClipboardText } from "../../lib/native";
 import { isProtectedBranch } from "../../lib/constants";
-import { isMediaFile } from "../../lib/diffModel";
+import { fileTreeRows, isMediaFile } from "../../lib/diffModel";
+import { gitWritingInstructions } from "../../lib/settings";
 
 const iconBtnStyle = {
   display: "flex", "align-items": "center", "justify-content": "center",
@@ -30,7 +31,28 @@ function basename(path: string): string {
 const isStaged = (e: StatusEntry) => e.index_status !== " " && e.index_status !== "?";
 const isUnstaged = (e: StatusEntry) => e.worktree_status !== " ";
 
-const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> = (props) => {
+const [treeView, setTreeView] = createSignal(false);
+const [collapsedDirs, setCollapsedDirs] = createSignal<ReadonlySet<string>>(new Set());
+
+/** A group's files, flat or grouped by folder (folders collapse). */
+const FileRows: Component<{ group: "staged" | "unstaged"; list: StatusEntry[] }> = (props) => (
+  <Show when={treeView()} fallback={<For each={props.list}>{(entry) => <FileRow entry={entry} group={props.group} />}</For>}>
+    <For each={fileTreeRows(props.list.map((e) => e.path), (dir) => collapsedDirs().has(`${props.group}:${dir}`))}>
+      {(row) => row.kind === "file"
+        ? <Show when={props.list.find((e) => e.path === row.path)}>{(entry) => <FileRow entry={entry()} group={props.group} indent={row.depth} />}</Show>
+        : (
+          <button type="button" class="git-row press" aria-expanded={!collapsedDirs().has(`${props.group}:${row.path}`)}
+            onClick={() => setCollapsedDirs((set) => { const next = new Set(set); const key = `${props.group}:${row.path}`; if (!next.delete(key)) next.add(key); return next; })}
+            style={{ display: "flex", "align-items": "center", gap: "6px", padding: `3px 12px 3px ${12 + row.depth * 14}px`, width: "100%", color: "var(--fg-muted)", "font-size": "12px", cursor: "pointer" }}>
+            <Icon name="chevronRight" size={11} style={{ transform: collapsedDirs().has(`${props.group}:${row.path}`) ? "none" : "rotate(90deg)", transition: "transform var(--dur-fast)" }} />
+            <Icon name="folder" size={13} /> {row.name}
+          </button>
+        )}
+    </For>
+  </Show>
+);
+
+const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged"; indent?: number }> = (props) => {
   const [removing, setRemoving] = createSignal(false);
   const [menuPos, setMenuPos] = createSignal<{ x: number; y: number } | null>(null);
   const isUntracked = () => props.entry.index_status === "?" && props.entry.worktree_status === "?";
@@ -136,7 +158,7 @@ const FileRow: Component<{ entry: StatusEntry; group: "staged" | "unstaged" }> =
         title={props.entry.path}
         style={{
           display: "flex", "align-items": "center", gap: "8px",
-          padding: "4px 12px", cursor: "pointer",
+          padding: `4px 12px 4px ${12 + (props.indent ?? 0) * 14}px`, cursor: "pointer",
         }}
       >
         <label
@@ -312,14 +334,14 @@ const ChangesTab: Component<{
   const [message, setMessage] = createSignal("");
   const [amend, setAmend] = createSignal(false);
   const [committing, setCommitting] = createSignal(false);
+  const [generating, setGenerating] = createSignal(false);
 
   const [stashOpen, setStashOpen] = createSignal(false);
   const [stashMsg, setStashMsg] = createSignal("");
   const [stashBusy, setStashBusy] = createSignal(false);
   const [commitFlash, setCommitFlash] = createSignal(false);
 
-  async function stageAll() {
-    if (!store.currentProject || unstaged().length === 0) return;
+  async function stageAll() {    if (!store.currentProject || unstaged().length === 0) return;
     void triggerHaptic("generic");
     try {
       await gitStage(effectiveRoot()!, unstaged().map((e) => e.path));
@@ -403,6 +425,21 @@ const ChangesTab: Component<{
       toast(`Commit failed: ${String(e)}`, "error");
     } finally {
       setCommitting(false);
+    }
+  }
+
+  async function generateCommitMessage() {
+    const root = effectiveRoot();
+    if (!root || generating()) return;
+    setGenerating(true);
+    void triggerHaptic("generic");
+    try {
+      const text = await generateGitText("commit", root, gitWritingInstructions());
+      setMessage(text.trim().split("\n").map((line) => line.trim()).filter(Boolean)[0] ?? text.trim());
+    } catch (error) {
+      toast(`Couldn't draft a commit message: ${String(error)}`, "error");
+    } finally {
+      setGenerating(false);
     }
   }
 
@@ -521,6 +558,16 @@ const ChangesTab: Component<{
             </button>
             <button
               type="button"
+              class="diff-quick-chip press"
+              classList={{ "diff-quick-chip-on": treeView() }}
+              onclick={() => setTreeView((v) => !v)}
+              title="Group changed files by folder"
+              style={{ padding: "1px 6px", "font-size": "10.5px" }}
+            >
+              Tree
+            </button>
+            <button
+              type="button"
               class="link-btn press"
               onclick={() => openReview(undefined, "Working changes")}
               style={{
@@ -535,12 +582,12 @@ const ChangesTab: Component<{
 
         <Show when={staged().length > 0}>
           <GroupHeader label="Staged" count={staged().length} actionLabel="Unstage all" actionIcon="remove" onAction={unstageAll} />
-          <For each={staged()}>{(entry) => <FileRow entry={entry} group="staged" />}</For>
+          <FileRows group="staged" list={staged()} />
         </Show>
 
         <Show when={unstaged().length > 0}>
           <GroupHeader label="Changes" count={unstaged().length} actionLabel="Stage all" actionIcon="plus" onAction={stageAll} />
-          <For each={unstaged()}>{(entry) => <FileRow entry={entry} group="unstaged" />}</For>
+          <FileRows group="unstaged" list={unstaged()} />
         </Show>
       </div>
 
@@ -630,6 +677,16 @@ const ChangesTab: Component<{
               transition: "background var(--dur-base) var(--ease-standard), border-color var(--dur-base) var(--ease-standard)",
             }} />
             Amend
+          </button>
+          <button
+            type="button"
+            class="press"
+            onclick={() => void generateCommitMessage()}
+            disabled={generating() || !store.currentProject}
+            title="Draft a commit message from the changes"
+            style={{ display: "flex", "align-items": "center", gap: "5px", "font-size": "11px", color: "var(--fg-subtle)", cursor: "pointer", opacity: generating() ? ".6" : "1" }}
+          >
+            <Show when={generating()} fallback={<><Icon name="sparkle" size={11} /> Generate</>}><Spinner size={10} /> Drafting…</Show>
           </button>
           <Button
             variant="solid" size="sm"
