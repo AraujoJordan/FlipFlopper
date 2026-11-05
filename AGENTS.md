@@ -372,11 +372,14 @@ Currently implemented:
   the palette): display name, a custom monogram (one or two letters plus a hue from the palette,
   stored in `layout.projectIcons` and used by the sidebar), pin/unpin, reveal or open the checkout,
   and remove-from-sidebar. The avatar otherwise uses the project's own launcher/app icon
-  (`project_icon.rs`: Android mipmaps, Apple `AppIcon.appiconset`/ICNS/single-layer Icon Composer
-  `.icon`, Tauri and Electron bundle icons, Flutter/Expo/React Native/KMP assets, Godot, browser
-  extensions and web favicons, with ICO/BMP frames converted to PNG), re-detected when the project
-  opens and from the dialog; an unreadable or missing icon falls back to the letter. A saved letter
-  or hue deliberately keeps the monogram. Names and icons never move the folder.
+  (`project_icon.rs`: Android mipmaps and adaptive VectorDrawable/XML icons, including shared
+  Gradle resource modules, Apple `AppIcon.appiconset`/ICNS/single-layer Icon Composer `.icon`,
+  Tauri and Electron bundle icons, Flutter/Expo/React Native/KMP assets, Godot, browser extensions
+  and web favicons, with ICO/BMP frames converted to PNG and generated SVGs embedded as data URLs),
+  re-detected when the project opens and from the dialog. Detection is stateless, so projects opened
+  by older builds get their icon after restarting. An unreadable or missing icon falls back to the
+  letter. A saved letter or hue deliberately keeps the monogram. Names and icons never move the
+  folder.
 - Command palette (⌘K): sessions by title, message-content search over all
   transcripts (`chat_search`), projects and actions. Prefix `>` lists commands
   only. **⌘P** opens the file picker (`search_prompt_files`) and **⌘⇧F** searches
@@ -547,9 +550,9 @@ Currently implemented:
 
 Known gaps / current quirks:
 
-- Project icons cover the common app shells above; Android vector-only adaptive icons (no raster
-  foreground), layered Icon Composer bundles, Unity player-icon settings and Linux `.desktop`/Windows
-  package manifests are not derived and fall back to the letter.
+- Project icons cover the common app shells above; layered Icon Composer bundles, Unity player-icon
+  settings and Linux `.desktop`/Windows package manifests are not derived and fall back to the
+  letter. Android VectorDrawable layers that use aapt gradients render only their solid paths.
 - The system-wide SnapShots shortcut still needs `tauri-plugin-global-shortcut`, a
   new crate that requires an explicit dependency decision. SnapShots otherwise run
   from the composer, `/snapshot` and the palette.
@@ -759,7 +762,8 @@ src-tauri/src/
   provider_limits.rs         Claude/Codex/Cursor account-window adapters
   project.rs                 read-only inspection, clone, opt-in local agent setup, recents,
                              skills, prompt file search
-  project_icon.rs            bounded launcher/app icon detection; ICO/ICNS/BMP extraction
+  project_icon.rs            bounded launcher/app icon detection; ICO/ICNS/BMP and
+                             Android VectorDrawable -> SVG rendering
   git.rs / review.rs         shell-based git ops; diff parser for DiffPane
   worktree.rs                isolated git worktrees (pure git plumbing)
   runner.rs                  run/validation target detection

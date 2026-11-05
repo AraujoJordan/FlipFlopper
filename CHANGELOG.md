@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.25.1 - 2026-11-05
+
+### Fixed
+
+- **Project icons on multi-module Android and KMP projects**:
+  - Launcher icon references are read from the application manifest tag, so XML declarations and custom icon names no longer fall back to the letter.
+  - Icons declared in shared resource modules resolve across Gradle modules; resource-only modules without their own manifest are included.
+  - Adaptive icons with empty or corrupt legacy PNGs, or with only VectorDrawable layers, are rendered to SVG on demand (colors, groups, strokes and raster layers).
+  - Nested app modules in monorepos are found, while test fixtures and benchmark apps are ignored.
+  - Existing projects need no re-adding: detection is stateless and runs again on the next app launch, so projects opened by older FlipFlopper versions get their icon after updating and restarting.
+
 ## 0.25.0 - 2026-11-05
 
 ### Added

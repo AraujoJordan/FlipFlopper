@@ -201,7 +201,7 @@ fn codex_probe_with_binary(binary: &str) -> Result<Value, String> {
         jsonrpc_line(&mut child, &serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {
-                "clientInfo": { "name": "FlipFlopper", "title": "FlipFlopper", "version": "0.25.0" },
+                "clientInfo": { "name": "FlipFlopper", "title": "FlipFlopper", "version": "0.25.1" },
                 "capabilities": { "experimentalApi": true, "optOutNotificationMethods": null }
             }
         }))?;

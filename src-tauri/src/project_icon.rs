@@ -11,11 +11,14 @@
 //! largest embedded PNG is extracted into the app data directory.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -131,6 +134,15 @@ struct Found {
     rel: String,
     payload: Payload,
     score: u32,
+}
+
+/// Android resources can resolve to a raster or to a generated SVG (adaptive
+/// icon / VectorDrawable). The source is the XML/image path for the settings hint.
+#[derive(Debug, Clone)]
+struct AndroidIcon {
+    source: PathBuf,
+    score: u32,
+    svg: Option<String>,
 }
 
 impl Found {
@@ -314,27 +326,37 @@ fn detect_flavor(scan: &Scan) -> Flavor {
 }
 
 fn has_mobile_hints(root: &Path) -> bool {
-    let names = read_dir_names(root);
-    names.iter().any(|name| {
-        matches!(
-            name.as_str(),
-            "gradlew"
-                | "settings.gradle"
-                | "settings.gradle.kts"
-                | "build.gradle"
-                | "build.gradle.kts"
-                | "pubspec.yaml"
-                | "Podfile"
-                | "Package.swift"
-                | "ios"
-                | "iosApp"
-                | "android"
-                | "androidApp"
-                | "composeApp"
-        ) || name.ends_with(".xcodeproj")
-            || name.ends_with(".xcworkspace")
-            || name.ends_with(".icon")
-    })
+    if mobile_hint_names(&read_dir_names(root)) {
+        return true;
+    }
+    // Monorepos of samples/apps keep their Gradle or Xcode projects one or two
+    // levels down. A bounded walk catches those without scanning build output.
+    !find_files(root, 2, mobile_hint_name).is_empty()
+}
+
+fn mobile_hint_names(names: &[String]) -> bool {
+    names.iter().any(|name| mobile_hint_name(name))
+}
+
+fn mobile_hint_name(name: &str) -> bool {
+    matches!(
+        name,
+        "gradlew"
+            | "settings.gradle"
+            | "settings.gradle.kts"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "pubspec.yaml"
+            | "Podfile"
+            | "Package.swift"
+            | "ios"
+            | "iosApp"
+            | "android"
+            | "androidApp"
+            | "composeApp"
+    ) || name.ends_with(".xcodeproj")
+        || name.ends_with(".xcworkspace")
+        || name.ends_with(".icon")
 }
 
 fn is_kmp(scan: &Scan) -> bool {
@@ -752,23 +774,53 @@ fn find_android(scan: &Scan, kind: &'static str, label: &'static str) -> Option<
     let mut manifests = direct_android_manifests(root);
     if scan.mobile_hints {
         for manifest in find_files(root, 7, |name| name == "AndroidManifest.xml") {
+            if is_test_fixture(root, &manifest) {
+                continue;
+            }
             if !manifests.contains(&manifest) {
                 manifests.push(manifest);
             }
         }
     }
-    let mut candidates = Vec::new();
-    let mut res_dirs_seen = Vec::new();
+    manifests.retain(|manifest| !is_test_fixture(root, manifest));
+    // Resource references are global across Gradle modules: an app manifest may
+    // point at a launcher icon declared in a shared/design module.
+    let mut res_dirs = Vec::new();
     for manifest in &manifests {
-        let res_dirs = android_res_dirs(manifest);
-        for dir in &res_dirs {
-            if !res_dirs_seen.contains(dir) {
-                res_dirs_seen.push(dir.clone());
+        for dir in android_res_dirs(manifest) {
+            if !res_dirs.contains(&dir) {
+                res_dirs.push(dir);
             }
         }
-        if let Some((path, score)) = android_icon_from_manifest(manifest, &res_dirs) {
-            let module_bonus = android_module_bonus(manifest);
-            candidates.push((path, score.saturating_add(module_bonus)));
+    }
+    // Shared resource-only modules may not ship a manifest of their own; collect
+    // their res directories too so a manifest reference can resolve across modules.
+    if scan.mobile_hints {
+        let mut discovered = Vec::new();
+        walk(root, 7, |path, _| {
+            if path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name == "res")
+                    .unwrap_or(false)
+                && is_source_set_res(root, path)
+                && !is_test_fixture(root, path)
+            {
+                discovered.push(path.to_path_buf());
+            }
+        });
+        for dir in discovered {
+            if !res_dirs.contains(&dir) {
+                res_dirs.push(dir);
+            }
+        }
+    }
+    let mut candidates = Vec::new();
+    for manifest in &manifests {
+        if let Some(mut icon) = android_icon_from_manifest(manifest, &res_dirs) {
+            icon.score = icon.score.saturating_add(android_module_bonus(manifest));
+            candidates.push(icon);
         }
     }
     if candidates.is_empty() {
@@ -780,15 +832,13 @@ fn find_android(scan: &Scan, kind: &'static str, label: &'static str) -> Option<
             "launcher_icon",
         ] {
             for res_type in ["mipmap", "drawable"] {
-                if let Some((path, score)) =
-                    android_reference_icon(&res_dirs_seen, res_type, name, 1)
-                {
-                    candidates.push((path, score));
+                if let Some(icon) = android_reference_icon(&res_dirs, res_type, name, 2) {
+                    candidates.push(icon);
                 }
             }
         }
     }
-    best_found(root, kind, label, candidates)
+    best_found_android(root, kind, label, candidates)
 }
 
 fn direct_android_manifests(root: &Path) -> Vec<PathBuf> {
@@ -827,6 +877,35 @@ fn direct_android_manifests(root: &Path) -> Vec<PathBuf> {
         }
     }
     paths
+}
+
+/// Test fixtures and benchmark apps often ship complete launcher resources;
+/// never let them stand in for the actual project.
+fn is_test_fixture(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .any(|component| {
+            let name = component.as_os_str().to_string_lossy();
+            matches!(
+                name.as_ref(),
+                "test"
+                    | "tests"
+                    | "androidTest"
+                    | "testFixtures"
+                    | "test-projects"
+                    | "test-integration"
+                    | "benchmark"
+                    | "benchmarks"
+            )
+        })
+}
+
+fn is_source_set_res(root: &Path, res: &Path) -> bool {
+    res.strip_prefix(root)
+        .unwrap_or(res)
+        .components()
+        .any(|component| component.as_os_str() == "src")
 }
 
 fn android_module_bonus(manifest: &Path) -> u32 {
@@ -877,11 +956,14 @@ fn android_res_dirs(manifest: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-fn android_icon_from_manifest(manifest: &Path, res_dirs: &[PathBuf]) -> Option<(PathBuf, u32)> {
+fn android_icon_from_manifest(manifest: &Path, res_dirs: &[PathBuf]) -> Option<AndroidIcon> {
     let text = read_text(manifest, MAX_TEXT_BYTES)?;
-    let mut best: Option<(PathBuf, u32)> = None;
+    // Parse the application tag only: scanning the whole document stops at the
+    // XML declaration/prolog and can match a commented-out icon.
+    let application = tag_named(&text, "application")?;
+    let mut best: Option<AndroidIcon> = None;
     for attr in ["android:icon", "android:roundIcon"] {
-        let Some(reference) = attr_value(&text, attr) else {
+        let Some(reference) = attr_value(application, attr) else {
             continue;
         };
         let Some((res_type, name)) = parse_android_resource(&reference) else {
@@ -890,7 +972,7 @@ fn android_icon_from_manifest(manifest: &Path, res_dirs: &[PathBuf]) -> Option<(
         if let Some(candidate) = android_reference_icon(res_dirs, &res_type, &name, 2) {
             if best
                 .as_ref()
-                .map(|(_, score)| candidate.1 > *score)
+                .map(|current| candidate.score > current.score)
                 .unwrap_or(true)
             {
                 best = Some(candidate);
@@ -920,20 +1002,58 @@ fn android_reference_icon(
     res_type: &str,
     name: &str,
     depth: u8,
-) -> Option<(PathBuf, u32)> {
-    if let Some(raster) = find_res_raster(res_dirs, res_type, name) {
-        return Some(raster);
+) -> Option<AndroidIcon> {
+    if let Some((source, score)) = find_res_raster(res_dirs, res_type, name) {
+        return Some(AndroidIcon {
+            source,
+            score,
+            svg: None,
+        });
     }
     if depth == 0 {
         return None;
     }
     let xml = find_res_xml(res_dirs, res_type, name)?;
-    let text = read_text(&xml, 512 * 1024)?;
+    let text = read_text(&xml, MAX_TEXT_BYTES)?;
+    if tag_named(&text, "adaptive-icon").is_some() {
+        if let Some(svg) = adaptive_icon_svg(&text, res_dirs) {
+            return Some(AndroidIcon {
+                source: xml.clone(),
+                score: 150,
+                svg: Some(svg),
+            });
+        }
+    }
+    if tag_named(&text, "vector").is_some() {
+        if let Some((body, width, height)) = vector_svg_body(&text, res_dirs) {
+            return Some(AndroidIcon {
+                source: xml.clone(),
+                score: 140,
+                svg: Some(svg_document(&body, width, height)),
+            });
+        }
+    }
+    if let Some(bitmap) = tag_named(&text, "bitmap") {
+        if let Some(src) = attr_value(bitmap, "android:src") {
+            if let Some((bitmap_type, bitmap_name)) = parse_android_resource(&src) {
+                return android_reference_icon(res_dirs, &bitmap_type, &bitmap_name, depth - 1)
+                    .map(|mut icon| {
+                        icon.score /= 2;
+                        icon
+                    });
+            }
+        }
+    }
+    // Older/adaptive XML: fall back to the foreground layer on its own.
     let foreground = tag_named(&text, "foreground")?;
     let drawable = attr_value(foreground, "android:drawable")?;
     let (foreground_type, foreground_name) = parse_android_resource(&drawable)?;
-    android_reference_icon(res_dirs, &foreground_type, &foreground_name, depth - 1)
-        .map(|(path, score)| (path, score / 2))
+    android_reference_icon(res_dirs, &foreground_type, &foreground_name, depth - 1).map(
+        |mut icon| {
+            icon.score /= 2;
+            icon
+        },
+    )
 }
 
 fn find_res_raster(res_dirs: &[PathBuf], res_type: &str, name: &str) -> Option<(PathBuf, u32)> {
@@ -962,7 +1082,7 @@ fn find_res_raster(res_dirs: &[PathBuf], res_type: &str, name: &str) -> Option<(
                 ("gif", 5),
             ] {
                 let file = path.join(format!("{name}.{ext}"));
-                if !file.is_file() {
+                if !file.is_file() || !raster_is_valid(&file) {
                     continue;
                 }
                 let score = density_score(dir_name)
@@ -1014,6 +1134,452 @@ fn find_res_xml(res_dirs: &[PathBuf], res_type: &str, name: &str) -> Option<Path
         }
     }
     best.map(|(path, _)| path)
+}
+
+fn raster_is_valid(path: &Path) -> bool {
+    let Some(extension) = ext_lower(path) else {
+        return false;
+    };
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 12];
+    let read = file.read(&mut header).unwrap_or(0);
+    match extension.as_str() {
+        "png" => read >= 8 && header.starts_with(PNG_SIGNATURE),
+        "webp" => read >= 12 && header.starts_with(b"RIFF") && &header[8..12] == b"WEBP".as_slice(),
+        "jpg" | "jpeg" => read >= 3 && header.starts_with(&[0xff, 0xd8, 0xff]),
+        "gif" => read >= 6 && (header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a")),
+        _ => false,
+    }
+}
+
+fn adaptive_icon_svg(text: &str, res_dirs: &[PathBuf]) -> Option<String> {
+    let foreground = tag_named(text, "foreground")?;
+    let foreground_svg = android_layer_svg(foreground, res_dirs, 108.0)?;
+    let background_svg = tag_named(text, "background")
+        .and_then(|tag| android_layer_svg(tag, res_dirs, 108.0))
+        .unwrap_or_else(|| "<rect width=\"108\" height=\"108\" fill=\"#00000000\"/>".to_string());
+    Some(svg_document(
+        &format!("{background_svg}{foreground_svg}"),
+        108.0,
+        108.0,
+    ))
+}
+
+fn android_layer_svg(tag: &str, res_dirs: &[PathBuf], size: f64) -> Option<String> {
+    let reference =
+        attr_value(tag, "android:drawable").or_else(|| attr_value(tag, "android:color"))?;
+    if let Some((color, alpha)) = android_color(res_dirs, &reference) {
+        let opacity = if alpha < 0.999 {
+            format!(" fill-opacity=\"{alpha}\"")
+        } else {
+            String::new()
+        };
+        return Some(format!(
+            "<rect width=\"{size}\" height=\"{size}\" fill=\"{color}\"{opacity}/>"
+        ));
+    }
+    let (res_type, name) = parse_android_resource(&reference)?;
+    if let Some((raster, _)) = find_res_raster(res_dirs, &res_type, &name) {
+        if let Some(uri) = raster_data_uri(&raster) {
+            return Some(format!(
+                "<image x=\"0\" y=\"0\" width=\"{size}\" height=\"{size}\" preserveAspectRatio=\"none\" href=\"{uri}\" xlink:href=\"{uri}\"/>"
+            ));
+        }
+    }
+    if let Some(xml) = find_res_xml(res_dirs, &res_type, &name) {
+        let text = read_text(&xml, MAX_TEXT_BYTES)?;
+        if tag_named(&text, "vector").is_some() {
+            if let Some((body, width, height)) = vector_svg_body(&text, res_dirs) {
+                if width > 0.0 && height > 0.0 {
+                    return Some(format!(
+                        "<g transform=\"scale({} {})\">{body}</g>",
+                        size / width,
+                        size / height
+                    ));
+                }
+            }
+        }
+        if let Some(bitmap) = tag_named(&text, "bitmap") {
+            if let Some(src) = attr_value(bitmap, "android:src") {
+                if let Some((bitmap_type, bitmap_name)) = parse_android_resource(&src) {
+                    if let Some((raster, _)) = find_res_raster(res_dirs, &bitmap_type, &bitmap_name)
+                    {
+                        if let Some(uri) = raster_data_uri(&raster) {
+                            return Some(format!(
+                                "<image x=\"0\" y=\"0\" width=\"{size}\" height=\"{size}\" preserveAspectRatio=\"none\" href=\"{uri}\" xlink:href=\"{uri}\"/>"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn raster_data_uri(path: &Path) -> Option<String> {
+    let mime = match ext_lower(path)?.as_str() {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        _ => return None,
+    };
+    let bytes = fs::read(path).ok()?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_ICON_BYTES {
+        return None;
+    }
+    Some(format!("data:{mime};base64,{}", BASE64.encode(bytes)))
+}
+
+fn android_color(res_dirs: &[PathBuf], value: &str) -> Option<(String, f32)> {
+    let value = value.trim();
+    if let Some(rest) = value.strip_prefix("@android:color/") {
+        return android_named_color(rest);
+    }
+    if let Some(rest) = value.strip_prefix("@color/") {
+        return resolve_color_resource(res_dirs, rest, 0);
+    }
+    parse_hex_color(value)
+}
+
+fn android_named_color(name: &str) -> Option<(String, f32)> {
+    parse_hex_color(match name {
+        "white" => "#ffffff",
+        "black" => "#000000",
+        "transparent" => "#00000000",
+        "holo_blue_light" => "#33b5e5",
+        "holo_green_light" => "#99cc00",
+        "holo_red_light" => "#ff4444",
+        "darker_gray" => "#aaaaaa",
+        _ => return None,
+    })
+}
+
+fn resolve_color_resource(res_dirs: &[PathBuf], name: &str, depth: u8) -> Option<(String, f32)> {
+    if depth > 3 {
+        return None;
+    }
+    for res in res_dirs {
+        let Ok(entries) = fs::read_dir(res) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let Some(dir_name) = dir.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !dir_name.starts_with("values") {
+                continue;
+            }
+            let Ok(files) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for file in files.filter_map(Result::ok) {
+                let path = file.path();
+                if ext_lower(&path).as_deref() != Some("xml") {
+                    continue;
+                }
+                let Some(text) = read_text(&path, 512 * 1024) else {
+                    continue;
+                };
+                let Some(value) = named_color_value(&text, name) else {
+                    continue;
+                };
+                if let Some(rest) = value.strip_prefix("@color/") {
+                    if let Some(color) = resolve_color_resource(res_dirs, rest, depth + 1) {
+                        return Some(color);
+                    }
+                } else if let Some(color) = android_color(res_dirs, &value) {
+                    return Some(color);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn named_color_value(text: &str, name: &str) -> Option<String> {
+    for tag in tags(text, "color") {
+        if attr_value(tag, "name").as_deref() != Some(name) {
+            continue;
+        }
+        let start = text.find(tag)? + tag.len();
+        let end = text[start..].find("</color>")?;
+        return Some(text[start..start + end].trim().to_string());
+    }
+    for tag in tags(text, "item") {
+        if attr_value(tag, "name").as_deref() != Some(name) {
+            continue;
+        }
+        if let Some(kind) = attr_value(tag, "type") {
+            if kind != "color" {
+                continue;
+            }
+        }
+        let start = text.find(tag)? + tag.len();
+        let end = text[start..].find("</item>")?;
+        return Some(text[start..start + end].trim().to_string());
+    }
+    None
+}
+
+fn parse_hex_color(value: &str) -> Option<(String, f32)> {
+    let hex = value.trim().strip_prefix('#')?;
+    if !hex.chars().all(|character| character.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |text: &str| u8::from_str_radix(text, 16).ok();
+    let expand = |character: char| character.to_digit(16).map(|value| (value * 17) as u8);
+    let (red, green, blue, alpha) = match hex.len() {
+        3 => {
+            let mut characters = hex.chars();
+            (
+                expand(characters.next()?)?,
+                expand(characters.next()?)?,
+                expand(characters.next()?)?,
+                255,
+            )
+        }
+        4 => {
+            let mut characters = hex.chars();
+            let alpha = expand(characters.next()?)?;
+            (
+                expand(characters.next()?)?,
+                expand(characters.next()?)?,
+                expand(characters.next()?)?,
+                alpha,
+            )
+        }
+        6 => (
+            channel(&hex[0..2])?,
+            channel(&hex[2..4])?,
+            channel(&hex[4..6])?,
+            255,
+        ),
+        8 => (
+            channel(&hex[2..4])?,
+            channel(&hex[4..6])?,
+            channel(&hex[6..8])?,
+            channel(&hex[0..2])?,
+        ),
+        _ => return None,
+    };
+    Some((
+        format!("#{red:02x}{green:02x}{blue:02x}"),
+        alpha as f32 / 255.0,
+    ))
+}
+
+fn vector_svg_body(text: &str, res_dirs: &[PathBuf]) -> Option<(String, f64, f64)> {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    let mut body = String::new();
+    let mut width = 24.0;
+    let mut height = 24.0;
+    let mut saw_vector = false;
+    let mut group_depth = 0usize;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) => match event.local_name().as_ref() {
+                b"vector" => {
+                    saw_vector = true;
+                    (width, height) = vector_viewport(&event);
+                }
+                b"group" => {
+                    let transform = group_transform(&event);
+                    if transform.is_empty() {
+                        body.push_str("<g>");
+                    } else {
+                        body.push_str(&format!("<g {transform}>"));
+                    }
+                    group_depth += 1;
+                }
+                b"path" => append_svg_path(&mut body, &event, res_dirs),
+                _ => {}
+            },
+            Ok(Event::Empty(event)) => match event.local_name().as_ref() {
+                b"vector" => {
+                    saw_vector = true;
+                    (width, height) = vector_viewport(&event);
+                }
+                b"path" => append_svg_path(&mut body, &event, res_dirs),
+                _ => {}
+            },
+            Ok(Event::End(event)) => {
+                if event.local_name().as_ref() == b"group" && group_depth > 0 {
+                    body.push_str("</g>");
+                    group_depth -= 1;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    while group_depth > 0 {
+        body.push_str("</g>");
+        group_depth -= 1;
+    }
+    if !saw_vector || body.is_empty() {
+        return None;
+    }
+    Some((body, width, height))
+}
+
+fn vector_viewport(event: &BytesStart) -> (f64, f64) {
+    let width = xml_attr(event, "viewportWidth")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(24.0);
+    let height = xml_attr(event, "viewportHeight")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(24.0);
+    (
+        if width > 0.0 { width } else { 24.0 },
+        if height > 0.0 { height } else { 24.0 },
+    )
+}
+
+fn group_transform(event: &BytesStart) -> String {
+    let translate_x = xml_attr(event, "translateX")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let translate_y = xml_attr(event, "translateY")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let scale_x = xml_attr(event, "scaleX")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(1.0);
+    let scale_y = xml_attr(event, "scaleY")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(1.0);
+    let rotation = xml_attr(event, "rotation")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let pivot_x = xml_attr(event, "pivotX")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let pivot_y = xml_attr(event, "pivotY")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    if translate_x == 0.0
+        && translate_y == 0.0
+        && scale_x == 1.0
+        && scale_y == 1.0
+        && rotation == 0.0
+        && pivot_x == 0.0
+        && pivot_y == 0.0
+    {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "translate({} {})",
+        translate_x + pivot_x,
+        translate_y + pivot_y
+    ));
+    if rotation != 0.0 {
+        parts.push(format!("rotate({rotation} {pivot_x} {pivot_y})"));
+    }
+    if scale_x != 1.0 || scale_y != 1.0 {
+        parts.push(format!("scale({scale_x} {scale_y})"));
+    }
+    if pivot_x != 0.0 || pivot_y != 0.0 {
+        parts.push(format!("translate({} {})", -pivot_x, -pivot_y));
+    }
+    format!("transform=\"{}\"", parts.join(" "))
+}
+
+fn append_svg_path(body: &mut String, event: &BytesStart, res_dirs: &[PathBuf]) {
+    let Some(path) = xml_attr(event, "pathData") else {
+        return;
+    };
+    let fill = xml_attr(event, "fillColor").and_then(|value| android_color(res_dirs, &value));
+    let stroke = xml_attr(event, "strokeColor").and_then(|value| android_color(res_dirs, &value));
+    if fill.is_none() && stroke.is_none() {
+        return;
+    }
+    let mut attributes = String::new();
+    if let Some((color, alpha)) = fill {
+        attributes.push_str(&format!(" fill=\"{color}\""));
+        let opacity = alpha
+            * xml_attr(event, "fillAlpha")
+                .and_then(|value| value.parse::<f32>().ok())
+                .unwrap_or(1.0);
+        if opacity < 0.999 {
+            attributes.push_str(&format!(" fill-opacity=\"{opacity}\""));
+        }
+    } else {
+        attributes.push_str(" fill=\"none\"");
+    }
+    if let Some((color, alpha)) = stroke {
+        attributes.push_str(&format!(" stroke=\"{color}\""));
+        let opacity = alpha
+            * xml_attr(event, "strokeAlpha")
+                .and_then(|value| value.parse::<f32>().ok())
+                .unwrap_or(1.0);
+        if opacity < 0.999 {
+            attributes.push_str(&format!(" stroke-opacity=\"{opacity}\""));
+        }
+        if let Some(width) =
+            xml_attr(event, "strokeWidth").and_then(|value| value.parse::<f32>().ok())
+        {
+            attributes.push_str(&format!(" stroke-width=\"{width}\""));
+        }
+        if let Some(cap) = xml_attr(event, "strokeLineCap") {
+            attributes.push_str(&format!(" stroke-linecap=\"{}\"", xml_escape(&cap)));
+        }
+        if let Some(join) = xml_attr(event, "strokeLineJoin") {
+            attributes.push_str(&format!(" stroke-linejoin=\"{}\"", xml_escape(&join)));
+        }
+    }
+    if let Some(fill_type) = xml_attr(event, "fillType") {
+        let rule = match fill_type.as_str() {
+            "evenOdd" => "evenodd",
+            "nonZero" => "nonzero",
+            _ => "",
+        };
+        if !rule.is_empty() {
+            attributes.push_str(&format!(" fill-rule=\"{rule}\""));
+        }
+    }
+    body.push_str(&format!("<path d=\"{}\"{attributes}/>", xml_escape(&path)));
+}
+
+fn xml_attr(event: &BytesStart, name: &str) -> Option<String> {
+    event
+        .attributes()
+        .with_checks(false)
+        .filter_map(Result::ok)
+        .find(|attribute| {
+            let key = attribute.key.as_ref();
+            key == name.as_bytes()
+                || key.rsplit(|byte| *byte == b':').next() == Some(name.as_bytes())
+        })
+        .and_then(|attribute| {
+            attribute
+                .unescape_value()
+                .ok()
+                .map(|value| value.into_owned())
+        })
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn svg_document(body: &str, width: f64, height: f64) -> String {
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 {width} {height}\" width=\"{width}\" height=\"{height}\">{body}</svg>"
+    )
 }
 
 fn density_score(dir_name: &str) -> u32 {
@@ -1376,10 +1942,39 @@ fn best_found(
     label: &'static str,
     candidates: Vec<(PathBuf, u32)>,
 ) -> Option<ProjectIconInfo> {
-    let mut found = candidates
+    let found = candidates
         .into_iter()
         .filter_map(|(path, score)| found_file(root, kind, label, &path, score))
         .collect::<Vec<_>>();
+    best_of(found)
+}
+
+fn best_found_android(
+    root: &Path,
+    kind: &'static str,
+    label: &'static str,
+    candidates: Vec<AndroidIcon>,
+) -> Option<ProjectIconInfo> {
+    let mut found = Vec::new();
+    for candidate in candidates {
+        if let Some(svg) = candidate.svg {
+            found.push(Found {
+                kind,
+                label,
+                source: candidate.source.clone(),
+                rel: relative(root, &candidate.source),
+                payload: Payload::Svg(svg.into_bytes()),
+                score: candidate.score,
+            });
+        } else if let Some(file) = found_file(root, kind, label, &candidate.source, candidate.score)
+        {
+            found.push(file);
+        }
+    }
+    best_of(found)
+}
+
+fn best_of(mut found: Vec<Found>) -> Option<ProjectIconInfo> {
     found.sort_by(|left, right| right.score.cmp(&left.score));
     for candidate in found {
         if let Some(info) = candidate.into_info() {
@@ -2121,6 +2716,200 @@ mod tests {
     }
 
     #[test]
+    fn android_test_fixtures_are_not_used_as_project_icons() {
+        let project = TempProject::new("android-test-fixture");
+        project.write("test-projects/Sample/gradlew", b"");
+        project.write(
+            "test-projects/Sample/app/src/main/AndroidManifest.xml",
+            br#"<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:icon="@mipmap/ic_launcher" />
+</manifest>"#,
+        );
+        project.write(
+            "test-projects/Sample/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+            &png(192, 192),
+        );
+
+        assert!(detect(project.path().to_str().unwrap()).unwrap().is_none());
+    }
+
+    #[test]
+    fn android_manifest_with_xml_declaration_uses_a_custom_icon() {
+        let project = TempProject::new("android-declaration");
+        project.write(
+            "app/src/main/AndroidManifest.xml",
+            br#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:icon="@mipmap/brand_icon" android:label="App" />
+</manifest>"#,
+        );
+        project.write(
+            "app/src/main/res/mipmap-xxxhdpi/brand_icon.png",
+            &png(192, 192),
+        );
+
+        let info = detect(project.path().to_str().unwrap())
+            .unwrap()
+            .expect("custom manifest icon");
+        assert!(info
+            .path
+            .as_deref()
+            .unwrap()
+            .ends_with("mipmap-xxxhdpi/brand_icon.png"));
+    }
+
+    #[test]
+    fn android_manifest_resolves_an_icon_from_a_shared_module() {
+        let project = TempProject::new("android-shared-icon");
+        project.write("settings.gradle.kts", b"include(\":app\", \":design\")\n");
+        project.write(
+            "app/src/main/AndroidManifest.xml",
+            br#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:icon="@mipmap/shared_icon" />
+</manifest>"#,
+        );
+        // No manifest in the design module: only its res directory is present.
+        project.write(
+            "design/src/main/res/mipmap-xxxhdpi/shared_icon.png",
+            &png(192, 192),
+        );
+
+        let info = detect(project.path().to_str().unwrap())
+            .unwrap()
+            .expect("shared module icon");
+        assert!(info
+            .path
+            .as_deref()
+            .unwrap()
+            .ends_with("design/src/main/res/mipmap-xxxhdpi/shared_icon.png"));
+    }
+
+    #[test]
+    fn android_adaptive_vector_icon_is_generated_when_rasters_are_empty() {
+        let project = TempProject::new("android-vector-icon");
+        project.write(
+            "app/src/main/AndroidManifest.xml",
+            br#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:icon="@mipmap/ic_launcher" />
+</manifest>"#,
+        );
+        project.write("app/src/main/res/mipmap-xxxhdpi/ic_launcher.png", b"");
+        project.write(
+            "app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml",
+            br#"<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/background" />
+    <foreground android:drawable="@drawable/foreground" />
+</adaptive-icon>"#,
+        );
+        project.write(
+            "app/src/main/res/drawable/background.xml",
+            br##"<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#3DDC84" android:pathData="M0,0h108v108h-108z" />
+</vector>"##,
+        );
+        project.write(
+            "app/src/main/res/drawable/foreground.xml",
+            br##"<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group android:scaleX="0.5" android:scaleY="0.5"
+        android:translateX="27" android:translateY="27">
+        <path android:fillColor="#FFFFFF" android:pathData="M0,0h108v108h-108z" />
+    </group>
+</vector>"##,
+        );
+
+        let info = detect(project.path().to_str().unwrap())
+            .unwrap()
+            .expect("vector icon");
+        assert!(info.path.is_none());
+        let data_url = info.data_url.expect("svg data URL");
+        assert!(data_url.starts_with("data:image/svg+xml;base64,"));
+        let encoded = data_url.split(',').nth(1).unwrap();
+        let svg = String::from_utf8(BASE64.decode(encoded).unwrap()).unwrap();
+        assert!(svg.contains("#3ddc84"));
+        assert!(svg.contains("#ffffff"));
+        assert!(svg.contains("transform="));
+        let mut reader = Reader::from_str(&svg);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Eof) => break,
+                Ok(_) => {}
+                Err(error) => panic!("invalid generated SVG: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn android_adaptive_color_background_is_resolved() {
+        let project = TempProject::new("android-vector-color");
+        project.write(
+            "app/src/main/AndroidManifest.xml",
+            br#"<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:icon="@mipmap/ic_launcher" />
+</manifest>"#,
+        );
+        project.write("app/src/main/res/mipmap-xxxhdpi/ic_launcher.png", b"");
+        project.write(
+            "app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml",
+            br#"<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/foreground" />
+</adaptive-icon>"#,
+        );
+        project.write(
+            "app/src/main/res/values/colors.xml",
+            br##"<resources><color name="ic_launcher_background">#3DDC84</color></resources>"##,
+        );
+        project.write(
+            "app/src/main/res/drawable/foreground.xml",
+            br##"<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:pathData="M0,0h108v108h-108z" />
+</vector>"##,
+        );
+
+        let info = detect(project.path().to_str().unwrap())
+            .unwrap()
+            .expect("color background icon");
+        let data_url = info.data_url.expect("svg data URL");
+        let svg =
+            String::from_utf8(BASE64.decode(data_url.split(',').nth(1).unwrap()).unwrap()).unwrap();
+        assert!(svg.contains("fill=\"#3ddc84\""));
+    }
+
+    #[test]
+    fn nested_app_module_is_detected_in_a_monorepo() {
+        let project = TempProject::new("android-monorepo");
+        project.write("samples/Sample/gradlew", b"");
+        project.write(
+            "samples/Sample/app/src/main/AndroidManifest.xml",
+            br#"<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:icon="@mipmap/ic_launcher" />
+</manifest>"#,
+        );
+        project.write(
+            "samples/Sample/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+            &png(192, 192),
+        );
+
+        let info = detect(project.path().to_str().unwrap())
+            .unwrap()
+            .expect("nested app icon");
+        assert!(info
+            .path
+            .as_deref()
+            .unwrap()
+            .ends_with("res/mipmap-xxxhdpi/ic_launcher.png"));
+    }
+
+    #[test]
     fn android_manifest_icon_uses_the_highest_density_raster() {
         let project = TempProject::new("android");
         project.write(
@@ -2149,7 +2938,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_icon_falls_back_to_the_foreground_raster() {
+    fn adaptive_icon_embeds_the_foreground_raster() {
         let project = TempProject::new("android-adaptive");
         project.write(
             "app/src/main/AndroidManifest.xml",
@@ -2167,11 +2956,13 @@ mod tests {
         let info = detect(project.path().to_str().unwrap())
             .unwrap()
             .expect("adaptive icon");
-        assert!(info
-            .path
-            .as_deref()
-            .unwrap()
-            .ends_with("mipmap-xxhdpi/ic_launcher_foreground.png"));
+        assert!(info.path.is_none());
+        let data_url = info.data_url.expect("adaptive SVG");
+        assert!(data_url.starts_with("data:image/svg+xml;base64,"));
+        let svg =
+            String::from_utf8(BASE64.decode(data_url.split(',').nth(1).unwrap()).unwrap()).unwrap();
+        assert!(svg.contains("<image"));
+        assert!(svg.contains("data:image/png;base64,"));
     }
 
     #[test]

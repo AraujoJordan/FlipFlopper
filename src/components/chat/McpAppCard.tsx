@@ -70,7 +70,7 @@ const McpAppCard: Component<{ app: McpAppData; block: ToolBlock }> = (props) => 
       initialized = true;
       respond(id, {
         protocolVersion: "2026-01-26",
-        hostInfo: { name: "FlipFlopper", version: "0.25.0" },
+        hostInfo: { name: "FlipFlopper", version: "0.25.1" },
         hostCapabilities: {
           openLinks: {}, serverTools: {}, serverResources: {}, logging: {},
           message: { text: {} }, updateModelContext: { text: {}, structuredContent: {} },

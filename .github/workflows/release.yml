@@ -115,22 +115,18 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            FlipFlopper 0.25.0 adds project-aware icons and a faster startup.
+            FlipFlopper 0.25.1 fixes project icons for multi-module Android and KMP
+            projects.
 
-            - Project icons: sidebar avatars now use the project's own launcher/app
-              icon (Android, Apple, Tauri, Electron, Flutter, Expo, React Native,
-              Kotlin Multiplatform, Godot, browser/VS Code extensions and web
-              favicons), with ICO/ICNS decoding, BMP-in-ICO conversion, Project
-              Settings source details and Re-detect. Custom letters/colors still
-              win, and anything unreadable falls back to the letter badge.
-            - Faster startup: theme-correct first paint, lazy-loaded terminal/side
-              pane/palette and syntax highlighting, deferred background probes, and
-              a cached tool catalog with per-CLI version timeouts.
-            - Layout polish: the terminal lives in the bottom drawer, the thread
-              status line only appears while active, and finished turns show their
-              duration.
-            - Performance tooling: scripts/perf.mjs, startup benchmarks, FF_PERF
-              marks and docs/perf.md.
+            - Launcher icon attributes are read from the application manifest,
+              including custom icon names and XML declarations.
+            - Shared-module resources resolve across Gradle modules. Adaptive icons
+              with empty/corrupt legacy PNGs or VectorDrawable-only layers are
+              rendered to SVG on demand.
+            - Nested app modules in monorepos are detected, while test fixtures and
+              benchmark apps are ignored.
+            - Existing projects need no re-adding: icons are detected again when
+              FlipFlopper restarts.
 
             Installers include the pinned Node sidecar and Claude ACP helper. Native
             Claude requires macOS 13.5+ on a Mac.
