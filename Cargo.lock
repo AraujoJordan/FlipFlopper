@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "flipflopper"
-version = "0.25.1"
+version = "0.25.2"
 dependencies = [
  "agent-client-protocol",
  "async-process",

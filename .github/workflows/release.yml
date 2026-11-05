@@ -115,18 +115,25 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "FlipFlopper ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            FlipFlopper 0.25.1 fixes project icons for multi-module Android and KMP
-            projects.
+            FlipFlopper 0.25.2 makes switching between Chat and the interactive CLI
+            seamless, and fixes URL pastes in the prompt field.
 
-            - Launcher icon attributes are read from the application manifest,
-              including custom icon names and XML declarations.
-            - Shared-module resources resolve across Gradle modules. Adaptive icons
-              with empty/corrupt legacy PNGs or VectorDrawable-only layers are
-              rendered to SVG on demand.
-            - Nested app modules in monorepos are detected, while test fixtures and
-              benchmark apps are ignored.
-            - Existing projects need no re-adding: icons are detected again when
-              FlipFlopper restarts.
+            - Switching to Chat imports new CLI activity without ending the CLI.
+              The native interface keeps its process, scrollback and session, and
+              the transcript is populated instead of starting empty.
+            - The Chat composer stays available while the CLI runs. Sending from
+              Chat ends the CLI, imports the rest of its history and continues the
+              same conversation in Chat. Ending or exiting the CLI returns to Chat.
+            - Opening a session with a running CLI imports its history first, and
+              new-session CLI launches honor the latest Chat/CLI choice without
+              spawning a duplicate session.
+            - Live imports advance Claude/Codex checkpoints only after a stable
+              write, so switching during a turn retries instead of skipping it.
+            - Pasted URLs and absolute paths stay whole in the rich composer: no
+              slash-command chips or accidental Markdown emphasis, with sentence
+              punctuation kept outside the URL.
+            - The focused rich composer now owns printable keys, Escape and editing
+              shortcuts instead of letting app-wide shortcuts intercept them.
 
             Installers include the pinned Node sidecar and Claude ACP helper. Native
             Claude requires macOS 13.5+ on a Mac.

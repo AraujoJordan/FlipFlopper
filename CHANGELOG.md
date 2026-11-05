@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.25.2 - 2026-11-05
+
+### Fixed
+
+- **Seamless Chat/CLI switching**:
+  - Switching to Chat imports new CLI activity without ending the CLI, so the transcript is no longer empty while the native interface keeps running with its scrollback and session intact.
+  - The Chat composer stays available while the CLI runs. Sending from Chat ends the CLI, imports the remainder of its history, and continues the same conversation in Chat; ending or exiting the CLI returns to Chat.
+  - Opening a session whose CLI is still running imports its history first, and new-session CLI launches now respect the latest Chat/CLI choice instead of ignoring a later Chat click or spawning a duplicate session.
+  - Live imports advance append-only Claude/Codex checkpoints only after the history file is stable, so switching during a write retries rather than skipping a turn. Stale ACP bindings are dropped when the CLI moves the native session forward.
+- **Pasted URLs in the rich composer**:
+  - Pasted URLs and absolute paths stay whole instead of rendering as a chain of slash-command chips.
+  - Underscores and emphasis markers inside URLs are no longer interpreted as Markdown, and trailing sentence punctuation stays outside the URL.
+- **Shortcuts in the rich composer**:
+  - The focused contenteditable composer now owns printable keys, Escape, and editing shortcuts instead of letting app-wide shortcuts intercept them.
+
+### Changed
+
+- Added `chat_sync_terminal` for importing CLI history on demand; switching views no longer requires ending the CLI first.
+
 ## 0.25.1 - 2026-11-05
 
 ### Fixed
